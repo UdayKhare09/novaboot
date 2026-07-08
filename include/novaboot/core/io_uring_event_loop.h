@@ -86,6 +86,7 @@ private:
 
     // ─── Ring state ──────────────────────────────────────────────────
     struct io_uring ring_{};
+    int wakeup_fd_ = -1;
     bool ring_initialized_ = false;
     bool running_          = false;
     TimePoint cached_now_;

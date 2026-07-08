@@ -75,6 +75,7 @@ private:
     void process_events(int timeout_ms);
 
     int epoll_fd_ = -1;
+    int wakeup_fd_ = -1;
     bool running_ = false;
     TimePoint cached_now_;
 

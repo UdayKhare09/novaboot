@@ -7,6 +7,8 @@
 #include <stdexcept>
 #include <system_error>
 #include <netinet/udp.h>
+#include <sys/eventfd.h>
+#include <unistd.h>
 
 #include <spdlog/spdlog.h>
 
@@ -99,12 +101,27 @@ IoUringEventLoop::IoUringEventLoop() {
         free_send_indices_.push_back(static_cast<int>(i));
     }
 
+    wakeup_fd_ = ::eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+    if (wakeup_fd_ < 0) {
+        io_uring_queue_exit(&ring_);
+        throw std::system_error(
+            errno, std::system_category(), "eventfd creation failed");
+    }
+
+    add_fd(wakeup_fd_, EventFlags::Readable, [this](std::uint32_t) {
+        std::uint64_t val;
+        [[maybe_unused]] auto n = ::read(wakeup_fd_, &val, sizeof(val));
+    });
+
     spdlog::debug("io_uring initialized (sq_entries={}, cq_entries={}, "
                   "features=0x{:08x})",
                   params.sq_entries, params.cq_entries, params.features);
 }
 
 IoUringEventLoop::~IoUringEventLoop() {
+    if (wakeup_fd_ >= 0) {
+        ::close(wakeup_fd_);
+    }
     if (ring_initialized_) {
         io_uring_queue_exit(&ring_);
     }
@@ -227,13 +244,9 @@ void IoUringEventLoop::run_once() {
 
 void IoUringEventLoop::stop() {
     running_ = false;
-
-    // Submit a NOP to wake up the ring if it's blocked in submit_and_wait
-    auto* sqe = io_uring_get_sqe(&ring_);
-    if (sqe) {
-        io_uring_prep_nop(sqe);
-        io_uring_sqe_set_data64(sqe, 0); // sentinel — ignored in process_cqe
-        io_uring_submit(&ring_);
+    if (wakeup_fd_ >= 0) {
+        std::uint64_t val = 1;
+        [[maybe_unused]] auto n = ::write(wakeup_fd_, &val, sizeof(val));
     }
 }
 

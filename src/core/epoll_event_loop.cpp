@@ -6,6 +6,7 @@
 #include <system_error>
 
 #include <sys/epoll.h>
+#include <sys/eventfd.h>
 #include <unistd.h>
 
 #include <spdlog/spdlog.h>
@@ -23,9 +24,24 @@ EpollEventLoop::EpollEventLoop() {
     }
     cached_now_ = Clock::now();
     recv_buf_.resize(net::kMaxPacketSize);
+
+    wakeup_fd_ = ::eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+    if (wakeup_fd_ < 0) {
+        ::close(epoll_fd_);
+        throw std::system_error(
+            errno, std::system_category(), "eventfd creation failed");
+    }
+
+    add_fd(wakeup_fd_, EventFlags::Readable, [this](std::uint32_t) {
+        std::uint64_t val;
+        [[maybe_unused]] auto n = ::read(wakeup_fd_, &val, sizeof(val));
+    });
 }
 
 EpollEventLoop::~EpollEventLoop() {
+    if (wakeup_fd_ >= 0) {
+        ::close(wakeup_fd_);
+    }
     if (epoll_fd_ >= 0) {
         ::close(epoll_fd_);
     }
@@ -110,6 +126,10 @@ void EpollEventLoop::run_once() {
 
 void EpollEventLoop::stop() {
     running_ = false;
+    if (wakeup_fd_ >= 0) {
+        std::uint64_t val = 1;
+        [[maybe_unused]] auto n = ::write(wakeup_fd_, &val, sizeof(val));
+    }
 }
 
 bool EpollEventLoop::is_running() const noexcept {
