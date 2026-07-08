@@ -100,6 +100,11 @@ QuicConnection* ConnectionManager::accept_connection(
 
         auto* conn_ptr = conn.get();
 
+        conn_ptr->set_cid_callbacks(
+            [this](const ngtcp2_cid& cid, QuicConnection* c) { add_cid(cid, c); },
+            [this](const ngtcp2_cid& cid) { remove_cid(cid); }
+        );
+
         // Register the server's CID
         cid_map_[conn_ptr->scid()] = conn_ptr;
 

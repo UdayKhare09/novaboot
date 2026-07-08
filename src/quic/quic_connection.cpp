@@ -96,6 +96,7 @@ std::unique_ptr<QuicConnection> QuicConnection::create(
     callbacks.stream_close            = on_stream_close;
     callbacks.acked_stream_data_offset = on_acked_stream_data_offset;
     callbacks.get_new_connection_id   = on_get_new_connection_id;
+    callbacks.remove_connection_id    = on_remove_connection_id;
     callbacks.version_negotiation     = on_version_negotiation;
     callbacks.extend_max_stream_data  = on_extend_max_stream_data;
     callbacks.rand                    = on_rand;
@@ -464,11 +465,27 @@ int QuicConnection::handle_acked_stream_data(int64_t stream_id,
 int QuicConnection::on_get_new_connection_id(
     ngtcp2_conn* /*conn*/,
     ngtcp2_cid* cid, uint8_t* token,
-    size_t cidlen, void* /*user_data*/) {
+    size_t cidlen, void* user_data) {
+    auto* self = static_cast<QuicConnection*>(user_data);
 
     cid->datalen = cidlen;
     generate_random(cid->data, cidlen);
     generate_random(token, NGTCP2_STATELESS_RESET_TOKENLEN);
+
+    if (self && self->cid_map_cb_) {
+        self->cid_map_cb_(*cid, self);
+    }
+    return 0;
+}
+
+int QuicConnection::on_remove_connection_id(
+    ngtcp2_conn* /*conn*/,
+    const ngtcp2_cid* cid,
+    void* user_data) {
+    auto* self = static_cast<QuicConnection*>(user_data);
+    if (self && self->cid_unmap_cb_) {
+        self->cid_unmap_cb_(*cid);
+    }
     return 0;
 }
 

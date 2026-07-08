@@ -114,6 +114,14 @@ public:
         handshake_cb_ = std::move(cb);
     }
 
+    using CidMapCallback = std::function<void(const ngtcp2_cid&, QuicConnection*)>;
+    using CidUnmapCallback = std::function<void(const ngtcp2_cid&)>;
+
+    void set_cid_callbacks(CidMapCallback map_cb, CidUnmapCallback unmap_cb) {
+        cid_map_cb_ = std::move(map_cb);
+        cid_unmap_cb_ = std::move(unmap_cb);
+    }
+
 private:
     QuicConnection() = default;
 
@@ -146,6 +154,9 @@ private:
                                         uint8_t* token,
                                         size_t cidlen,
                                         void* user_data);
+    static int on_remove_connection_id(ngtcp2_conn* conn,
+                                       const ngtcp2_cid* cid,
+                                       void* user_data);
     static int on_version_negotiation(ngtcp2_conn* conn,
                                       uint32_t version,
                                       const ngtcp2_cid* client_dcid,
@@ -188,6 +199,8 @@ private:
     std::vector<std::uint8_t> pkt_buf_;
 
     std::function<void(QuicConnection&)> handshake_cb_;
+    CidMapCallback           cid_map_cb_;
+    CidUnmapCallback         cid_unmap_cb_;
     bool closed_ = false;
 };
 
