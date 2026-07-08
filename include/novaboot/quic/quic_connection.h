@@ -100,6 +100,9 @@ public:
     /// Check if the connection is closed
     [[nodiscard]] bool is_closed() const noexcept;
 
+    /// Close the connection
+    void close(uint64_t app_error_code = 0);
+
     /// Get the next expiry timestamp for this connection
     [[nodiscard]] ngtcp2_tstamp get_expiry() const noexcept;
 

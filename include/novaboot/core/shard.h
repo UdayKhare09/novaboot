@@ -76,6 +76,9 @@ private:
     /// Send a packet via the UDP socket
     void send_packet(const net::OutgoingPacket& packet);
 
+    /// Periodically cleanup connections
+    void schedule_cleanup();
+
     ShardConfig                   config_;
     const quic::TlsContext&       tls_ctx_;
     const router::Router&         router_;

@@ -1,4 +1,6 @@
+#include <cstdlib>
 #include <novaboot/novaboot.h>
+#include <spdlog/common.h>
 #include <spdlog/spdlog.h>
 
 /// Simple logging middleware that logs every request.
@@ -23,13 +25,13 @@ public:
 };
 
 int main() {
-    spdlog::set_level(spdlog::level::debug);
+    spdlog::set_level(spdlog::level::info);
 
     // Build the server
     auto app = novaboot::Server::create()
         .bind("0.0.0.0", 4433)
         .tls("cert.pem", "key.pem")
-        .workers(2)
+        .workers((int)std::thread::hardware_concurrency())
         .middleware(std::make_shared<LoggingMiddleware>())
         .build();
 

@@ -44,9 +44,8 @@ std::unique_ptr<Http3Session> Http3Session::create(
         session.get()); // user_data
 
     if (rv != 0) {
-        throw std::runtime_error(
-            std::format("nghttp3_conn_server_new failed: {}",
-                        nghttp3_strerror(rv)));
+        spdlog::error("nghttp3_conn_server_new failed: {}", nghttp3_strerror(rv));
+        return nullptr;
     }
 
     // Bind control and QPACK streams
@@ -58,27 +57,32 @@ std::unique_ptr<Http3Session> Http3Session::create(
 
     rv = ngtcp2_conn_open_uni_stream(quic_conn, &ctrl_stream_id, nullptr);
     if (rv != 0) {
-        throw std::runtime_error("Failed to open control stream");
+        spdlog::error("Failed to open control stream: {}", ngtcp2_strerror(rv));
+        return nullptr;
     }
     rv = nghttp3_conn_bind_control_stream(session->conn_, ctrl_stream_id);
     if (rv != 0) {
-        throw std::runtime_error("Failed to bind control stream");
+        spdlog::error("Failed to bind control stream: {}", nghttp3_strerror(rv));
+        return nullptr;
     }
 
     rv = ngtcp2_conn_open_uni_stream(quic_conn, &qenc_stream_id, nullptr);
     if (rv != 0) {
-        throw std::runtime_error("Failed to open QPACK encoder stream");
+        spdlog::error("Failed to open QPACK encoder stream: {}", ngtcp2_strerror(rv));
+        return nullptr;
     }
 
     rv = ngtcp2_conn_open_uni_stream(quic_conn, &qdec_stream_id, nullptr);
     if (rv != 0) {
-        throw std::runtime_error("Failed to open QPACK decoder stream");
+        spdlog::error("Failed to open QPACK decoder stream: {}", ngtcp2_strerror(rv));
+        return nullptr;
     }
 
     rv = nghttp3_conn_bind_qpack_streams(
         session->conn_, qenc_stream_id, qdec_stream_id);
     if (rv != 0) {
-        throw std::runtime_error("Failed to bind QPACK streams");
+        spdlog::error("Failed to bind QPACK streams: {}", nghttp3_strerror(rv));
+        return nullptr;
     }
 
     spdlog::debug("HTTP/3 session created (ctrl={}, qenc={}, qdec={})",

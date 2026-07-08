@@ -333,7 +333,36 @@ bool QuicConnection::is_draining() const noexcept {
 }
 
 bool QuicConnection::is_closed() const noexcept {
-    return closed_ || !conn_;
+    return closed_ || !conn_ || ngtcp2_conn_in_closing_period(conn_);
+}
+
+void QuicConnection::close(uint64_t app_error_code) {
+    if (closed_ || !conn_) return;
+
+    if (!ngtcp2_conn_in_closing_period(conn_) && !ngtcp2_conn_in_draining_period(conn_)) {
+        ngtcp2_path_storage ps;
+        ngtcp2_path_storage_zero(&ps);
+        ngtcp2_pkt_info pi;
+
+        ngtcp2_ccerr ccerr{};
+        ccerr.type = NGTCP2_CCERR_TYPE_APPLICATION;
+        ccerr.error_code = app_error_code;
+
+        ngtcp2_ssize nwrite = ngtcp2_conn_write_connection_close(
+            conn_, &ps.path, &pi,
+            pkt_buf_.data(), pkt_buf_.size(),
+            &ccerr, get_timestamp());
+
+        if (nwrite > 0) {
+            net::OutgoingPacket out;
+            out.data   = pkt_buf_.data();
+            out.size   = static_cast<std::size_t>(nwrite);
+            out.remote = remote_addr_;
+            out.local  = local_addr_;
+            send_cb_(out);
+        }
+    }
+    closed_ = true;
 }
 
 ngtcp2_tstamp QuicConnection::get_expiry() const noexcept {

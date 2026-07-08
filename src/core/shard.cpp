@@ -97,7 +97,12 @@ void Shard::run() {
                 [this](http3::Http3Stream& stream) {
                     on_request(stream);
                 });
-            conn.set_http3_session(std::move(h3_session));
+            if (!h3_session) {
+                spdlog::error("Closing QUIC connection due to HTTP/3 session creation failure");
+                conn.close();
+            } else {
+                conn.set_http3_session(std::move(h3_session));
+            }
         });
 
     // Start async packet reception
@@ -107,13 +112,7 @@ void Shard::run() {
     // Periodic cleanup of closed connections (every 5 seconds)
     cleanup_timer_ = event_loop_->add_timer(
         std::chrono::seconds(5),
-        [this]() {
-            conn_mgr_->cleanup();
-            // Re-schedule (one-shot timer, so we need to re-add)
-            cleanup_timer_ = event_loop_->add_timer(
-                std::chrono::seconds(5),
-                [this]() { conn_mgr_->cleanup(); });
-        });
+        [this]() { schedule_cleanup(); });
 
     spdlog::info("Shard {} ready (fd={}, connections=0)",
                  config_.shard_id, socket_->fd());
@@ -167,6 +166,15 @@ void Shard::on_request(http3::Http3Stream& stream) {
 
 void Shard::send_packet(const net::OutgoingPacket& packet) {
     event_loop_->async_send(socket_->fd(), packet);
+}
+
+void Shard::schedule_cleanup() {
+    conn_mgr_->cleanup();
+    if (event_loop_ && event_loop_->is_running()) {
+        cleanup_timer_ = event_loop_->add_timer(
+            std::chrono::seconds(5),
+            [this]() { schedule_cleanup(); });
+    }
 }
 
 } // namespace novaboot::core

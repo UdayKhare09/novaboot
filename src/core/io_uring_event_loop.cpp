@@ -9,6 +9,7 @@
 #include <netinet/udp.h>
 #include <sys/eventfd.h>
 #include <unistd.h>
+#include <fcntl.h>
 
 #include <spdlog/spdlog.h>
 
@@ -371,7 +372,7 @@ void IoUringEventLoop::process_cqe(struct io_uring_cqe* cqe) {
         auto& ctx = recv_contexts_[idx];
 
         if (cqe->res < 0) {
-            if (cqe->res != -ECANCELED && running_) {
+            if (cqe->res != -ECANCELED && cqe->res != -EAGAIN && cqe->res != -EWOULDBLOCK && running_) {
                 spdlog::warn("io_uring recvmsg error on fd {} idx {}: {}",
                              ctx.fd, idx, std::strerror(-cqe->res));
             }
@@ -485,6 +486,12 @@ void IoUringEventLoop::process_cqe(struct io_uring_cqe* cqe) {
 void IoUringEventLoop::start_packet_recv(
     int fd, std::move_only_function<void(net::IncomingPacket&&)> cb) {
     packet_recv_cbs_[fd] = std::move(cb);
+
+    // Clear O_NONBLOCK for io_uring async I/O to prevent EAGAIN completions
+    int flags = ::fcntl(fd, F_GETFL, 0);
+    if (flags != -1) {
+        ::fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+    }
 
     for (std::size_t i = 0; i < kRecvContextsCount; ++i) {
         recv_contexts_[i].fd = fd;
