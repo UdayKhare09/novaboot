@@ -4,7 +4,7 @@
 #include <cstring>
 
 #include <fcntl.h>
-#include <linux/udp.h>
+#include <netinet/udp.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -19,24 +19,28 @@ UdpSocket::~UdpSocket() {
 
 UdpSocket::UdpSocket(UdpSocket&& other) noexcept
     : fd_(other.fd_),
+      local_port_(other.local_port_),
       gso_supported_(other.gso_supported_),
       gro_supported_(other.gro_supported_),
       pktinfo_enabled_(other.pktinfo_enabled_),
       ecn_enabled_(other.ecn_enabled_),
       max_batch_size_(other.max_batch_size_) {
     other.fd_ = -1;
+    other.local_port_ = 0;
 }
 
 UdpSocket& UdpSocket::operator=(UdpSocket&& other) noexcept {
     if (this != &other) {
         close();
         fd_              = other.fd_;
+        local_port_      = other.local_port_;
         gso_supported_   = other.gso_supported_;
         gro_supported_   = other.gro_supported_;
         pktinfo_enabled_ = other.pktinfo_enabled_;
         ecn_enabled_     = other.ecn_enabled_;
         max_batch_size_  = other.max_batch_size_;
         other.fd_        = -1;
+        other.local_port_ = 0;
     }
     return *this;
 }
@@ -63,6 +67,17 @@ UdpSocket::create(const UdpSocketConfig& config) {
                config.bind_address.sockaddr_len()) < 0) {
         spdlog::error("bind() failed: {}", std::strerror(errno));
         return std::unexpected(Error::Bind);
+    }
+
+    // Retrieve the actual bound port
+    struct sockaddr_storage bound_addr{};
+    socklen_t bound_len = sizeof(bound_addr);
+    if (::getsockname(fd, reinterpret_cast<struct sockaddr*>(&bound_addr), &bound_len) == 0) {
+        if (bound_addr.ss_family == AF_INET) {
+            sock.local_port_ = ntohs(reinterpret_cast<struct sockaddr_in*>(&bound_addr)->sin_port);
+        } else if (bound_addr.ss_family == AF_INET6) {
+            sock.local_port_ = ntohs(reinterpret_cast<struct sockaddr_in6*>(&bound_addr)->sin6_port);
+        }
     }
 
     spdlog::info("UDP socket bound to {} (fd={})",
@@ -213,6 +228,7 @@ UdpSocket::recv_one(std::span<std::uint8_t> buffer) {
             pkt.local = Address::from_sockaddr(
                 reinterpret_cast<struct sockaddr*>(&local_addr),
                 sizeof(local_addr));
+            pkt.local.set_port(local_port_);
         } else if (cmsg->cmsg_level == IPPROTO_IPV6 &&
                    cmsg->cmsg_type == IPV6_PKTINFO) {
             auto* info = reinterpret_cast<struct in6_pktinfo*>(
@@ -223,6 +239,7 @@ UdpSocket::recv_one(std::span<std::uint8_t> buffer) {
             pkt.local = Address::from_sockaddr(
                 reinterpret_cast<struct sockaddr*>(&local_addr),
                 sizeof(local_addr));
+            pkt.local.set_port(local_port_);
         } else if (cmsg->cmsg_level == IPPROTO_IP &&
                    cmsg->cmsg_type == IP_TOS) {
             pkt.ecn = *reinterpret_cast<std::uint8_t*>(CMSG_DATA(cmsg)) & 0x3;

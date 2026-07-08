@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <compare>
 #include <cstdint>
 #include <cstring>
 #include <functional>
@@ -41,6 +42,9 @@ public:
     /// Get port (host byte order)
     [[nodiscard]] std::uint16_t port() const noexcept;
 
+    /// Set port (host byte order)
+    void set_port(std::uint16_t port) noexcept;
+
     /// Get address family (AF_INET or AF_INET6)
     [[nodiscard]] int family() const noexcept;
 
@@ -56,7 +60,7 @@ public:
     // Comparison operators
     bool operator==(const Address& other) const noexcept;
     bool operator!=(const Address& other) const noexcept;
-    auto operator<=>(const Address& other) const noexcept;
+    std::strong_ordering operator<=>(const Address& other) const noexcept;
 
     /// Hash support for use in unordered containers
     struct Hash {

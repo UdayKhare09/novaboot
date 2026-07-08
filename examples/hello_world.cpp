@@ -23,7 +23,7 @@ public:
 };
 
 int main() {
-    spdlog::set_level(spdlog::level::info);
+    spdlog::set_level(spdlog::level::debug);
 
     // Build the server
     auto app = novaboot::Server::create()
@@ -49,7 +49,7 @@ int main() {
 
     app->route("/api/users/:id")
         .get([](auto& req, auto& res, auto& ctx) {
-            auto id = req.path_params().get_as<int>("id");
+            auto id = req.path_params().template get_as<int>("id");
             if (!id) {
                 res.status(400).body("Invalid user ID");
                 return;
@@ -63,9 +63,9 @@ int main() {
         .post([](auto& req, auto& res, auto& ctx) {
             res.status(200)
                .header("content-type",
-                       std::string(req.header("content-type")
-                                   .value_or("application/octet-stream")))
-               .body(std::string(req.body()));
+                       req.header("content-type")
+                           .value_or("application/octet-stream"))
+               .body(req.body());
         });
 
     app->route("/health")

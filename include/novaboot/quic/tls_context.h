@@ -37,13 +37,13 @@ public:
     [[nodiscard]] SSL_CTX* native_handle() const noexcept { return ctx_; }
 
     /// Get the configured ALPN protocol
-    [[nodiscard]] const std::string& alpn() const noexcept { return alpn_; }
+    [[nodiscard]] const std::string& alpn() const noexcept { return *alpn_; }
 
 private:
     TlsContext() = default;
 
     SSL_CTX*    ctx_  = nullptr;
-    std::string alpn_;
+    std::shared_ptr<std::string> alpn_;
 };
 
 } // namespace novaboot::quic

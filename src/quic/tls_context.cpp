@@ -2,6 +2,7 @@
 
 #include <stdexcept>
 #include <format>
+#include <cstring>
 
 #include <openssl/err.h>
 #include <openssl/ssl.h>
@@ -70,7 +71,7 @@ TlsContext& TlsContext::operator=(TlsContext&& other) noexcept {
 
 TlsContext TlsContext::create(const Config& config) {
     TlsContext tls;
-    tls.alpn_ = config.alpn;
+    tls.alpn_ = std::make_shared<std::string>(config.alpn);
 
     // Create SSL_CTX with TLS server method
     tls.ctx_ = SSL_CTX_new(TLS_server_method());
@@ -105,7 +106,7 @@ TlsContext TlsContext::create(const Config& config) {
     }
 
     // ALPN selection callback
-    SSL_CTX_set_alpn_select_cb(tls.ctx_, alpn_select_callback, &tls.alpn_);
+    SSL_CTX_set_alpn_select_cb(tls.ctx_, alpn_select_callback, tls.alpn_.get());
 
     spdlog::info("TLS context initialized (OpenSSL {}, cert={})",
                  OpenSSL_version(OPENSSL_VERSION), config.cert_file);

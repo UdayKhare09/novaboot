@@ -8,12 +8,27 @@
 #include <stdexcept>
 
 #include <openssl/rand.h>
+#include <cstdarg>
 
 #include <spdlog/spdlog.h>
 
 namespace novaboot::quic {
 
 namespace {
+
+void ngtcp2_log_printf(void* /*user_data*/, const char* format, ...) {
+    va_list ap;
+    va_start(ap, format);
+    char buf[2048];
+    vsnprintf(buf, sizeof(buf), format, ap);
+    va_end(ap);
+    // Strip trailing newline if present
+    size_t len = strlen(buf);
+    if (len > 0 && buf[len - 1] == '\n') {
+        buf[len - 1] = '\0';
+    }
+    spdlog::debug("[ngtcp2] {}", buf);
+}
 
 /// Generate random bytes using OpenSSL
 void generate_random(uint8_t* dest, size_t len) {
@@ -71,8 +86,8 @@ std::unique_ptr<QuicConnection> QuicConnection::create(
 
     // Setup ngtcp2 callbacks
     ngtcp2_callbacks callbacks{};
-    ngtcp2_crypto_ngtcp2_callbacks(&callbacks);
-
+    
+    // Core callbacks
     callbacks.recv_client_initial     = on_recv_client_initial;
     callbacks.recv_crypto_data        = ngtcp2_crypto_recv_crypto_data_cb;
     callbacks.handshake_completed     = on_handshake_completed;
@@ -83,6 +98,13 @@ std::unique_ptr<QuicConnection> QuicConnection::create(
     callbacks.get_new_connection_id   = on_get_new_connection_id;
     callbacks.version_negotiation     = on_version_negotiation;
     callbacks.extend_max_stream_data  = on_extend_max_stream_data;
+    callbacks.rand                    = on_rand;
+
+    // Crypto callbacks from ngtcp2_crypto
+    callbacks.encrypt = ngtcp2_crypto_encrypt_cb;
+    callbacks.decrypt = ngtcp2_crypto_decrypt_cb;
+    callbacks.hp_mask = ngtcp2_crypto_hp_mask_cb;
+    callbacks.update_key = ngtcp2_crypto_update_key_cb;
     callbacks.delete_crypto_aead_ctx  = ngtcp2_crypto_delete_crypto_aead_ctx_cb;
     callbacks.delete_crypto_cipher_ctx = ngtcp2_crypto_delete_crypto_cipher_ctx_cb;
     callbacks.get_path_challenge_data = ngtcp2_crypto_get_path_challenge_data_cb;
@@ -91,7 +113,7 @@ std::unique_ptr<QuicConnection> QuicConnection::create(
     ngtcp2_settings settings;
     ngtcp2_settings_default(&settings);
     settings.initial_ts = get_timestamp();
-    settings.log_printf = nullptr; // TODO: integrate with spdlog
+    settings.log_printf = ngtcp2_log_printf;
 
     // Transport parameters
     ngtcp2_transport_params params;
@@ -103,6 +125,10 @@ std::unique_ptr<QuicConnection> QuicConnection::create(
     params.initial_max_stream_data_bidi_remote = 256 * 1024;
     params.initial_max_stream_data_uni         = 256 * 1024;
     params.max_idle_timeout = 30 * NGTCP2_SECONDS;
+
+    // Server-side required CIDs in transport parameters
+    params.original_dcid = hd.dcid;
+    params.original_dcid_present = 1;
 
     // Generate stateless reset token
     generate_random(params.stateless_reset_token,
@@ -123,7 +149,7 @@ std::unique_ptr<QuicConnection> QuicConnection::create(
     // Create the ngtcp2 server connection
     int rv = ngtcp2_conn_server_new(
         &qconn->conn_,
-        &hd.dcid,           // Client's DCID becomes our initial SCID
+        &hd.scid,           // Client's SCID becomes our destination CID
         &qconn->scid_,      // Our chosen SCID
         &path,
         hd.version,
@@ -367,10 +393,14 @@ int QuicConnection::on_handshake_completed(ngtcp2_conn* /*conn*/,
 int QuicConnection::handle_handshake_completed() {
     spdlog::debug("QUIC handshake completed: {}", remote_addr_.to_string());
 
-    // Create HTTP/3 session now that the handshake is done
-    // This will be called by the Shard which owns the router
-    // The actual Http3Session creation is deferred to the Shard
-    // because it needs access to the Router.
+    if (handshake_cb_) {
+        try {
+            handshake_cb_(*this);
+        } catch (const std::exception& e) {
+            spdlog::error("Error in handshake complete callback: {}", e.what());
+            return NGTCP2_ERR_CALLBACK_FAILURE;
+        }
+    }
     return 0;
 }
 
@@ -378,7 +408,7 @@ int QuicConnection::on_recv_stream_data(
     ngtcp2_conn* /*conn*/, uint32_t flags,
     int64_t stream_id, uint64_t /*offset*/,
     const uint8_t* data, size_t datalen,
-    void* user_data) {
+    void* user_data, void* /*stream_user_data*/) {
     auto* self = static_cast<QuicConnection*>(user_data);
     return self->handle_recv_stream_data(flags, stream_id, data, datalen);
 }
@@ -405,7 +435,7 @@ int QuicConnection::on_stream_open(ngtcp2_conn* /*conn*/,
 int QuicConnection::on_stream_close(
     ngtcp2_conn* /*conn*/, uint32_t /*flags*/,
     int64_t stream_id, uint64_t app_error_code,
-    void* user_data) {
+    void* user_data, void* /*stream_user_data*/) {
     auto* self = static_cast<QuicConnection*>(user_data);
     return self->handle_stream_close(stream_id, app_error_code);
 }
@@ -419,7 +449,7 @@ int QuicConnection::handle_stream_close(int64_t stream_id,
 int QuicConnection::on_acked_stream_data_offset(
     ngtcp2_conn* /*conn*/,
     int64_t stream_id, uint64_t offset, uint64_t datalen,
-    void* user_data) {
+    void* user_data, void* /*stream_user_data*/) {
     auto* self = static_cast<QuicConnection*>(user_data);
     return self->handle_acked_stream_data(stream_id, offset, datalen);
 }
@@ -452,7 +482,7 @@ int QuicConnection::on_version_negotiation(
 
 int QuicConnection::on_extend_max_stream_data(
     ngtcp2_conn* /*conn*/, int64_t stream_id,
-    uint64_t max_data, void* user_data) {
+    uint64_t max_data, void* user_data, void* /*stream_user_data*/) {
     auto* self = static_cast<QuicConnection*>(user_data);
     return self->handle_extend_max_stream_data(stream_id, max_data);
 }
@@ -461,6 +491,11 @@ int QuicConnection::handle_extend_max_stream_data(int64_t stream_id,
                                                    uint64_t /*max_data*/) {
     if (!http3_session_) return 0;
     return http3_session_->on_extend_max_stream_data(stream_id);
+}
+
+void QuicConnection::on_rand(uint8_t* dest, size_t destlen,
+                            const ngtcp2_rand_ctx* /*rand_ctx*/) {
+    generate_random(dest, destlen);
 }
 
 } // namespace novaboot::quic

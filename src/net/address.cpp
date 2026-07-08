@@ -87,6 +87,14 @@ std::uint16_t Address::port() const noexcept {
     return ntohs(storage_.v4_.sin_port);
 }
 
+void Address::set_port(std::uint16_t port) noexcept {
+    if (storage_.sa_.sa_family == AF_INET6) {
+        storage_.v6_.sin6_port = htons(port);
+    } else {
+        storage_.v4_.sin_port = htons(port);
+    }
+}
+
 int Address::family() const noexcept {
     return storage_.sa_.sa_family;
 }

@@ -32,6 +32,12 @@ public:
         return *this;
     }
 
+    /// Set the response body from a null-terminated string literal
+    Response& body(const char* data) {
+        body_ = data;
+        return *this;
+    }
+
     /// Set the response body from a string
     Response& body(std::string_view data) {
         body_ = std::string(data);

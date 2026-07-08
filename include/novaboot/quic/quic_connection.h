@@ -109,6 +109,11 @@ public:
     /// Set the HTTP/3 session (called when handshake completes)
     void set_http3_session(std::unique_ptr<http3::Http3Session> session);
 
+    /// Set the handshake completed callback
+    void set_handshake_callback(std::function<void(QuicConnection&)> cb) {
+        handshake_cb_ = std::move(cb);
+    }
+
 private:
     QuicConnection() = default;
 
@@ -126,16 +131,16 @@ private:
                                    int64_t stream_id,
                                    uint64_t offset,
                                    const uint8_t* data, size_t datalen,
-                                   void* user_data);
+                                   void* user_data, void* stream_user_data);
     static int on_stream_open(ngtcp2_conn* conn, int64_t stream_id,
                               void* user_data);
     static int on_stream_close(ngtcp2_conn* conn, uint32_t flags,
                                int64_t stream_id, uint64_t app_error_code,
-                               void* user_data);
+                               void* user_data, void* stream_user_data);
     static int on_acked_stream_data_offset(ngtcp2_conn* conn,
                                            int64_t stream_id,
                                            uint64_t offset, uint64_t datalen,
-                                           void* user_data);
+                                           void* user_data, void* stream_user_data);
     static int on_get_new_connection_id(ngtcp2_conn* conn,
                                         ngtcp2_cid* cid,
                                         uint8_t* token,
@@ -148,7 +153,9 @@ private:
     static int on_extend_max_stream_data(ngtcp2_conn* conn,
                                          int64_t stream_id,
                                          uint64_t max_data,
-                                         void* user_data);
+                                         void* user_data, void* stream_user_data);
+    static void on_rand(uint8_t* dest, size_t destlen,
+                        const ngtcp2_rand_ctx* rand_ctx);
 
     // Instance-level handlers
     int handle_handshake_completed();
@@ -180,6 +187,7 @@ private:
     /// Packet buffer for writing outgoing packets
     std::vector<std::uint8_t> pkt_buf_;
 
+    std::function<void(QuicConnection&)> handshake_cb_;
     bool closed_ = false;
 };
 

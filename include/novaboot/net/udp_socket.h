@@ -108,6 +108,9 @@ public:
     /// Close the socket
     void close();
 
+    /// Get the local bound port of the socket
+    [[nodiscard]] std::uint16_t local_port() const noexcept { return local_port_; }
+
 private:
     UdpSocket() = default;
     explicit UdpSocket(int fd) : fd_(fd) {}
@@ -115,6 +118,7 @@ private:
     void configure_socket(const UdpSocketConfig& config);
 
     int  fd_             = -1;
+    std::uint16_t local_port_ = 0;
     bool gso_supported_  = false;
     bool gro_supported_  = false;
     bool pktinfo_enabled_ = false;

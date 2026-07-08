@@ -13,6 +13,10 @@
 #include "novaboot/quic/tls_context.h"
 #include "novaboot/router/router.h"
 
+namespace novaboot::http3 {
+class Http3Stream;
+}
+
 namespace novaboot::core {
 
 /// Per-core shard configuration

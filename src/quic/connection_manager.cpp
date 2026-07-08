@@ -112,10 +112,7 @@ QuicConnection* ConnectionManager::accept_connection(
         // The actual Http3Session is created when handshake completes
         // (via the ngtcp2 handshake_completed callback → Shard)
         if (handshake_cb_) {
-            // Register as a post-handshake hook
-            // For now, we create the Http3Session eagerly.
-            // The Http3Session will buffer data until handshake completes.
-            handshake_cb_(*conn_ptr);
+            conn_ptr->set_handshake_callback(handshake_cb_);
         }
 
         return conn_ptr;
