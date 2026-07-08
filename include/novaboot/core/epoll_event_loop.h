@@ -41,7 +41,15 @@ public:
     [[nodiscard]] bool is_running() const noexcept override;
     [[nodiscard]] TimePoint now() const noexcept override;
 
+    void start_packet_recv(int fd, std::move_only_function<void(net::IncomingPacket&&)> cb) override;
+    void async_send(int fd, const net::OutgoingPacket& pkt) override;
+
 private:
+    // Packet receive callbacks: FD -> callback
+    std::unordered_map<int, std::move_only_function<void(net::IncomingPacket&&)>> packet_recv_cbs_;
+
+    // Buffer for epoll recv
+    std::vector<std::uint8_t> recv_buf_;
     struct FdEntry {
         int          fd;
         std::uint32_t events;

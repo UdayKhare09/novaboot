@@ -19,11 +19,7 @@ Shard::Shard(const ShardConfig& config,
     : config_(config),
       tls_ctx_(tls_ctx),
       router_(router),
-      pipeline_(pipeline) {
-
-    // Pre-allocate receive buffer (enough for batched GRO receives)
-    recv_buf_.resize(net::kMaxPacketSize);
-}
+      pipeline_(pipeline) {}
 
 Shard::~Shard() {
     stop();
@@ -104,9 +100,9 @@ void Shard::run() {
             conn.set_http3_session(std::move(h3_session));
         });
 
-    // Register the UDP socket with the event loop
-    event_loop_->add_fd(socket_->fd(), EventFlags::Readable,
-        [this](uint32_t events) { on_socket_readable(events); });
+    // Start async packet reception
+    event_loop_->start_packet_recv(socket_->fd(),
+        [this](net::IncomingPacket&& pkt) { conn_mgr_->on_packet(pkt); });
 
     // Periodic cleanup of closed connections (every 5 seconds)
     cleanup_timer_ = event_loop_->add_timer(
@@ -144,25 +140,7 @@ void Shard::pin_to_core() {
     }
 }
 
-void Shard::on_socket_readable(uint32_t /*events*/) {
-    // Edge-triggered: drain all available packets
-    for (;;) {
-        auto result = socket_->recv_one(recv_buf_);
 
-        if (!result) {
-            if (result.error() == net::UdpSocket::Error::WouldBlock) {
-                break; // No more data available
-            }
-            spdlog::warn("Shard {}: recv error", config_.shard_id);
-            break;
-        }
-
-        auto& packet = *result;
-
-        // Route the packet to the connection manager
-        conn_mgr_->on_packet(packet);
-    }
-}
 
 void Shard::on_request(http3::Http3Stream& stream) {
     auto& req = stream.request();
@@ -188,13 +166,7 @@ void Shard::on_request(http3::Http3Stream& stream) {
 }
 
 void Shard::send_packet(const net::OutgoingPacket& packet) {
-    auto result = socket_->send_one(packet);
-    if (!result) {
-        if (result.error() != net::UdpSocket::Error::WouldBlock) {
-            spdlog::warn("Shard {}: send error", config_.shard_id);
-        }
-        // TODO: Queue for retry on EAGAIN
-    }
+    event_loop_->async_send(socket_->fd(), packet);
 }
 
 } // namespace novaboot::core

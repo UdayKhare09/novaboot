@@ -1,7 +1,11 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <unordered_map>
+#include <vector>
+#include <netinet/in.h>
+#include <sys/socket.h>
 
 #include <liburing.h>
 
@@ -50,13 +54,18 @@ public:
     [[nodiscard]] bool is_running() const noexcept override;
     [[nodiscard]] TimePoint now() const noexcept override;
 
+    void start_packet_recv(int fd, std::move_only_function<void(net::IncomingPacket&&)> cb) override;
+    void async_send(int fd, const net::OutgoingPacket& pkt) override;
+
 private:
     // ─── User data encoding ──────────────────────────────────────────
-    // High 8 bits = operation type, low 56 bits = id (fd or timer_id)
+    // High 8 bits = operation type, low 56 bits = id (fd, timer_id, or context index)
     enum class OpType : std::uint8_t {
-        Poll   = 1,
-        Timer  = 2,
-        Cancel = 3,
+        Poll    = 1,
+        Timer   = 2,
+        Cancel  = 3,
+        RecvMsg = 4,
+        SendMsg = 5,
     };
 
     static std::uint64_t encode_user_data(OpType op, std::uint64_t id) noexcept;
@@ -100,6 +109,39 @@ private:
     };
     std::unordered_map<std::uint64_t, TimerEntry> timer_entries_;
     std::uint64_t next_timer_id_ = 1;
+
+    // ─── Async Packet Contexts & Pools ───────────────────────────────
+    static constexpr std::size_t kRecvContextsCount = 32;
+    static constexpr std::size_t kSendContextsCount = 128;
+
+    struct RecvContext {
+        int idx = -1;
+        int fd = -1;
+        alignas(64) std::array<std::uint8_t, 65536> buffer{};
+        struct iovec iov{};
+        alignas(struct cmsghdr) std::array<std::uint8_t, 512> cmsg{};
+        struct sockaddr_in6 remote_addr{};
+        struct msghdr msg{};
+    };
+
+    struct SendContext {
+        int idx = -1;
+        bool in_use = false;
+        alignas(64) std::array<std::uint8_t, 65536> buffer{};
+        struct iovec iov{};
+        alignas(struct cmsghdr) std::array<std::uint8_t, 256> cmsg{};
+        struct sockaddr_storage remote_addr{};
+        struct msghdr msg{};
+    };
+
+    void submit_recvmsg(int idx);
+
+    std::array<RecvContext, kRecvContextsCount> recv_contexts_;
+    std::array<SendContext, kSendContextsCount> send_contexts_;
+    std::vector<int> free_send_indices_;
+
+    // Socket FD -> packet callback
+    std::unordered_map<int, std::move_only_function<void(net::IncomingPacket&&)>> packet_recv_cbs_;
 };
 
 } // namespace novaboot::core

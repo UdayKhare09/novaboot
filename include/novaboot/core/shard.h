@@ -70,9 +70,6 @@ private:
     /// Pin the current thread to the configured CPU core
     void pin_to_core();
 
-    /// Handle incoming UDP data on the socket
-    void on_socket_readable(uint32_t events);
-
     /// Handle an HTTP request (called by Http3Session when request is ready)
     void on_request(http3::Http3Stream& stream);
 
@@ -89,9 +86,6 @@ private:
     std::unique_ptr<quic::ConnectionManager> conn_mgr_;
 
     std::thread thread_;
-
-    /// Receive buffer (reused across recv calls)
-    std::vector<std::uint8_t> recv_buf_;
 
     /// Periodic cleanup timer
     TimerHandle cleanup_timer_;

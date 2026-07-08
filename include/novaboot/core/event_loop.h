@@ -4,6 +4,11 @@
 #include <cstdint>
 #include <functional>
 
+namespace novaboot::net {
+struct IncomingPacket;
+struct OutgoingPacket;
+}
+
 namespace novaboot::core {
 
 /// Opaque handle for a registered timer.
@@ -88,6 +93,13 @@ public:
 
     /// Get current time (may be cached per iteration for consistency)
     [[nodiscard]] virtual TimePoint now() const noexcept = 0;
+
+    // ─── Async Packet I/O (QUIC optimal) ──────────────────────────────
+    /// Start asynchronous packet reception on the socket.
+    virtual void start_packet_recv(int fd, std::move_only_function<void(net::IncomingPacket&&)> cb) = 0;
+
+    /// Queue an asynchronous packet send.
+    virtual void async_send(int fd, const net::OutgoingPacket& pkt) = 0;
 };
 
 } // namespace novaboot::core
