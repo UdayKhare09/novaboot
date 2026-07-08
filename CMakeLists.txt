@@ -52,6 +52,7 @@ add_library(novaboot STATIC
 
     # Core
     src/core/epoll_event_loop.cpp
+    src/core/io_uring_event_loop.cpp
     src/core/shard.cpp
     src/core/server.cpp
 
@@ -93,6 +94,7 @@ target_link_libraries(novaboot
         PkgConfig::NGTCP2
         PkgConfig::NGTCP2_CRYPTO_OSSL
         PkgConfig::NGHTTP3
+        PkgConfig::URING
         OpenSSL::SSL
         OpenSSL::Crypto
         spdlog::spdlog

@@ -48,6 +48,9 @@ public:
         /// Add a global middleware
         Builder& middleware(std::shared_ptr<middleware::Middleware> mw);
 
+        /// Set the event loop backend (default: IoUring)
+        Builder& backend(core::EventLoopBackend b);
+
         /// Build and return the server
         std::unique_ptr<Server> build();
 
@@ -57,6 +60,7 @@ public:
         std::string   cert_path_;
         std::string   key_path_;
         int           worker_count_ = 0; // 0 = auto-detect
+        core::EventLoopBackend backend_ = core::EventLoopBackend::IoUring;
         std::vector<std::shared_ptr<middleware::Middleware>> middlewares_;
     };
 
@@ -100,6 +104,7 @@ private:
     net::Address bind_address_;
     int          worker_count_ = 0;
     bool         running_      = false;
+    core::EventLoopBackend backend_ = core::EventLoopBackend::IoUring;
 
     /// Static reference for signal handler
     static Server* instance_;

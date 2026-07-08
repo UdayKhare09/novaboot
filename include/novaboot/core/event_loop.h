@@ -16,6 +16,24 @@ using Clock    = std::chrono::steady_clock;
 using Duration = Clock::duration;
 using TimePoint = Clock::time_point;
 
+/// Backend selection for the event loop
+enum class EventLoopBackend {
+    Epoll,    ///< Traditional epoll (portable Linux 2.6+)
+    IoUring,  ///< io_uring (Linux 5.19+, recommended)
+};
+
+/// Backend-agnostic event flags.
+///
+/// These match the EPOLLIN/EPOLLOUT/EPOLLERR/EPOLLHUP values used by both
+/// epoll and io_uring's IORING_OP_POLL_ADD. No translation is needed
+/// between backends.
+namespace EventFlags {
+    inline constexpr std::uint32_t Readable  = 0x001; // EPOLLIN  / POLLIN
+    inline constexpr std::uint32_t Writable  = 0x004; // EPOLLOUT / POLLOUT
+    inline constexpr std::uint32_t Error     = 0x008; // EPOLLERR / POLLERR
+    inline constexpr std::uint32_t HangUp    = 0x010; // EPOLLHUP / POLLHUP
+}
+
 /// Abstract event loop interface.
 ///
 /// Provides fd monitoring and timer scheduling. Designed as an abstraction

@@ -5,7 +5,6 @@
 #include <thread>
 #include <vector>
 
-#include "novaboot/core/epoll_event_loop.h"
 #include "novaboot/core/event_loop.h"
 #include "novaboot/middleware/pipeline.h"
 #include "novaboot/net/udp_socket.h"
@@ -21,9 +20,10 @@ namespace novaboot::core {
 
 /// Per-core shard configuration
 struct ShardConfig {
-    int          shard_id = 0;        ///< Shard index (0-based)
-    int          cpu_core = -1;       ///< CPU core to pin to (-1 = no pinning)
-    net::Address bind_address;        ///< Address to bind UDP socket
+    int               shard_id = 0;        ///< Shard index (0-based)
+    int               cpu_core = -1;       ///< CPU core to pin to (-1 = no pinning)
+    net::Address      bind_address;        ///< Address to bind UDP socket
+    EventLoopBackend  backend = EventLoopBackend::IoUring; ///< Event loop backend
 };
 
 /// Per-core shard — the fundamental execution unit.
@@ -84,7 +84,7 @@ private:
     const router::Router&         router_;
     const middleware::Pipeline&   pipeline_;
 
-    std::unique_ptr<EpollEventLoop>         event_loop_;
+    std::unique_ptr<EventLoop>                  event_loop_;
     std::unique_ptr<net::UdpSocket>         socket_;
     std::unique_ptr<quic::ConnectionManager> conn_mgr_;
 

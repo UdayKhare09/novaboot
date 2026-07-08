@@ -1,11 +1,12 @@
 #include "novaboot/core/shard.h"
+#include "novaboot/core/epoll_event_loop.h"
+#include "novaboot/core/io_uring_event_loop.h"
 #include "novaboot/http3/http3_session.h"
 
 #include <format>
 
 #include <pthread.h>
 #include <sched.h>
-#include <sys/epoll.h>
 
 #include <spdlog/spdlog.h>
 
@@ -60,8 +61,14 @@ void Shard::run() {
         pin_to_core();
     }
 
-    // Create the event loop
-    event_loop_ = std::make_unique<EpollEventLoop>();
+    // Create the event loop based on configured backend
+    if (config_.backend == EventLoopBackend::IoUring) {
+        spdlog::debug("Shard {}: Using io_uring backend", config_.shard_id);
+        event_loop_ = std::make_unique<IoUringEventLoop>();
+    } else {
+        spdlog::debug("Shard {}: Using epoll backend", config_.shard_id);
+        event_loop_ = std::make_unique<EpollEventLoop>();
+    }
 
     // Create and bind the UDP socket
     net::UdpSocketConfig sock_config;
@@ -98,7 +105,7 @@ void Shard::run() {
         });
 
     // Register the UDP socket with the event loop
-    event_loop_->add_fd(socket_->fd(), EPOLLIN,
+    event_loop_->add_fd(socket_->fd(), EventFlags::Readable,
         [this](uint32_t events) { on_socket_readable(events); });
 
     // Periodic cleanup of closed connections (every 5 seconds)

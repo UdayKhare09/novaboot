@@ -44,6 +44,11 @@ Server::Builder& Server::Builder::middleware(
     return *this;
 }
 
+Server::Builder& Server::Builder::backend(core::EventLoopBackend b) {
+    backend_ = b;
+    return *this;
+}
+
 std::unique_ptr<Server> Server::Builder::build() {
     // Validate configuration
     if (cert_path_.empty()) {
@@ -83,9 +88,15 @@ std::unique_ptr<Server> Server::Builder::build() {
         server->pipeline_.add(std::move(mw));
     }
 
+    // Set backend
+    server->backend_ = backend_;
+
     spdlog::info("NovaBoot server configured:");
     spdlog::info("  Bind:    {}", server->bind_address_.to_string());
     spdlog::info("  Workers: {}", server->worker_count_);
+    spdlog::info("  Backend: {}",
+                 server->backend_ == core::EventLoopBackend::IoUring
+                     ? "io_uring" : "epoll");
     spdlog::info("  TLS:     {} / {}", cert_path_, key_path_);
 
     return server;
@@ -127,6 +138,7 @@ void Server::run() {
         shard_config.shard_id     = i;
         shard_config.cpu_core     = i; // Pin shard i to core i
         shard_config.bind_address = bind_address_;
+        shard_config.backend      = backend_;
 
         auto shard = std::make_unique<core::Shard>(
             shard_config, *tls_ctx_, router_, pipeline_);
