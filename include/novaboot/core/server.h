@@ -84,7 +84,7 @@ public:
 
     /// Get the number of active shards
     [[nodiscard]] int worker_count() const noexcept {
-        return static_cast<int>(shards_.size());
+        return worker_count_;
     }
 
     /// Get the router (for testing)
