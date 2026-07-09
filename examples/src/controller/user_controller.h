@@ -48,7 +48,7 @@ struct [[=novaboot::web::rest_controller{}]] UserController {
         novaboot::context::RequestContext& ctx
     ) {
         ctx.inject<RequestLogger>().log("Processing request: PUT /api/users/" + std::to_string(id));
-        user.id = id;
+        user.set_id(id);
         return novaboot::ResponseEntity<examples::model::User>::ok(user);
     }
 

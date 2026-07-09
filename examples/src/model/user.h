@@ -1,6 +1,7 @@
 #pragma once
 #include <string>
 #include "novaboot/validation/validation.h"
+#include "novaboot/lombok/lombok.h"
 
 namespace examples::model {
 
@@ -36,7 +37,7 @@ struct is_valid_role {
     }
 };
 
-struct User {
+struct [[=lombok::data{}]] [[=lombok::builder{}]] User {
     [[=novaboot::validation::min{0}]]
     int id;
 
@@ -49,6 +50,8 @@ struct User {
 
     [[=examples::model::is_valid_role{}]]
     std::string role;
+
+    #include "user.lombok.h"
 };
 
 } // namespace examples::model

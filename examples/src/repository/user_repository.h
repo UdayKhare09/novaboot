@@ -14,13 +14,18 @@ struct [[=novaboot::di::repository{}]] UserRepository {
         if (id > 10) {
             return std::nullopt;
         }
-        return examples::model::User{id, "John Doe", "john.doe" + std::to_string(id) + "@example.com", "USER"};
+        return examples::model::User::builder()
+            .id(id)
+            .name("John Doe")
+            .email("john.doe" + std::to_string(id) + "@example.com")
+            .role("ROLE_USER")
+            .build();
     }
 
     std::vector<examples::model::User> find_all() {
         return {
-            {1, "John Doe", "john.doe@example.com", "USER"},
-            {2, "Jane Smith", "jane.smith@example.com", "ADMIN"}
+            examples::model::User::builder().id(1).name("John Doe").email("john.doe@example.com").role("ROLE_USER").build(),
+            examples::model::User::builder().id(2).name("Jane Smith").email("jane.smith@example.com").role("ROLE_ADMIN").build()
         };
     }
 };

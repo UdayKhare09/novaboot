@@ -25,6 +25,9 @@
 // Validation
 #include "novaboot/validation/validation.h"
 
+// Lombok
+#include "novaboot/lombok/lombok.h"
+
 // Middleware
 #include "novaboot/middleware/middleware.h"
 #include "novaboot/middleware/pipeline.h"
