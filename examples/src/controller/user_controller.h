@@ -13,14 +13,14 @@
 #include <vector>
 
 /// REST Controller mapping user APIs (Spring-style RestController)
-struct [[=novaboot::di::component{}]] UserController {
+struct [[=novaboot::web::rest_controller{}]] UserController {
     UserService& user_service;
 
     // Constructor injection: UserService is auto-wired
     explicit UserController(UserService& svc) : user_service(svc) {}
 
     [[=novaboot::web::get{"/api/users"}]]
-    novaboot::ResponseEntity<std::vector<examples::model::User>> list_users(novaboot::context::RequestContext& ctx) {
+    auto list_users(novaboot::context::RequestContext& ctx) {
         ctx.inject<RequestLogger>().log("Processing request: GET /api/users");
         return novaboot::ResponseEntity<std::vector<examples::model::User>>::ok(user_service.get_all_users());
     }

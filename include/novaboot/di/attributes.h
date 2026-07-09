@@ -134,6 +134,7 @@ struct inject {};  ///< Choose this ctor when multiple user ctors exist
 // ─────────────────────────────────────────────────────────────────────────────
 
 #ifdef __cpp_impl_reflection
+#  include "novaboot/router/web_attributes.h"
 
 namespace novaboot::di::detail {
 
@@ -142,7 +143,10 @@ consteval bool is_managed_component(std::meta::info cls) noexcept {
     return !std::meta::annotations_of_with_type(cls, ^^novaboot::di::component).empty()
         || !std::meta::annotations_of_with_type(cls, ^^novaboot::di::service).empty()
         || !std::meta::annotations_of_with_type(cls, ^^novaboot::di::repository).empty()
-        || !std::meta::annotations_of_with_type(cls, ^^novaboot::di::configuration).empty();
+        || !std::meta::annotations_of_with_type(cls, ^^novaboot::di::configuration).empty()
+        || !std::meta::annotations_of_with_type(cls, ^^novaboot::web::controller_advice).empty()
+        || !std::meta::annotations_of_with_type(cls, ^^novaboot::web::controller).empty()
+        || !std::meta::annotations_of_with_type(cls, ^^novaboot::web::rest_controller).empty();
 }
 
 /// True if cls has [[=module_tag{}]].

@@ -1,5 +1,8 @@
 #pragma once
 #include <cstddef>
+#ifdef __cpp_impl_reflection
+#  include <meta>
+#endif
 
 namespace novaboot::web {
 
@@ -68,5 +71,16 @@ struct any {
 };
 
 struct request_body {};
+
+struct controller {};
+struct rest_controller {};
+
+struct controller_advice {};
+
+struct exception_handler {
+#ifdef __cpp_impl_reflection
+    std::meta::info exception_type;
+#endif
+};
 
 } // namespace novaboot::web

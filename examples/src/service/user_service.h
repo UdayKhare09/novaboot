@@ -3,8 +3,10 @@
 #include "novaboot/di/di.h"
 #include "repository/user_repository.h"
 #include "model/user.h"
+#include "exception/user_not_found_exception.h"
 #include <spdlog/spdlog.h>
 #include <vector>
+#include <optional>
 
 /// Business logic implementation (Spring-style Service)
 struct [[=novaboot::di::service{}]] UserService {
@@ -14,7 +16,11 @@ struct [[=novaboot::di::service{}]] UserService {
     explicit UserService(UserRepository& repo) : user_repo(repo) {}
 
     examples::model::User get_user(int id) {
-        return user_repo.find_by_id(id);
+        auto opt = user_repo.find_by_id(id);
+        if (!opt) {
+            throw examples::exception::UserNotFoundException(id);
+        }
+        return *opt;
     }
 
     std::vector<examples::model::User> get_all_users() {

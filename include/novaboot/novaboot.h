@@ -22,9 +22,18 @@
 #include "novaboot/router/response_entity.h"
 #include "novaboot/router/json.h"
 
+// Validation
+#include "novaboot/validation/validation.h"
+
 // Middleware
 #include "novaboot/middleware/middleware.h"
 #include "novaboot/middleware/pipeline.h"
 
 // Context
 #include "novaboot/context/request_context.h"
+
+// Auto-generated component registration forward declarations
+namespace novaboot::di { class RootContainer; }
+namespace novaboot { class Server; }
+void novaboot_di_register_all(novaboot::di::RootContainer& root);
+void novaboot_web_register_all(novaboot::Server& app);

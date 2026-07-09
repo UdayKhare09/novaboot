@@ -221,4 +221,13 @@ void Server::install_signal_handlers() {
     signal(SIGPIPE, SIG_IGN);
 }
 
+bool Server::handle_exception(const std::exception& ex, http3::Response& res, context::RequestContext& ctx) {
+    for (auto& handler : exception_handlers_) {
+        if (handler->handle(ex, res, ctx)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 } // namespace novaboot

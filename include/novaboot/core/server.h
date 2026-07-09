@@ -14,6 +14,7 @@
 #include "novaboot/router/web_attributes.h"
 #include "novaboot/router/response_entity.h"
 #include "novaboot/router/json.h"
+#include "novaboot/validation/validation.h"
 #ifdef __cpp_impl_reflection
 #  include <meta>
 #endif
@@ -97,7 +98,12 @@ struct Invoker {
                                      !std::is_same_v<CleanArg, context::RequestContext> && 
                                      !std::is_same_v<CleanArg, std::string>;
             if constexpr (is_body) {
-                return novaboot::json::deserialize<CleanArg>(req.body());
+                auto body_obj = novaboot::json::deserialize<CleanArg>(req.body());
+                std::vector<std::string> errors;
+                if (!novaboot::validation::validate(body_obj, errors)) {
+                    throw novaboot::validation::ValidationException(std::move(errors));
+                }
+                return body_obj;
             } else {
                 constexpr auto param_name = std::meta::identifier_of(param_reflect);
                 auto val_opt = req.path_params().template get_as<CleanArg>(param_name);
@@ -124,6 +130,55 @@ struct Invoker {
             res.json(novaboot::json::serialize(result));
         }
     }
+};
+
+struct ExceptionHandler {
+    virtual bool handle(const std::exception& ex, http3::Response& res, context::RequestContext& ctx) = 0;
+    virtual ~ExceptionHandler() = default;
+};
+
+template<typename AdviceClass, typename Ex, typename Ret, typename... Args>
+class ExceptionHandlerImpl : public ExceptionHandler {
+public:
+    using MemberFn = Ret (AdviceClass::*)(Args...);
+
+    explicit ExceptionHandlerImpl(MemberFn method) : method_(method) {}
+
+    bool handle(const std::exception& ex, http3::Response& res, context::RequestContext& ctx) override {
+        if (auto* typed_ex = dynamic_cast<const Ex*>(&ex)) {
+            auto& advice = ctx.inject<AdviceClass>();
+            invoke_with_args(advice, typed_ex, res, ctx, std::make_index_sequence<sizeof...(Args)>{});
+            return true;
+        }
+        return false;
+    }
+
+private:
+    template<std::size_t... Is>
+    void invoke_with_args(AdviceClass& advice, const Ex* ex, http3::Response& res, context::RequestContext& ctx, std::index_sequence<Is...>) {
+        if constexpr (std::is_void_v<Ret>) {
+            (advice.*method_)(resolve_arg<Is, Args>(ex, res, ctx)...);
+        } else {
+            auto result = (advice.*method_)(resolve_arg<Is, Args>(ex, res, ctx)...);
+            Invoker<AdviceClass, std::meta::info{}, Ret, Args...>::handle_result(result, res);
+        }
+    }
+
+    template<std::size_t I, typename Arg>
+    Arg resolve_arg(const Ex* ex, http3::Response& res, context::RequestContext& ctx) {
+        using CleanArg = std::remove_cvref_t<Arg>;
+        if constexpr (std::is_same_v<CleanArg, Ex>) {
+            return *ex;
+        } else if constexpr (std::is_same_v<CleanArg, http3::Response>) {
+            return res;
+        } else if constexpr (std::is_same_v<CleanArg, context::RequestContext>) {
+            return ctx;
+        } else {
+            return CleanArg{};
+        }
+    }
+
+    MemberFn method_;
 };
 #endif
 } // namespace detail
@@ -258,9 +313,29 @@ public:
     /// Deduce and bind helper that registers type-safe controller methods to the router
     template<typename Class, std::meta::info method_meta, typename Ret, typename... Args>
     void deduce_and_bind(std::string_view path, router::Method http_method, Ret (Class::*method)(Args...)) {
-        this->router_.add_route(http_method, path, [method](http3::Request& req, http3::Response& res, context::RequestContext& ctx) {
+        this->router_.add_route(http_method, path, [this, method](http3::Request& req, http3::Response& res, context::RequestContext& ctx) {
             auto& controller = ctx.inject<Class>();
-            detail::Invoker<Class, method_meta, Ret, Args...>::invoke(controller, method, req, res, ctx);
+            try {
+                detail::Invoker<Class, method_meta, Ret, Args...>::invoke(controller, method, req, res, ctx);
+            } catch (const novaboot::validation::ValidationException& val_ex) {
+                res.status(400);
+                res.header("Content-Type", "application/json");
+                std::string err_json = R"({"error":"Bad Request","message":"Validation failed","errors":[)";
+                bool first = true;
+                for (const auto& err : val_ex.errors()) {
+                    if (!first) err_json += ",";
+                    first = false;
+                    err_json += "\"" + err + "\"";
+                }
+                err_json += "]}";
+                res.json(err_json);
+            } catch (const std::exception& ex) {
+                if (!this->handle_exception(ex, res, ctx)) {
+                    res.status(500);
+                    res.header("Content-Type", "application/json");
+                    res.json(R"({"error":"Internal Server Error","message":")" + std::string(ex.what()) + R"("})");
+                }
+            }
         });
     }
 
@@ -270,6 +345,43 @@ public:
         (register_controller<Ts>(), ...);
         return *this;
     }
+
+    /// Register a ControllerAdvice global exception handler advice class.
+    template<typename T>
+    Server& register_advice() {
+#ifdef __cpp_impl_reflection
+        static constexpr auto members = detail::get_members<T>();
+        template for (constexpr auto m : members) {
+            if constexpr (std::meta::is_function(m) && !std::meta::is_constructor(m) && !std::meta::is_destructor(m)) {
+                if constexpr (!std::meta::annotations_of_with_type(m, ^^novaboot::web::exception_handler).empty()) {
+                    constexpr auto ann = std::meta::annotations_of_with_type(m, ^^novaboot::web::exception_handler)[0];
+                    constexpr auto handler_meta = std::meta::extract<novaboot::web::exception_handler>(ann);
+                    this->deduce_and_register_exception_handler<T, handler_meta.exception_type>(&[:m:]);
+                }
+            }
+        }
+#endif
+        return *this;
+    }
+
+    /// Register multiple ControllerAdvice exception handler advice classes.
+    template<typename... Ts>
+    Server& register_advices() {
+        (register_advice<Ts>(), ...);
+        return *this;
+    }
+
+    /// Deduce exception type and register the custom exception handler
+    template<typename AdviceClass, std::meta::info exception_type, typename Ret, typename... Args>
+    void deduce_and_register_exception_handler(Ret (AdviceClass::*method)(Args...)) {
+        using ExType = typename[: exception_type :];
+        exception_handlers_.push_back(
+            std::make_unique<detail::ExceptionHandlerImpl<AdviceClass, ExType, Ret, Args...>>(method)
+        );
+    }
+
+    /// Match and process thrown exception against registered ControllerAdvice handlers
+    bool handle_exception(const std::exception& ex, http3::Response& res, context::RequestContext& ctx);
 
     /// Run the server (blocks until signaled to stop)
     void run();
@@ -292,6 +404,7 @@ private:
     void install_signal_handlers();
 
     router::Router                 router_;
+    std::vector<std::unique_ptr<detail::ExceptionHandler>> exception_handlers_;
     middleware::Pipeline           pipeline_;
     std::unique_ptr<quic::TlsContext> tls_ctx_;
     std::vector<std::unique_ptr<core::Shard>> shards_;

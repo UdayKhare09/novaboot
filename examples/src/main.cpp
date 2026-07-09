@@ -6,6 +6,7 @@
 #include "service/user_service.h"
 #include "service/request_logger.h"
 #include "controller/user_controller.h"
+#include "controller/global_exception_handler.h"
 
 #include <spdlog/spdlog.h>
 #include <thread>
@@ -13,9 +14,6 @@
 
 using namespace novaboot;
 using namespace novaboot::di;
-
-// Forward declare the auto-generated CMake registrations function
-void novaboot_di_register_all(RootContainer& root);
 
 int main() {
     // Set logging level
@@ -25,7 +23,7 @@ int main() {
     // 1. DI Container Setup
     RootContainer di_root;
 
-    // Register all scanned components (UserRepository, UserService, RequestLogger, UserController)
+    // Register all scanned components (UserRepository, UserService, RequestLogger, UserController, GlobalExceptionHandler)
     novaboot_di_register_all(di_root);
 
     // Build the container: builds dependency graph and instantiates singletons
@@ -39,8 +37,8 @@ int main() {
         .di_container(di_root)
         .build();
 
-    // 3. Web Routing Mapping (Auto-registers all UserController methods with web attributes)
-    app->register_controllers<UserController>();
+    // 3. Web Routing Mapping (Fully automatic Component Scan routing mapping)
+    novaboot_web_register_all(*app);
 
     // 4. Run the Server
     app->run();

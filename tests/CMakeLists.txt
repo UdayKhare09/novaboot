@@ -30,3 +30,5 @@ novaboot_test(test_di_handler_injection unit/test_di_handler_injection.cpp)
 
 # ─── Integration tests ────────────────────────────────────────────────────────
 novaboot_test(test_server_basic integration/test_server_basic.cpp)
+novaboot_test(test_exception_handler unit/test_exception_handler.cpp)
+novaboot_test(test_validation unit/test_validation.cpp)
