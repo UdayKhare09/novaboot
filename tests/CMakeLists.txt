@@ -16,6 +16,7 @@ novaboot_test(test_router            unit/test_router.cpp)
 novaboot_test(test_header_map        unit/test_header_map.cpp)
 novaboot_test(test_middleware_pipeline unit/test_middleware_pipeline.cpp)
 novaboot_test(test_request_context   unit/test_request_context.cpp)
+novaboot_test(test_json_reflection   unit/test_json_reflection.cpp)
 
 # ─── Phase 2: DI/IoC unit tests ──────────────────────────────────────────────
 novaboot_test(test_di_singleton       unit/test_di_singleton.cpp)

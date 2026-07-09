@@ -2,8 +2,9 @@
 
 #include "novaboot/di/di.h"
 #include "repository/user_repository.h"
+#include "model/user.h"
 #include <spdlog/spdlog.h>
-#include <string>
+#include <vector>
 
 /// Business logic implementation (Spring-style Service)
 struct [[=novaboot::di::service{}]] UserService {
@@ -12,11 +13,11 @@ struct [[=novaboot::di::service{}]] UserService {
     // Constructor injection: DI container automatically resolves and injects UserRepository
     explicit UserService(UserRepository& repo) : user_repo(repo) {}
 
-    std::string get_user(int id) {
+    examples::model::User get_user(int id) {
         return user_repo.find_by_id(id);
     }
 
-    std::string get_all_users() {
+    std::vector<examples::model::User> get_all_users() {
         return user_repo.find_all();
     }
 

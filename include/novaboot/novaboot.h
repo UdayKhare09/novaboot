@@ -18,6 +18,9 @@
 #include "novaboot/router/router.h"
 #include "novaboot/router/route.h"
 #include "novaboot/router/path_params.h"
+#include "novaboot/router/web_attributes.h"
+#include "novaboot/router/response_entity.h"
+#include "novaboot/router/json.h"
 
 // Middleware
 #include "novaboot/middleware/middleware.h"

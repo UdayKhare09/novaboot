@@ -1,24 +1,22 @@
 #pragma once
 
 #include "novaboot/di/di.h"
+#include "model/user.h"
+#include <vector>
 #include <string>
-#include <format>
 
 /// In-memory repository handling database operations (Spring-style Repository)
 struct [[=novaboot::di::repository{}]] UserRepository {
     UserRepository() = default;
 
-    std::string find_by_id(int id) {
-        return std::format(
-            R"({{"id":{},"name":"John Doe","email":"john.doe{}@example.com","role":"USER"}})",
-            id, id
-        );
+    examples::model::User find_by_id(int id) {
+        return {id, "John Doe", "john.doe" + std::to_string(id) + "@example.com", "USER"};
     }
 
-    std::string find_all() {
-        return R"([
-            {"id":1,"name":"John Doe","email":"john.doe@example.com","role":"USER"},
-            {"id":2,"name":"Jane Smith","email":"jane.smith@example.com","role":"ADMIN"}
-        ])";
+    std::vector<examples::model::User> find_all() {
+        return {
+            {1, "John Doe", "john.doe@example.com", "USER"},
+            {2, "Jane Smith", "jane.smith@example.com", "ADMIN"}
+        };
     }
 };

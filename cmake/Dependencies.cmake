@@ -21,6 +21,9 @@ pkg_check_modules(URING REQUIRED IMPORTED_TARGET liburing)
 # spdlog (logging)
 find_package(spdlog REQUIRED)
 
+# simdjson (JSON parser)
+find_package(simdjson REQUIRED)
+
 # Google Test (only when tests are enabled)
 if(NOVABOOT_BUILD_TESTS)
     find_package(GTest REQUIRED)

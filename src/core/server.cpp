@@ -9,7 +9,31 @@
 
 #include <spdlog/spdlog.h>
 
+#include "novaboot/di/di.h"
+#include "novaboot/middleware/middleware.h"
+
 namespace novaboot {
+
+class DIMiddleware : public middleware::Middleware {
+public:
+    explicit DIMiddleware(di::RootContainer& root) : root_(root) {}
+
+    void handle(http3::Request&, http3::Response&,
+                context::RequestContext& ctx, Next next) override {
+        static thread_local std::unique_ptr<di::ShardContainer> shard_di = nullptr;
+        if (!shard_di) {
+            shard_di = root_.make_shard_container();
+            shard_di->initialize();
+        }
+
+        auto request_di = shard_di->make_request_container();
+        ctx.bind_container(*request_di);
+        next();
+    }
+
+private:
+    di::RootContainer& root_;
+};
 
 Server* Server::instance_ = nullptr;
 
@@ -49,6 +73,11 @@ Server::Builder& Server::Builder::backend(core::EventLoopBackend b) {
     return *this;
 }
 
+Server::Builder& Server::Builder::di_container(di::RootContainer& root) {
+    di_root_ = &root;
+    return *this;
+}
+
 std::unique_ptr<Server> Server::Builder::build() {
     // Validate configuration
     if (cert_path_.empty()) {
@@ -83,7 +112,10 @@ std::unique_ptr<Server> Server::Builder::build() {
     server->tls_ctx_ = std::make_unique<quic::TlsContext>(
         quic::TlsContext::create(tls_config));
 
-    // Add middleware
+    // Add middleware (inject DIMiddleware first if DI container is registered)
+    if (di_root_) {
+        server->pipeline_.add(std::make_shared<DIMiddleware>(*di_root_));
+    }
     for (auto& mw : middlewares_) {
         server->pipeline_.add(std::move(mw));
     }

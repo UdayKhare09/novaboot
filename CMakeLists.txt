@@ -107,6 +107,7 @@ target_link_libraries(novaboot
         OpenSSL::SSL
         OpenSSL::Crypto
         spdlog::spdlog
+        simdjson::simdjson
 )
 
 target_compile_features(novaboot PUBLIC cxx_std_26)
