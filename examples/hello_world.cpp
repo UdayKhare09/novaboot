@@ -26,54 +26,10 @@
 using namespace novaboot;
 using namespace novaboot::di;
 
-// ─── Domain types ─────────────────────────────────────────────────────────────
+#include "hello_world_components.h"
 
-/// Simple in-memory user store (repository stereotype)
-struct [[=novaboot::di::repository{}]] UserRepository {
-    std::string find(int id) {
-        return std::format(R"({{"id":{},"name":"User {}","email":"user{}@example.com"}})",
-                           id, id, id);
-    }
-};
-
-/// Business logic service (service stereotype)
-struct [[=novaboot::di::service{}]] UserService {
-    UserRepository& repo_;
-
-    /// Constructor injection: DI container detects the single constructor
-    explicit UserService(UserRepository& repo) : repo_(repo) {}
-
-    std::string get_user(int id) { return repo_.find(id); }
-    std::string list_users()     { return R"([{"id":1},{"id":2},{"id":3}])"; }
-
-    [[=novaboot::di::post_construct{}]]
-    void on_start() { spdlog::info("UserService ready"); }
-
-    [[=novaboot::di::pre_destroy{}]]
-    void on_stop()  { spdlog::info("UserService shutting down"); }
-};
-
-/// Request-scoped logger (one per HTTP request)
-struct [[=novaboot::di::component{}]]
-       [[=novaboot::di::scoped{novaboot::di::Scope::Request}]]
-RequestLogger {
-    std::vector<std::string> events;
-    void log(std::string_view msg) { events.emplace_back(msg); }
-};
-
-// ─── Compile-time DI verification ─────────────────────────────────────────────
-
-static_assert(novaboot::di::detail::is_managed_component(^^UserRepository));
-static_assert(novaboot::di::detail::is_managed_component(^^UserService));
-static_assert(novaboot::di::detail::get_scope(^^RequestLogger) == Scope::Request);
-
-// Verify UserService depends on UserRepository
-consteval bool user_service_dep_check() {
-    auto ctor  = novaboot::di::detail::find_inject_ctor(^^UserService);
-    auto deps  = novaboot::di::detail::collect_dep_types(ctor);
-    return deps.size() == 1 && deps[0] == ^^UserRepository;
-}
-static_assert(user_service_dep_check(), "UserService must depend on UserRepository");
+// Forward declare the auto-generated CMake registrations function
+void novaboot_di_register_all(novaboot::di::RootContainer& root);
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
@@ -84,22 +40,15 @@ int main() {
     // ── DI Container setup ────────────────────────────────────────────────────
     RootContainer di_root;
 
-    // Register Singleton beans
-    di_root.register_bean<UserRepository>(
-        [](ContainerBase&) { return new UserRepository{}; }
-    );
-    di_root.register_bean<UserService>(
-        [](ContainerBase& c) { return new UserService{c.resolve<UserRepository>()}; }
-    );
-    di_root.with_post_construct<UserService>([](UserService& s) { s.on_start(); });
-    di_root.with_pre_destroy<UserService>([](UserService& s)   { s.on_stop();  });
+    // Register beans via CMake component scanner (fully automatic)
+    novaboot_di_register_all(di_root);
 
     // Build validates the dependency graph and instantiates all singletons
     di_root.build();
 
     // ── Server setup ──────────────────────────────────────────────────────────
     auto app = Server::create()
-        .workers(std::thread::hardware_concurrency())
+        .workers((int)std::thread::hardware_concurrency())
         .bind("0.0.0.0", 4433)
         .tls("cert.pem", "key.pem")
         .build();

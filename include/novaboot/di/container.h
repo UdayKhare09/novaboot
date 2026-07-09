@@ -28,6 +28,7 @@
 #include <string>
 #include <typeindex>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace novaboot::memory { class ArenaAllocator; }  // forward decl
@@ -39,6 +40,7 @@ namespace novaboot::di {
 // ─────────────────────────────────────────────────────────────────────────────
 
 class ContainerBase;
+class RootContainer;
 class ShardContainer;
 class RequestContainer;
 class ConnectionContainer;
@@ -195,6 +197,59 @@ protected:
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// LifecycleInvoker — static helper to call annotated functions at runtime
+// ─────────────────────────────────────────────────────────────────────────────
+
+namespace detail {
+template<typename T, typename Ann>
+consteval auto get_lifecycle_methods() {
+    constexpr auto ctx = std::meta::access_context::current();
+    struct ArrayWrapper {
+        std::meta::info data[32] = {};
+        std::size_t     size = 0;
+
+        consteval const std::meta::info* begin() const noexcept { return data; }
+        consteval const std::meta::info* end() const noexcept { return data + size; }
+    };
+    ArrayWrapper result;
+
+    for (auto m : std::meta::members_of(^^T, ctx)) {
+        if (std::meta::is_function(m) && !std::meta::is_constructor(m) && !std::meta::is_destructor(m)) {
+            if (!std::meta::annotations_of_with_type(m, ^^Ann).empty()) {
+                if (result.size < 32) {
+                    result.data[result.size++] = m;
+                }
+            }
+        }
+    }
+    return result;
+}
+
+#ifdef __cpp_impl_reflection
+template<typename T>
+consteval auto get_ctor_params() {
+    constexpr auto ctor = novaboot::di::detail::find_inject_ctor(^^T);
+    
+    struct ParamArray {
+        std::meta::info data[32] = {};
+        std::size_t     size = 0;
+    };
+    ParamArray result;
+
+    for (auto p : std::meta::parameters_of(ctor)) {
+        if (result.size < 32) {
+            result.data[result.size++] = p;
+        }
+    }
+    return result;
+}
+
+template<typename T, auto Array, typename Indices>
+struct FactoryRegistrarImpl;
+#endif
+} // namespace detail
+
+// ─────────────────────────────────────────────────────────────────────────────
 // RootContainer — owns all Singleton beans
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -240,13 +295,69 @@ public:
                 static_cast<Initializable*>(static_cast<T*>(p))->post_construct();
             };
         }
+#ifdef __cpp_impl_reflection
+        else if constexpr (std::is_class_v<T>) {
+            static constexpr auto info = detail::get_lifecycle_methods<T, novaboot::di::post_construct>();
+            if constexpr (info.size > 0) {
+                reg.post_construct_fn = [](void* p) {
+                    auto* obj = static_cast<T*>(p);
+                    template for (constexpr auto m : info) {
+                        (obj->* &[:m:])();
+                    }
+                };
+            }
+        }
+#endif
+
         if constexpr (std::is_base_of_v<Destroyable, T>) {
             reg.pre_destroy_fn = [](void* p) {
                 static_cast<Destroyable*>(static_cast<T*>(p))->pre_destroy();
             };
         }
+#ifdef __cpp_impl_reflection
+        else if constexpr (std::is_class_v<T>) {
+            static constexpr auto info = detail::get_lifecycle_methods<T, novaboot::di::pre_destroy>();
+            if constexpr (info.size > 0) {
+                reg.pre_destroy_fn = [](void* p) {
+                    auto* obj = static_cast<T*>(p);
+                    template for (constexpr auto m : info) {
+                        (obj->* &[:m:])();
+                    }
+                };
+            }
+        }
+#endif
 
         registrations_[reg.type_id] = std::move(reg);
+        return *this;
+    }
+
+    /// Register a component class using compile-time reflection.
+    /// The constructor dependencies are auto-wired automatically.
+    template<typename T>
+    RootContainer& register_component() {
+#ifdef __cpp_impl_reflection
+        constexpr auto cls = ^^T;
+        constexpr auto scope = novaboot::di::detail::get_scope(cls);
+        constexpr bool is_lazy = novaboot::di::detail::is_lazy_bean(cls);
+        constexpr bool is_prim = novaboot::di::detail::is_primary_bean(cls);
+        constexpr const char* q = novaboot::di::detail::get_named_qualifier(cls);
+
+        constexpr auto params = detail::get_ctor_params<T>();
+        detail::FactoryRegistrarImpl<T, params, std::make_index_sequence<params.size>>::register_in(
+            *this, scope, q, is_prim, is_lazy
+        );
+#else
+        // Fallback without reflection
+        static_assert(sizeof(T) == 0, "novaboot::di: register_component requires C++26 static reflection.");
+#endif
+        return *this;
+    }
+
+    /// Register multiple component classes at once using compile-time reflection.
+    template<typename... Ts>
+    RootContainer& register_components() {
+        (register_component<Ts>(), ...);
         return *this;
     }
 
@@ -350,6 +461,30 @@ private:
     /// Storage for owned bean instances (for destruction)
     std::vector<std::pair<void*, std::function<void(void*)>>> owned_instances_;
 };
+
+namespace detail {
+#ifdef __cpp_impl_reflection
+template<typename T, auto Array, std::size_t... Is>
+struct FactoryRegistrarImpl<T, Array, std::index_sequence<Is...>> {
+    static void register_in(RootContainer& root, Scope scope, const char* q, bool is_prim, bool is_lazy) {
+        root.register_bean<T>(
+            [](ContainerBase& c) -> T* {
+                return new T{ c.resolve<
+                    typename[: 
+                        std::meta::remove_const(
+                            std::meta::is_reference_type(std::meta::type_of(Array.data[Is])) 
+                            ? std::meta::remove_reference(std::meta::type_of(Array.data[Is]))
+                            : std::meta::type_of(Array.data[Is])
+                        )
+                    :]>()
+                ... };
+            },
+            scope, q, is_prim, is_lazy
+        );
+    }
+};
+#endif
+} // namespace detail
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ShardContainer — per-CPU-core, borrows singletons, owns Shard-scoped beans

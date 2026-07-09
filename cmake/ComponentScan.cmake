@@ -96,18 +96,7 @@ macro(novaboot_di_scan)
     foreach(_comp ${DI_SCAN_COMPONENTS})
         string(APPEND _gen_content
             "    // ${_comp}\n"
-            "    [&]() consteval {\n"
-            "        constexpr auto scope     = novaboot::di::detail::get_scope(^^${_comp});\n"
-            "        constexpr bool is_lazy   = novaboot::di::detail::is_lazy_bean(^^${_comp});\n"
-            "        constexpr bool is_prim   = novaboot::di::detail::is_primary_bean(^^${_comp});\n"
-            "        constexpr const char* q  = novaboot::di::detail::get_named_qualifier(^^${_comp});\n"
-            "        root.register_bean<${_comp}>(\n"
-            "            [](novaboot::di::ContainerBase& c) -> ${_comp}* {\n"
-            "                return new ${_comp}{ /* deps resolved via codegen */ };\n"
-            "            },\n"
-            "            scope, q, is_prim, is_lazy\n"
-            "        );\n"
-            "    }();\n\n"
+            "    root.register_component<${_comp}>();\n\n"
         )
     endforeach()
 
@@ -123,4 +112,41 @@ macro(novaboot_di_scan)
     file(WRITE "${DI_SCAN_OUTPUT_FILE}" "${_gen_content}")
 
     message(STATUS "novaboot_di_scan: Generated ${DI_SCAN_OUTPUT_FILE} with ${DI_SCAN_COMPONENTS} components")
+endmacro()
+
+# ─── novaboot_auto_scan ───────────────────────────────────────────────────────
+#
+# Recursively scans the directory at build time and automatically registers all
+# annotated components, matching the "Spring Boot" experience.
+#
+macro(novaboot_auto_scan)
+    cmake_parse_arguments(AUTO_SCAN
+        ""
+        "TARGET;DIR;OUTPUT_FILE"
+        ""
+        ${ARGN}
+    )
+
+    if(NOT AUTO_SCAN_TARGET)
+        message(FATAL_ERROR "novaboot_auto_scan: TARGET is required")
+    endif()
+    if(NOT AUTO_SCAN_DIR)
+        set(AUTO_SCAN_DIR ${CMAKE_CURRENT_SOURCE_DIR})
+    endif()
+    if(NOT AUTO_SCAN_OUTPUT_FILE)
+        set(AUTO_SCAN_OUTPUT_FILE ${CMAKE_CURRENT_BINARY_DIR}/di_registrations.cpp)
+    endif()
+
+    # Define build-time custom command to scan the directories
+    # It runs the compiled novaboot-scanner executable target.
+    add_custom_command(
+        OUTPUT "${AUTO_SCAN_OUTPUT_FILE}"
+        COMMAND novaboot-scanner --dir "${AUTO_SCAN_DIR}" --output "${AUTO_SCAN_OUTPUT_FILE}"
+        DEPENDS novaboot-scanner
+        COMMENT "Auto-scanning components in ${AUTO_SCAN_DIR}..."
+        VERBATIM
+    )
+
+    # Attach generated source file to the target
+    target_sources(${AUTO_SCAN_TARGET} PRIVATE "${AUTO_SCAN_OUTPUT_FILE}")
 endmacro()

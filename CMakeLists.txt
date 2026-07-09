@@ -126,3 +126,8 @@ endif()
 if(NOVABOOT_BUILD_BENCH)
     add_subdirectory(bench)
 endif()
+
+# ─── Tools ────────────────────────────────────────────────────────────────────
+add_executable(novaboot-scanner src/tools/di_scanner.cpp)
+target_compile_features(novaboot-scanner PRIVATE cxx_std_17)
+
