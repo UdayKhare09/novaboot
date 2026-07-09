@@ -434,6 +434,13 @@ public:
 
     [[nodiscard]] bool is_built() const noexcept { return built_; }
 
+    void add_dependency(std::type_index parent_tid, std::type_index dep_tid) {
+        auto it = registrations_.find(parent_tid);
+        if (it != registrations_.end()) {
+            it->second.dep_type_ids.push_back(dep_tid);
+        }
+    }
+
 private:
     bool built_ = false;
 
@@ -481,6 +488,17 @@ struct FactoryRegistrarImpl<T, Array, std::index_sequence<Is...>> {
             },
             scope, q, is_prim, is_lazy
         );
+
+        // Populate dep_type_ids for cycle detection and topological sorting
+        (root.add_dependency(std::type_index(typeid(T)), std::type_index(typeid(
+            typename[: 
+                std::meta::remove_const(
+                    std::meta::is_reference_type(std::meta::type_of(Array.data[Is])) 
+                    ? std::meta::remove_reference(std::meta::type_of(Array.data[Is]))
+                    : std::meta::type_of(Array.data[Is])
+                )
+            :]
+        ))), ...);
     }
 };
 #endif
