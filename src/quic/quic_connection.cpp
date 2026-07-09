@@ -236,15 +236,16 @@ int QuicConnection::on_write() {
             }
             datavcnt = static_cast<size_t>(ngdatavcnt);
 
-            uint32_t flags = NGTCP2_WRITE_STREAM_FLAG_MORE;
+            uint32_t flags = NGTCP2_WRITE_STREAM_FLAG_NONE;
             if (fin) {
                 flags |= NGTCP2_WRITE_STREAM_FLAG_FIN;
             }
 
+            ngtcp2_ssize pdatalen = 0;
             ngtcp2_ssize nwrite = ngtcp2_conn_writev_stream(
                 conn_, &ps.path, &pi,
                 pkt_buf_.data(), pkt_buf_.size(),
-                nullptr, // pdatacnt (written data count)
+                &pdatalen,
                 flags,
                 stream_id,
                 datav, datavcnt,

@@ -6,11 +6,16 @@ project(novaboot
     LANGUAGES CXX
 )
 
-# ─── C++23 required ───────────────────────────────────────────────────────────
-set(CMAKE_CXX_STANDARD 23)
+# ─── C++26 + Reflection ────────────────────────────────────────────────────────
+# Phase 2: DI/IoC requires C++26 static reflection (P2996/P3385).
+# Verified: GCC 16.1.1 with -freflection supports the full P2996+P3385 API.
+set(CMAKE_CXX_STANDARD 26)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+# Enable C++26 static reflection (P2996 — GCC 16+ flag)
+add_compile_options(-freflection)
 
 # ─── Build type defaults ──────────────────────────────────────────────────────
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
@@ -77,6 +82,10 @@ add_library(novaboot STATIC
 
     # Context
     src/context/request_context.cpp
+
+    # DI / IoC sub-library
+    src/di/lifecycle.cpp
+    src/di/container.cpp
 )
 
 add_library(novaboot::novaboot ALIAS novaboot)
@@ -100,7 +109,7 @@ target_link_libraries(novaboot
         spdlog::spdlog
 )
 
-target_compile_features(novaboot PUBLIC cxx_std_23)
+target_compile_features(novaboot PUBLIC cxx_std_26)
 
 # ─── Examples ─────────────────────────────────────────────────────────────────
 if(NOVABOOT_BUILD_EXAMPLES)

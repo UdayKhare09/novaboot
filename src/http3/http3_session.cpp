@@ -204,7 +204,7 @@ int Http3Session::submit_response(Http3Stream& stream) {
             reinterpret_cast<uint8_t*>(const_cast<char*>(entry.value.data())),
             entry.name.size(),
             entry.value.size(),
-            NGHTTP3_NV_FLAG_NO_COPY_NAME | NGHTTP3_NV_FLAG_NO_COPY_VALUE
+            0
         });
     }
 

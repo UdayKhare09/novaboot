@@ -3,23 +3,29 @@
 # Find GTest
 find_package(GTest REQUIRED)
 
-# Test Targets
-add_executable(test_arena_allocator unit/test_arena_allocator.cpp)
-target_link_libraries(test_arena_allocator PRIVATE novaboot::novaboot GTest::gtest GTest::gtest_main)
-add_test(NAME test_arena_allocator COMMAND test_arena_allocator)
+# Helper macro to add a test executable
+macro(novaboot_test name source)
+    add_executable(${name} ${source})
+    target_link_libraries(${name} PRIVATE novaboot::novaboot GTest::gtest GTest::gtest_main)
+    add_test(NAME ${name} COMMAND ${name})
+endmacro()
 
-add_executable(test_router unit/test_router.cpp)
-target_link_libraries(test_router PRIVATE novaboot::novaboot GTest::gtest GTest::gtest_main)
-add_test(NAME test_router COMMAND test_router)
+# ─── Phase 1 unit tests ──────────────────────────────────────────────────────
+novaboot_test(test_arena_allocator   unit/test_arena_allocator.cpp)
+novaboot_test(test_router            unit/test_router.cpp)
+novaboot_test(test_header_map        unit/test_header_map.cpp)
+novaboot_test(test_middleware_pipeline unit/test_middleware_pipeline.cpp)
+novaboot_test(test_request_context   unit/test_request_context.cpp)
 
-add_executable(test_header_map unit/test_header_map.cpp)
-target_link_libraries(test_header_map PRIVATE novaboot::novaboot GTest::gtest GTest::gtest_main)
-add_test(NAME test_header_map COMMAND test_header_map)
+# ─── Phase 2: DI/IoC unit tests ──────────────────────────────────────────────
+novaboot_test(test_di_singleton       unit/test_di_singleton.cpp)
+novaboot_test(test_di_prototype       unit/test_di_prototype.cpp)
+novaboot_test(test_di_scopes          unit/test_di_scopes.cpp)
+novaboot_test(test_di_lifecycle       unit/test_di_lifecycle.cpp)
+novaboot_test(test_di_qualifiers      unit/test_di_qualifiers.cpp)
+novaboot_test(test_di_async           unit/test_di_async.cpp)
+novaboot_test(test_di_cycle_detection unit/test_di_cycle_detection.cpp)
+novaboot_test(test_di_handler_injection unit/test_di_handler_injection.cpp)
 
-add_executable(test_middleware_pipeline unit/test_middleware_pipeline.cpp)
-target_link_libraries(test_middleware_pipeline PRIVATE novaboot::novaboot GTest::gtest GTest::gtest_main)
-add_test(NAME test_middleware_pipeline COMMAND test_middleware_pipeline)
-
-add_executable(test_server_basic integration/test_server_basic.cpp)
-target_link_libraries(test_server_basic PRIVATE novaboot::novaboot GTest::gtest GTest::gtest_main)
-add_test(NAME test_server_basic COMMAND test_server_basic)
+# ─── Integration tests ────────────────────────────────────────────────────────
+novaboot_test(test_server_basic integration/test_server_basic.cpp)
