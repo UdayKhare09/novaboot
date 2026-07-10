@@ -14,7 +14,9 @@ fi
 # Directory of the script
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${PROJECT_DIR}/build"
-export PATH="${PROJECT_DIR}/odb_gcc_bin:${PATH}"
+if [ -d "${PROJECT_DIR}/odb_gcc_bin" ]; then
+    export PATH="${PROJECT_DIR}/odb_gcc_bin:${PATH}"
+fi
 
 # Check for --clean
 if [[ "${1:-}" == "--clean" ]]; then
