@@ -61,6 +61,61 @@ def main():
         r'\n#pragma db version\n',
         processed
     )
+    # struct/class [[=data::value{}]] -> #pragma db value
+    processed = re.sub(
+        r'(struct|class)\s+\[\[\s*=\s*(?:novaboot\s*::\s*)*data\s*::\s*value\s*(?:\{\s*\})?\s*\]\]\s*(\w+)',
+        r'#pragma db value\n\1 \2',
+        processed
+    )
+
+    # [[=data::unique]] Type name; -> #pragma db index("name_unique") unique members(name) \n Type name;
+    processed = re.sub(
+        r'\[\[\s*=\s*(?:novaboot\s*::\s*)*data\s*::\s*unique\s*(?:\{\s*\})?\s*\]\]\s*([^;]+)\s+(\w+)\s*;',
+        r'#pragma db index("\2_unique") unique members(\2)\n\1 \2;',
+        processed
+    )
+    # [[=data::not_null]] Type name; -> #pragma db member(name) not_null \n Type name;
+    processed = re.sub(
+        r'\[\[\s*=\s*(?:novaboot\s*::\s*)*data\s*::\s*not_null\s*(?:\{\s*\})?\s*\]\]\s*([^;]+)\s+(\w+)\s*;',
+        r'#pragma db member(\2) not_null\n\1 \2;',
+        processed
+    )
+    # [[=data::nullable]] Type name; -> #pragma db member(name) null \n Type name;
+    processed = re.sub(
+        r'\[\[\s*=\s*(?:novaboot\s*::\s*)*data\s*::\s*nullable\s*(?:\{\s*\})?\s*\]\]\s*([^;]+)\s+(\w+)\s*;',
+        r'#pragma db member(\2) null\n\1 \2;',
+        processed
+    )
+    # [[=data::relation{"options"}]] Type name; -> #pragma db member(name) relation("options") \n Type name;
+    processed = re.sub(
+        r'\[\[\s*=\s*(?:novaboot\s*::\s*)*data\s*::\s*relation\s*\{\s*"([^"]*)"\s*\}\s*\]\]\s*([^;]+)\s+(\w+)\s*;',
+        r'#pragma db member(\3) relation(\1)\n\2 \3;',
+        processed
+    )
+    # [[=data::relation]] Type name; -> #pragma db member(name) relation \n Type name;
+    processed = re.sub(
+        r'\[\[\s*=\s*(?:novaboot\s*::\s*)*data\s*::\s*relation\s*(?:\{\s*\})?\s*\]\]\s*([^;]+)\s+(\w+)\s*;',
+        r'#pragma db member(\2) relation\n\1 \2;',
+        processed
+    )
+    # [[=data::lazy]] Type name; -> #pragma db member(name) lazy \n Type name;
+    processed = re.sub(
+        r'\[\[\s*=\s*(?:novaboot\s*::\s*)*data\s*::\s*lazy\s*(?:\{\s*\})?\s*\]\]\s*([^;]+)\s+(\w+)\s*;',
+        r'#pragma db member(\2) lazy\n\1 \2;',
+        processed
+    )
+    # [[=data::index{"name"}]] Type name; -> #pragma db index("name") members(name) \n Type name;
+    processed = re.sub(
+        r'\[\[\s*=\s*(?:novaboot\s*::\s*)*data\s*::\s*index\s*\{\s*"([^"]*)"\s*\}\s*\]\]\s*([^;]+)\s+(\w+)\s*;',
+        r'#pragma db index("\1") members(\3)\n\2 \3;',
+        processed
+    )
+    # [[=data::index]] Type name; -> #pragma db index members(name) \n Type name;
+    processed = re.sub(
+        r'\[\[\s*=\s*(?:novaboot\s*::\s*)*data\s*::\s*index\s*(?:\{\s*\})?\s*\]\]\s*([^;]+)\s+(\w+)\s*;',
+        r'#pragma db index members(\2)\n\1 \2;',
+        processed
+    )
     # Strip any remaining C++26 standard attributes to prevent C++17 ODB compiler errors
     processed = re.sub(
         r'\[\[\s*=.*?\s*\]\]',
