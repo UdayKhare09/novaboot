@@ -2,7 +2,7 @@
 
 #include "novaboot/data/cache_repository.h"
 #include "novaboot/data/redis/redis_data_source.h"
-#include "novaboot/novaboot.h" // for json::serialize / deserialize
+#include "novaboot/router/json.h" // for json::serialize / deserialize
 #include "novaboot/data/redis/redis_reconnect_policy.h"
 #include <sstream>
 #include <string>
