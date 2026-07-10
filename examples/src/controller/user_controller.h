@@ -36,9 +36,9 @@ struct [[=novaboot::web::rest_controller{"/api/users"}]] UserController {
         examples::model::User user,
         novaboot::context::RequestContext& ctx
     ) {
-        ctx.inject<RequestLogger>().log("Processing request: POST /api/users (User DTO resolved automatically)");
-        // Simply return 201 Created with the echoed user object
-        return novaboot::ResponseEntity<examples::model::User>::status(201, user);
+        ctx.inject<RequestLogger>().log("Processing request: POST /api/users");
+        auto saved = user_service.user_repo.save(user);
+        return novaboot::ResponseEntity<examples::model::User>::status(201, saved);
     }
 
     [[=novaboot::web::put{"/:id"}]]
@@ -49,12 +49,14 @@ struct [[=novaboot::web::rest_controller{"/api/users"}]] UserController {
     ) {
         ctx.inject<RequestLogger>().log("Processing request: PUT /api/users/" + std::to_string(id));
         user.set_id(id);
-        return novaboot::ResponseEntity<examples::model::User>::ok(user);
+        auto saved = user_service.user_repo.save(user);
+        return novaboot::ResponseEntity<examples::model::User>::ok(saved);
     }
 
     [[=novaboot::web::del{"/:id"}]]
     novaboot::ResponseEntity<void> delete_user(int id, novaboot::context::RequestContext& ctx) {
         ctx.inject<RequestLogger>().log("Processing request: DELETE /api/users/" + std::to_string(id));
+        user_service.user_repo.delete_by_id(id);
         return novaboot::ResponseEntity<void>::noContent();
     }
 

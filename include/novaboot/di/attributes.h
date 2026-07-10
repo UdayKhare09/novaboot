@@ -1,5 +1,7 @@
 #pragma once
 
+#ifndef ODB_COMPILER
+
 /// @file novaboot/di/attributes.h
 /// Annotation tags for NovaBoot DI — Spring Boot-style stereotypes.
 ///
@@ -136,6 +138,11 @@ struct inject {};  ///< Choose this ctor when multiple user ctors exist
 #ifdef __cpp_impl_reflection
 #  include "novaboot/router/web_attributes.h"
 
+namespace novaboot::data {
+    struct sql_repository {};
+    struct cache_repository {};
+}
+
 namespace novaboot::di::detail {
 
 /// True if cls has any DI stereotype annotation.
@@ -146,7 +153,9 @@ consteval bool is_managed_component(std::meta::info cls) noexcept {
         || !std::meta::annotations_of_with_type(cls, ^^novaboot::di::configuration).empty()
         || !std::meta::annotations_of_with_type(cls, ^^novaboot::web::controller_advice).empty()
         || !std::meta::annotations_of_with_type(cls, ^^novaboot::web::controller).empty()
-        || !std::meta::annotations_of_with_type(cls, ^^novaboot::web::rest_controller).empty();
+        || !std::meta::annotations_of_with_type(cls, ^^novaboot::web::rest_controller).empty()
+        || !std::meta::annotations_of_with_type(cls, ^^novaboot::data::sql_repository).empty()
+        || !std::meta::annotations_of_with_type(cls, ^^novaboot::data::cache_repository).empty();
 }
 
 /// True if cls has [[=module_tag{}]].
@@ -290,3 +299,5 @@ consteval std::vector<std::meta::info> get_bean_factories(std::meta::info module
 } // namespace novaboot::di::detail
 
 #endif // __cpp_impl_reflection
+
+#endif // ODB_COMPILER

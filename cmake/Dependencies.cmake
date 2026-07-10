@@ -24,6 +24,17 @@ find_package(spdlog REQUIRED)
 # simdjson (JSON parser)
 find_package(simdjson REQUIRED)
 
+# tomlplusplus (TOML parser)
+find_package(tomlplusplus REQUIRED)
+
+# redis++ and hiredis (Redis client)
+pkg_check_modules(REDIS_PP REQUIRED IMPORTED_TARGET redis++)
+pkg_check_modules(HIREDIS REQUIRED IMPORTED_TARGET hiredis)
+
+# libodb and libodb-pgsql (ORM)
+pkg_check_modules(LIBODB REQUIRED IMPORTED_TARGET libodb)
+pkg_check_modules(LIBODB_PGSQL REQUIRED IMPORTED_TARGET libodb-pgsql)
+
 # Google Test (only when tests are enabled)
 if(NOVABOOT_BUILD_TESTS)
     find_package(GTest REQUIRED)

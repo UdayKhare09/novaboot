@@ -41,6 +41,12 @@
 #include "novaboot/client/rest_client.h"
 #include "novaboot/client/rest_client_factory.h"
 
+// Configuration & Data sources
+#include "novaboot/config/app_config.h"
+#include "novaboot/data/pgsql/pgsql_data_source.h"
+#include "novaboot/data/redis/redis_data_source.h"
+#include "novaboot/data/data_module.h"
+
 // Auto-generated component registration forward declarations
 namespace novaboot::di { class RootContainer; }
 namespace novaboot { class Server; }

@@ -122,8 +122,8 @@ endmacro()
 macro(novaboot_auto_scan)
     cmake_parse_arguments(AUTO_SCAN
         ""
-        "TARGET;DIR;OUTPUT_FILE"
-        ""
+        "TARGET;OUTPUT_FILE"
+        "DIR"
         ${ARGN}
     )
 
@@ -139,9 +139,14 @@ macro(novaboot_auto_scan)
 
     # Define build-time custom command to scan the directories
     # It runs the compiled novaboot-scanner executable target.
+    set(_scan_dirs_args)
+    foreach(_dir ${AUTO_SCAN_DIR})
+        list(APPEND _scan_dirs_args --dir "${_dir}")
+    endforeach()
+
     add_custom_command(
         OUTPUT "${AUTO_SCAN_OUTPUT_FILE}"
-        COMMAND novaboot-scanner --dir "${AUTO_SCAN_DIR}" --output "${AUTO_SCAN_OUTPUT_FILE}"
+        COMMAND novaboot-scanner ${_scan_dirs_args} --output "${AUTO_SCAN_OUTPUT_FILE}"
         DEPENDS novaboot-scanner
         COMMENT "Auto-scanning components in ${AUTO_SCAN_DIR}..."
         VERBATIM

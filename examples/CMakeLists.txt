@@ -20,11 +20,16 @@ target_link_libraries(sample_app
         spdlog::spdlog
 )
 
+# Generate ODB database mapping for User entity
+odb_generate(sample_app ${CMAKE_CURRENT_SOURCE_DIR}/src/model/user.h)
+
 # Fully automatic Spring Boot-style build-time scanning!
 # Scans all headers under src/ and generates di_registrations.cpp
 novaboot_auto_scan(
     TARGET      sample_app
-    DIR         ${CMAKE_CURRENT_SOURCE_DIR}/src
+    DIR         
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/../include/novaboot/data
     OUTPUT_FILE ${CMAKE_CURRENT_BINARY_DIR}/di_registrations.cpp
 )
 

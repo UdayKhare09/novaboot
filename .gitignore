@@ -1,2 +1,3 @@
 build
 *.lombok.h
+odb_gcc_bin

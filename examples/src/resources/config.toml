@@ -1,0 +1,26 @@
+[server]
+host = "0.0.0.0"
+port = 4433
+workers = 4
+tls.cert = "cert.pem"
+tls.key = "key.pem"
+static_resources = "examples/src/resources/static"
+
+[datasource.postgres]
+host     = "127.0.0.1"
+port     = 5432
+user     = "nova"
+password = "secret"
+database = "novadb"
+pool.min = 2
+pool.max = 10
+
+[datasource.redis]
+mode     = "single"
+nodes    = ["127.0.0.1:6379"]
+password = ""
+pool.size = 5
+pool.timeout_ms = 1000
+read_from = "master"
+cluster.slot_refresh_interval_ms = 5000
+

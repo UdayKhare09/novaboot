@@ -44,12 +44,20 @@ endif()
 
 # ─── Dependencies ─────────────────────────────────────────────────────────────
 include(cmake/Dependencies.cmake)
+include(cmake/OdbGenerate.cmake)
 
 # ─── Library ──────────────────────────────────────────────────────────────────
 add_library(novaboot STATIC
     # Memory
     src/memory/arena_allocator.cpp
     src/memory/pool_allocator.cpp
+
+    # Config
+    src/config/app_config.cpp
+
+    # Data
+    src/data/pgsql/pgsql_data_source.cpp
+    src/data/redis/redis_data_source.cpp
 
     # Net
     src/net/address.cpp
@@ -115,6 +123,11 @@ target_link_libraries(novaboot
         OpenSSL::Crypto
         spdlog::spdlog
         simdjson::simdjson
+        tomlplusplus::tomlplusplus
+        PkgConfig::REDIS_PP
+        PkgConfig::HIREDIS
+        PkgConfig::LIBODB
+        PkgConfig::LIBODB_PGSQL
 )
 
 target_compile_features(novaboot PUBLIC cxx_std_26)

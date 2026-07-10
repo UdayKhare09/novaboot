@@ -35,3 +35,19 @@ novaboot_test(test_validation unit/test_validation.cpp)
 novaboot_test(test_lombok unit/test_lombok.cpp)
 target_include_directories(test_lombok PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../examples/src)
 add_dependencies(test_lombok sample_app)
+
+# ─── Config unit tests ────────────────────────────────────────────────────────
+novaboot_test(test_app_config unit/test_app_config.cpp)
+
+# ─── Data Source unit tests ───────────────────────────────────────────────────
+novaboot_test(test_pgsql_data_source unit/test_pgsql_data_source.cpp)
+novaboot_test(test_redis_data_source unit/test_redis_data_source.cpp)
+
+# ─── Data Repository unit tests ───────────────────────────────────────────────
+novaboot_test(test_pgsql_repository unit/test_pgsql_repository.cpp)
+odb_generate(test_pgsql_repository ${CMAKE_CURRENT_SOURCE_DIR}/unit/db_user.h)
+
+novaboot_test(test_redis_repository unit/test_redis_repository.cpp)
+novaboot_test(test_caching_crud unit/test_caching_crud.cpp)
+
+

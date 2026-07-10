@@ -1,31 +1,24 @@
 #pragma once
 
-#include "novaboot/di/di.h"
+#include "novaboot/data/caching_crud_repository.h"
 #include "model/user.h"
-#include <vector>
-#include <string>
-#include <optional>
+#include "user-odb.hxx"
+#include <chrono>
 
-/// In-memory repository handling database operations (Spring-style Repository)
-struct [[=novaboot::di::repository{}]] UserRepository {
-    UserRepository() = default;
+#include "novaboot/data/pgsql/pgsql_repository_base.h"
+#include "novaboot/data/redis/redis_repository_base.h"
 
-    std::optional<examples::model::User> find_by_id(int id) {
-        if (id > 10) {
-            return std::nullopt;
-        }
-        return examples::model::User::builder()
-            .id(id)
-            .name("John Doe")
-            .email("john.doe" + std::to_string(id) + "@example.com")
-            .role("ROLE_USER")
-            .build();
-    }
+/// Real database and Redis cache backed repository handling User entities.
+struct [[=novaboot::di::repository{}]] UserRepository 
+    : public novaboot::data::CachingCrudRepository<examples::model::User, int> {
+private:
+    novaboot::data::PgsqlRepositoryBase<examples::model::User, int> sql_impl_;
+    novaboot::data::RedisRepositoryBase<examples::model::User, int> cache_impl_;
 
-    std::vector<examples::model::User> find_all() {
-        return {
-            examples::model::User::builder().id(1).name("John Doe").email("john.doe@example.com").role("ROLE_USER").build(),
-            examples::model::User::builder().id(2).name("Jane Smith").email("jane.smith@example.com").role("ROLE_ADMIN").build()
-        };
-    }
+public:
+    explicit UserRepository(novaboot::data::PgsqlDataSource& ds,
+                            novaboot::data::RedisDataSource& rds)
+        : novaboot::data::CachingCrudRepository<examples::model::User, int>(sql_impl_, cache_impl_, std::chrono::seconds(60)),
+          sql_impl_(ds),
+          cache_impl_(rds, "User", std::chrono::seconds(60)) {}
 };

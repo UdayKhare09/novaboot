@@ -1,10 +1,18 @@
 #pragma once
 #include <string>
+#include <utility>
+#include <functional>
+
+#ifndef ODB_COMPILER
 #include "novaboot/validation/validation.h"
 #include "novaboot/lombok/lombok.h"
+#endif
+
+#include "novaboot/data/data_attributes.h"
 
 namespace examples::model {
 
+#ifndef ODB_COMPILER
 struct is_valid_role {
     char prefix[32] = {};
 
@@ -36,8 +44,10 @@ struct is_valid_role {
         return true;
     }
 };
+#endif
 
-struct [[=lombok::data{}]] [[=lombok::builder{}]] User {
+struct [[=novaboot::data::entity{"users"}]] [[=lombok::data{}]] [[=lombok::builder{}]] User {
+    [[=novaboot::data::id{}]]
     [[=novaboot::validation::min{0}]]
     int id;
 
@@ -51,7 +61,9 @@ struct [[=lombok::data{}]] [[=lombok::builder{}]] User {
     [[=examples::model::is_valid_role{}]]
     std::string role;
 
+#ifndef ODB_COMPILER
     #include "user.lombok.h"
+#endif
 };
 
 } // namespace examples::model
