@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 
 #include <openssl/ssl.h>
 #include <ngtcp2/ngtcp2.h>
@@ -32,6 +33,12 @@ public:
     /// The conn_ref must outlive this session (it points back to the
     /// QuicConnection for ngtcp2 crypto callback routing).
     static TlsSession create_server(const TlsContext& tls_ctx,
+                                    ngtcp2_crypto_conn_ref* conn_ref);
+
+    /// Create a TLS session for a client-side QUIC connection.
+    /// hostname is used for SNI and certificate verification.
+    static TlsSession create_client(const TlsContext& tls_ctx,
+                                    const std::string& hostname,
                                     ngtcp2_crypto_conn_ref* conn_ref);
 
     /// Get the raw SSL pointer

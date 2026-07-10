@@ -15,6 +15,7 @@ ConnectionManager::ConnectionManager(const TlsContext& tls_ctx,
 }
 
 int ConnectionManager::on_packet(const net::IncomingPacket& packet) {
+    spdlog::debug("ConnectionManager: received packet of size {} from {}", packet.size, packet.remote.to_string());
     // Decode the version and connection IDs from the raw packet
     ngtcp2_version_cid vc;
     int rv = ngtcp2_pkt_decode_version_cid(
@@ -85,7 +86,7 @@ QuicConnection* ConnectionManager::accept_connection(
     ngtcp2_pkt_hd hd;
     int rv = ngtcp2_accept(&hd, packet.data, packet.size);
     if (rv != 0) {
-        // Not a valid Initial packet — drop silently
+        spdlog::debug("ConnectionManager: ngtcp2_accept failed with code: {} ({})", rv, ngtcp2_strerror(rv));
         return nullptr;
     }
 

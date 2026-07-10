@@ -92,7 +92,29 @@ struct rest_controller {
     }
 };
 
+/// Declarative HTTP/3 REST client annotation.
+/// Place on an abstract class to mark it as a Feign-style remote client.
+/// Individual methods should be annotated with [[=novaboot::web::get{...}]] etc.
+///
+/// Example:
+///   [[=novaboot::web::rest_client{"https://api.example.com:4433"}]]
+///   class UserServiceClient {
+///       [[=novaboot::web::get{"/api/users/{id}"}]]
+///       novaboot::ResponseEntity<User> get_user(int id);
+///   };
+struct rest_client {
+    char url[256] = {};  ///< Full URL including scheme + host + port
+
+    consteval rest_client() = default;
+    consteval rest_client(const char* u) noexcept {
+        for (std::size_t i = 0; i < 255u && u[i]; ++i)
+            url[i] = u[i];
+    }
+    consteval const char* str() const noexcept { return url; }
+};
+
 struct controller_advice {};
+
 
 struct exception_handler {
 #ifdef __cpp_impl_reflection

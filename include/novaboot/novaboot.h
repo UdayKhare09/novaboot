@@ -35,8 +35,15 @@
 // Context
 #include "novaboot/context/request_context.h"
 
+// Client (HTTP/3 REST client)
+#include "novaboot/http3/client_response.h"
+#include "novaboot/async/task.h"
+#include "novaboot/client/rest_client.h"
+#include "novaboot/client/rest_client_factory.h"
+
 // Auto-generated component registration forward declarations
 namespace novaboot::di { class RootContainer; }
 namespace novaboot { class Server; }
 void novaboot_di_register_all(novaboot::di::RootContainer& root);
 void novaboot_web_register_all(novaboot::Server& app);
+

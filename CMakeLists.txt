@@ -73,6 +73,13 @@ add_library(novaboot STATIC
     src/http3/response.cpp
     src/http3/http3_session.cpp
     src/http3/http3_stream.cpp
+    src/http3/http3_client_session.cpp
+
+    # QUIC (client)
+    src/quic/quic_client_connection.cpp
+
+    # Client
+    src/client/rest_client.cpp
 
     # Router
     src/router/router.cpp

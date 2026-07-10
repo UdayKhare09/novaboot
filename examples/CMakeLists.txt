@@ -27,3 +27,20 @@ novaboot_auto_scan(
     DIR         ${CMAKE_CURRENT_SOURCE_DIR}/src
     OUTPUT_FILE ${CMAKE_CURRENT_BINARY_DIR}/di_registrations.cpp
 )
+
+# ─── client_demo ──────────────────────────────────────────────────────────────
+add_executable(client_demo
+    src/client_demo.cpp
+)
+
+target_include_directories(client_demo
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_link_libraries(client_demo
+    PRIVATE
+        novaboot::novaboot
+        spdlog::spdlog
+)
+

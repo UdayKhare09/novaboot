@@ -114,4 +114,56 @@ TlsContext TlsContext::create(const Config& config) {
     return tls;
 }
 
+TlsContext TlsContext::create_client(ClientConfig config) {
+    TlsContext tls;
+    tls.alpn_ = std::make_shared<std::string>(config.alpn);
+
+    // Create SSL_CTX with TLS client method
+    tls.ctx_ = SSL_CTX_new(TLS_client_method());
+    if (!tls.ctx_) {
+        throw std::runtime_error(
+            std::format("SSL_CTX_new (client) failed: {}", get_openssl_error()));
+    }
+
+    // TLS 1.3 only (required for QUIC)
+    SSL_CTX_set_min_proto_version(tls.ctx_, TLS1_3_VERSION);
+    SSL_CTX_set_max_proto_version(tls.ctx_, TLS1_3_VERSION);
+
+    // Peer verification
+    if (config.verify_peer) {
+        SSL_CTX_set_verify(tls.ctx_, SSL_VERIFY_PEER, nullptr);
+        if (!config.ca_file.empty()) {
+            if (SSL_CTX_load_verify_locations(
+                    tls.ctx_, config.ca_file.c_str(), nullptr) != 1) {
+                throw std::runtime_error(
+                    std::format("Failed to load CA file '{}': {}",
+                                config.ca_file, get_openssl_error()));
+            }
+        } else {
+            // Use system default CA bundle
+            SSL_CTX_set_default_verify_paths(tls.ctx_);
+        }
+    } else {
+        SSL_CTX_set_verify(tls.ctx_, SSL_VERIFY_NONE, nullptr);
+    }
+
+    // ALPN — client-side uses SSL_CTX_set_alpn_protos (protos list in wire format)
+    // Wire format: length-prefixed: \x02h3
+    const std::string& alpn = config.alpn;
+    std::vector<unsigned char> alpn_wire;
+    alpn_wire.push_back(static_cast<unsigned char>(alpn.size()));
+    alpn_wire.insert(alpn_wire.end(), alpn.begin(), alpn.end());
+    if (SSL_CTX_set_alpn_protos(tls.ctx_,
+                                alpn_wire.data(),
+                                static_cast<unsigned int>(alpn_wire.size())) != 0) {
+        throw std::runtime_error(
+            std::format("SSL_CTX_set_alpn_protos failed: {}", get_openssl_error()));
+    }
+
+    spdlog::info("TLS client context initialized (OpenSSL {}, verify_peer={})",
+                 OpenSSL_version(OPENSSL_VERSION), config.verify_peer);
+
+    return tls;
+}
+
 } // namespace novaboot::quic

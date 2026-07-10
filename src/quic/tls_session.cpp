@@ -80,4 +80,46 @@ TlsSession TlsSession::create_server(const TlsContext& tls_ctx,
     return session;
 }
 
+TlsSession TlsSession::create_client(const TlsContext& tls_ctx,
+                                      const std::string& hostname,
+                                      ngtcp2_crypto_conn_ref* conn_ref) {
+    TlsSession session;
+
+    // Create SSL object from client context
+    session.ssl_ = SSL_new(tls_ctx.native_handle());
+    if (!session.ssl_) {
+        throw std::runtime_error("SSL_new (client) failed");
+    }
+
+    // Create ngtcp2 crypto context
+    int rv = ngtcp2_crypto_ossl_ctx_new(&session.crypto_ctx_, session.ssl_);
+    if (rv != 0) {
+        throw std::runtime_error(
+            std::format("ngtcp2_crypto_ossl_ctx_new (client) failed: {}", rv));
+    }
+
+    // Configure SSL for client-side QUIC
+    rv = ngtcp2_crypto_ossl_configure_client_session(session.ssl_);
+    if (rv != 0) {
+        throw std::runtime_error(
+            "ngtcp2_crypto_ossl_configure_client_session failed");
+    }
+
+    // Set SNI hostname (required for TLS SNI extension and cert verification)
+    if (!hostname.empty()) {
+        SSL_set_tlsext_host_name(session.ssl_, hostname.c_str());
+        // Also set expected hostname for certificate verification
+        SSL_set1_host(session.ssl_, hostname.c_str());
+    }
+
+    // Set conn_ref as app data — ngtcp2 crypto callbacks route through this
+    SSL_set_app_data(session.ssl_, conn_ref);
+
+    // Set SSL to connect (client mode)
+    SSL_set_connect_state(session.ssl_);
+
+    return session;
+}
+
 } // namespace novaboot::quic
+
