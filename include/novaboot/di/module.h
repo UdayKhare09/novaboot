@@ -71,6 +71,32 @@ void register_factory_bean(RootContainer& container) {
         }();
         return call_factory_helper<ModuleType, FactoryFn>(mod, c, std::make_index_sequence<num_params>{});
     });
+
+    // Add dependency on the parent Module
+    container.add_dependency(std::type_index(typeid(ReturnType)), std::type_index(typeid(ModuleType)));
+
+    // Add dependencies on all parameters of the factory method
+    static constexpr auto params_array = []() consteval {
+        auto vec = std::meta::parameters_of(FactoryFn);
+        struct ParamsArray {
+            std::meta::info data[16] = {};
+            std::size_t size = 0;
+            consteval const std::meta::info* begin() const noexcept { return data; }
+            consteval const std::meta::info* end() const noexcept { return data + size; }
+        };
+        ParamsArray arr;
+        std::size_t n = vec.size() < 16 ? vec.size() : 16;
+        for (std::size_t i = 0; i < n; ++i) {
+            arr.data[i] = vec[i];
+        }
+        arr.size = n;
+        return arr;
+    }();
+
+    template for (constexpr auto param : params_array) {
+        using ParamType = std::remove_cvref_t<typename [: std::meta::type_of(param) :]>;
+        container.add_dependency(std::type_index(typeid(ReturnType)), std::type_index(typeid(ParamType)));
+    }
 }
 
 } // namespace detail

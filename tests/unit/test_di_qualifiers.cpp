@@ -17,6 +17,9 @@ struct RedisCache final : Cache {
     const char* name() const override { return "redis"; }
 };
 
+
+
+
 struct MemcachedCache final : Cache {
     const char* name() const override { return "memcached"; }
 };
@@ -121,4 +124,14 @@ TEST(DIQualifiers, OptionalPresentAndAbsent) {
     Optional<MemcachedCache> absent{root};
     EXPECT_FALSE(absent.has_value());
     EXPECT_EQ(absent.get(), nullptr);
+}
+
+TEST(DIQualifiers, BaseClassInterfaceResolution) {
+    RootContainer root;
+    root.register_component<RedisCache>();
+    root.build();
+
+    // Resolve as base class interface Cache
+    auto& cache = root.resolve<Cache>();
+    EXPECT_STREQ(cache.name(), "redis");
 }

@@ -49,7 +49,6 @@
 #include "novaboot/data/crud_repository.h"
 #include "novaboot/data/cache_repository.h"
 #include "novaboot/data/caching_crud_repository.h"
-#include "novaboot/data/odb_redis_caching_repository.h"
 
 // Auto-generated component registration forward declarations
 namespace novaboot::di { class RootContainer; }

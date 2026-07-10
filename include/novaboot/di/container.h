@@ -246,6 +246,44 @@ consteval auto get_ctor_params() {
 
 template<typename T, auto Array, typename Indices>
 struct FactoryRegistrarImpl;
+
+struct BasesArray {
+    std::meta::info data[16] = {};
+    std::size_t     size = 0;
+
+    consteval const std::meta::info* begin() const noexcept { return data; }
+    consteval const std::meta::info* end() const noexcept { return data + size; }
+};
+
+consteval auto get_all_bases(std::meta::info type) {
+    constexpr auto ctx = std::meta::access_context::current();
+    BasesArray result;
+    
+    auto recurse = [&](auto& self, std::meta::info t) -> void {
+        if (!std::meta::is_complete_type(t) || !std::meta::is_class_type(t)) {
+            return;
+        }
+        auto bases = std::meta::bases_of(t, ctx);
+        for (auto base : bases) {
+            auto base_type = std::meta::type_of(base);
+            bool found = false;
+            for (std::size_t i = 0; i < result.size; ++i) {
+                if (result.data[i] == base_type) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                if (result.size < 16) {
+                    result.data[result.size++] = base_type;
+                    self(self, base_type);
+                }
+            }
+        }
+    };
+    recurse(recurse, type);
+    return result;
+}
 #endif
 } // namespace detail
 
@@ -347,6 +385,30 @@ public:
         detail::FactoryRegistrarImpl<T, params, std::make_index_sequence<params.size>>::register_in(
             *this, scope, q, is_prim, is_lazy
         );
+
+        // Auto-register base classes!
+        static constexpr auto bases = detail::get_all_bases(cls);
+        template for (constexpr auto base : bases) {
+            using BaseType = typename [: base :];
+            auto base_tid = std::type_index(typeid(BaseType));
+            auto it = this->registrations_.find(base_tid);
+            bool should_register = (it == this->registrations_.end()) || (is_prim && !it->second.is_primary);
+            if (should_register) {
+                this->register_bean<BaseType>([](ContainerBase& c) -> BaseType* {
+                    return &c.resolve<T>();
+                }, scope, q, is_prim, is_lazy);
+                
+                // Add dependency from BaseType to concrete type T
+                this->add_dependency(base_tid, std::type_index(typeid(T)));
+                
+                // Override lifecycle handlers to prevent duplicate lifecycle actions or double deletion
+                auto& base_reg = this->registrations_[base_tid];
+                base_reg.destructor_fn = nullptr;
+                base_reg.post_construct_fn = nullptr;
+                base_reg.pre_destroy_fn = nullptr;
+                base_reg.is_lazy = true;
+            }
+        }
 #else
         // Fallback without reflection
         static_assert(sizeof(T) == 0, "novaboot::di: register_component requires C++26 static reflection.");

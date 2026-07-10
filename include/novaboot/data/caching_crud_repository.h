@@ -4,6 +4,7 @@
 #include "novaboot/data/cache_repository.h"
 #include "novaboot/data/repository_utils.h"
 #include <chrono>
+#include <spdlog/spdlog.h>
 
 namespace novaboot::data {
 
@@ -20,17 +21,22 @@ public:
     std::optional<Entity> find_by_id(const Id& id) override {
         try {
             auto cached = cache_repo_->get(id);
-            if (cached) return cached;
+            if (cached) {
+                spdlog::info("CachingCrudRepository: Cache HIT for id: {}", id);
+                return cached;
+            }
         } catch (...) {
-            // cache miss / failure fallback
+            spdlog::warn("CachingCrudRepository: Cache exception while getting id: {}", id);
         }
 
+        spdlog::info("CachingCrudRepository: Cache MISS for id: {}", id);
         auto db_res = sql_repo_->find_by_id(id);
         if (db_res) {
             try {
                 cache_repo_->put(id, *db_res, ttl_);
+                spdlog::info("CachingCrudRepository: Cache POPULATED for id: {}", id);
             } catch (...) {
-                // cache write failure fallback
+                spdlog::warn("CachingCrudRepository: Cache exception while putting id: {}", id);
             }
         }
         return db_res;
@@ -45,6 +51,7 @@ public:
         try {
             auto id = detail::get_entity_id(saved);
             cache_repo_->evict(id);
+            spdlog::info("CachingCrudRepository: Cache EVICTED for id: {}", id);
         } catch (...) {
             // ignore evict failure
         }
@@ -55,6 +62,7 @@ public:
         sql_repo_->delete_by_id(id);
         try {
             cache_repo_->evict(id);
+            spdlog::info("CachingCrudRepository: Cache EVICTED for id: {}", id);
         } catch (...) {
             // ignore evict failure
         }
