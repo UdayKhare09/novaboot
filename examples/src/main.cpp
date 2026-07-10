@@ -17,7 +17,7 @@ using namespace novaboot::di;
 
 int main() {
     // Set logging level
-    spdlog::set_level(spdlog::level::info);
+    spdlog::set_level(spdlog::level::debug);
     spdlog::info("Starting Spring Boot-style C++ DI Sample App");
 
     // 1. DI Container Setup
@@ -35,6 +35,7 @@ int main() {
         .bind("0.0.0.0", 4433)
         .tls("cert.pem", "key.pem")
         .di_container(di_root)
+        .static_resources("examples/src/resources/static")
         .build();
 
     // 3. Web Routing Mapping (Fully automatic Component Scan routing mapping)

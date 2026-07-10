@@ -4,6 +4,8 @@
 #include "novaboot/http3/http3_session.h"
 
 #include <format>
+#include <filesystem>
+#include <fstream>
 
 #include <pthread.h>
 #include <sched.h>
@@ -141,6 +143,71 @@ void Shard::pin_to_core() {
 
 
 
+namespace fs = std::filesystem;
+
+static std::string get_mime_type(const std::string& path) {
+    auto ext = path.substr(path.find_last_of('.') + 1);
+    if (ext == "html" || ext == "htm") return "text/html";
+    if (ext == "css") return "text/css";
+    if (ext == "js" || ext == "mjs") return "application/javascript";
+    if (ext == "json") return "application/json";
+    if (ext == "png") return "image/png";
+    if (ext == "jpg" || ext == "jpeg") return "image/jpeg";
+    if (ext == "gif") return "image/gif";
+    if (ext == "svg") return "image/svg+xml";
+    if (ext == "ico") return "image/x-icon";
+    if (ext == "txt") return "text/plain";
+    if (ext == "pdf") return "application/pdf";
+    if (ext == "xml") return "application/xml";
+    return "application/octet-stream";
+}
+
+bool Shard::serve_static_file(std::string_view path, http3::Response& res, bool head_only) {
+    if (config_.static_resources_dir.empty()) {
+        return false;
+    }
+
+    try {
+        fs::path base = fs::canonical(config_.static_resources_dir);
+        
+        std::string sub_path(path);
+        if (sub_path == "/" || sub_path.empty()) {
+            sub_path = "/index.html";
+        }
+        
+        fs::path target = fs::weakly_canonical(base / sub_path.substr(1));
+        
+        // Prevent directory traversal attacks
+        auto base_str = base.string();
+        auto target_str = target.string();
+        if (target_str.find(base_str) != 0) {
+            return false;
+        }
+
+        if (fs::exists(target) && fs::is_regular_file(target)) {
+            auto file_size = fs::file_size(target);
+            res.status(200)
+               .header("content-type", get_mime_type(target_str))
+               .header("content-length", std::to_string(file_size));
+            
+            if (!head_only) {
+                std::ifstream file(target, std::ios::binary);
+                if (file.is_open()) {
+                    std::string body((std::istreambuf_iterator<char>(file)),
+                                     std::istreambuf_iterator<char>());
+                    res.body(body);
+                } else {
+                    return false;
+                }
+            }
+            return true;
+        }
+    } catch (...) {
+        // Fallback
+    }
+    return false;
+}
+
 void Shard::on_request(http3::Http3Stream& stream) {
     auto& req = stream.request();
     auto& res = stream.response();
@@ -149,6 +216,13 @@ void Shard::on_request(http3::Http3Stream& stream) {
     auto result = router_.match(req.method(), req.path());
 
     if (!result.handler) {
+        // Fallback to serving static files for GET and HEAD requests
+        if (req.method() == "GET" || req.method() == "HEAD") {
+            if (serve_static_file(req.path(), res, req.method() == "HEAD")) {
+                return;
+            }
+        }
+
         // 404 Not Found
         res.status(404)
            .header("content-type", "text/plain")

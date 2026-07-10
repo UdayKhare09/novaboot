@@ -73,6 +73,11 @@ Server::Builder& Server::Builder::backend(core::EventLoopBackend b) {
     return *this;
 }
 
+Server::Builder& Server::Builder::static_resources(std::string_view path) {
+    static_resources_dir_ = std::string(path);
+    return *this;
+}
+
 Server::Builder& Server::Builder::di_container(di::RootContainer& root) {
     di_root_ = &root;
     return *this;
@@ -122,6 +127,7 @@ std::unique_ptr<Server> Server::Builder::build() {
 
     // Set backend
     server->backend_ = backend_;
+    server->static_resources_dir_ = static_resources_dir_;
 
     spdlog::info("NovaBoot server configured:");
     spdlog::info("  Bind:    {}", server->bind_address_.to_string());
@@ -130,6 +136,9 @@ std::unique_ptr<Server> Server::Builder::build() {
                  server->backend_ == core::EventLoopBackend::IoUring
                      ? "io_uring" : "epoll");
     spdlog::info("  TLS:     {} / {}", cert_path_, key_path_);
+    if (!static_resources_dir_.empty()) {
+        spdlog::info("  Static:  {}", static_resources_dir_);
+    }
 
     return server;
 }
@@ -171,6 +180,7 @@ void Server::run() {
         shard_config.cpu_core     = i; // Pin shard i to core i
         shard_config.bind_address = bind_address_;
         shard_config.backend      = backend_;
+        shard_config.static_resources_dir = static_resources_dir_;
 
         auto shard = std::make_unique<core::Shard>(
             shard_config, *tls_ctx_, router_, pipeline_);

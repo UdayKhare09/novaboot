@@ -34,6 +34,9 @@ std::unique_ptr<Http3Session> Http3Session::create(
     // Settings
     nghttp3_settings settings;
     nghttp3_settings_default(&settings);
+    settings.qpack_max_dtable_capacity = 4096;
+    settings.qpack_encoder_max_dtable_capacity = 4096;
+    settings.qpack_blocked_streams = 100;
 
     // Create the nghttp3 server connection
     int rv = nghttp3_conn_server_new(
@@ -47,6 +50,8 @@ std::unique_ptr<Http3Session> Http3Session::create(
         spdlog::error("nghttp3_conn_server_new failed: {}", nghttp3_strerror(rv));
         return nullptr;
     }
+
+    nghttp3_conn_set_max_client_streams_bidi(session->conn_, 100);
 
     // Bind control and QPACK streams
     // ngtcp2 opens unidirectional streams for HTTP/3 control:
@@ -91,16 +96,51 @@ std::unique_ptr<Http3Session> Http3Session::create(
     return session;
 }
 
-int Http3Session::on_stream_data(int64_t stream_id, const uint8_t* data,
+int Http3Session::on_stream_data(int64_t stream_id, uint64_t offset, const uint8_t* data,
                                  size_t datalen, bool fin) {
+    if (datalen == 0 && !fin) {
+        return 0;
+    }
+
+    uint64_t& current_read_offset = stream_read_offsets_[stream_id];
+
+    spdlog::debug("on_stream_data: stream_id={}, offset={}, datalen={}, fin={}, current_read_offset={}",
+                  stream_id, offset, datalen, fin, current_read_offset);
+
+    if (offset + datalen <= current_read_offset) {
+        // This entire chunk is duplicate data we already processed.
+        if (fin) {
+            auto nread = nghttp3_conn_read_stream(conn_, stream_id, nullptr, 0, 1);
+            if (nread < 0) {
+                spdlog::debug("nghttp3_conn_read_stream error: {}",
+                              nghttp3_strerror(static_cast<int>(nread)));
+                return -1;
+            }
+        }
+        return 0;
+    }
+
+    if (offset < current_read_offset) {
+        // Skip duplicate bytes at the start of the chunk
+        size_t skip = static_cast<size_t>(current_read_offset - offset);
+        data += skip;
+        datalen -= skip;
+        offset = current_read_offset;
+    }
+
     auto nread = nghttp3_conn_read_stream(
         conn_, stream_id, data, datalen, fin ? 1 : 0);
+
+    spdlog::debug("on_stream_data: stream_id={}, nread={}", stream_id, nread);
 
     if (nread < 0) {
         spdlog::debug("nghttp3_conn_read_stream error: {}",
                       nghttp3_strerror(static_cast<int>(nread)));
         return -1;
     }
+
+    // Update the read offset to match what we actually read/provided
+    current_read_offset = offset + datalen;
 
     // Tell ngtcp2 how much data nghttp3 consumed
     ngtcp2_conn_extend_max_stream_offset(
@@ -122,6 +162,7 @@ int Http3Session::on_stream_close(int64_t stream_id,
 
     // Clean up the stream
     streams_.erase(stream_id);
+    stream_read_offsets_.erase(stream_id);
     return 0;
 }
 
@@ -156,15 +197,8 @@ nghttp3_ssize Http3Session::get_stream_data(int64_t* stream_id, int* fin,
         conn_, stream_id, fin, ngvec, veccnt);
 }
 
-void Http3Session::add_write_offset(int64_t stream_id, size_t datavcnt,
-                                    ngtcp2_vec* datav) {
-    uint64_t total = 0;
-    for (size_t i = 0; i < datavcnt; ++i) {
-        total += datav[i].len;
-    }
-
-    int rv = nghttp3_conn_add_write_offset(conn_, stream_id,
-                                           static_cast<size_t>(total));
+void Http3Session::add_write_offset(int64_t stream_id, size_t datalen) {
+    int rv = nghttp3_conn_add_write_offset(conn_, stream_id, datalen);
     if (rv != 0) {
         spdlog::debug("nghttp3_conn_add_write_offset error: {}",
                       nghttp3_strerror(rv));
@@ -402,13 +436,17 @@ nghttp3_ssize Http3Session::on_read_data(
 
     auto& res = stream->response();
     auto body = res.body_data();
-    auto sent = res.bytes_sent();
-    auto remaining = body.size() - sent;
+    auto provided = res.bytes_provided();
+    auto remaining = body.size() - provided;
+
+    spdlog::debug("on_read_data: stream_id={}, body_size={}, provided={}, remaining={}",
+                  stream->stream_id(), body.size(), provided, remaining);
 
     if (remaining > 0) {
         vec[0].base = const_cast<uint8_t*>(
-            reinterpret_cast<const uint8_t*>(body.data() + sent));
+            reinterpret_cast<const uint8_t*>(body.data() + provided));
         vec[0].len = remaining;
+        res.add_bytes_provided(remaining);
     }
 
     // This is the last chunk

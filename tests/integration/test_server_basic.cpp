@@ -90,3 +90,19 @@ TEST(ServerIntegrationTest, EpollLifecycle) {
         server_thread.join();
     }
 }
+
+TEST(ServerIntegrationTest, StaticResourcesConfiguration) {
+    auto cert = get_cert_path();
+    auto key = get_key_path();
+    ASSERT_FALSE(cert.empty()) << "cert.pem not found!";
+    ASSERT_FALSE(key.empty()) << "key.pem not found!";
+
+    auto app = Server::create()
+        .bind("127.0.0.1", 4436)
+        .tls(cert, key)
+        .workers(1)
+        .static_resources("examples/src/resources/static")
+        .build();
+
+    ASSERT_NE(app, nullptr);
+}

@@ -174,7 +174,8 @@ private:
     // Instance-level handlers
     int handle_handshake_completed();
     int handle_recv_stream_data(uint32_t flags, int64_t stream_id,
-                                const uint8_t* data, size_t datalen);
+                                uint64_t offset, const uint8_t* data,
+                                size_t datalen);
     int handle_stream_close(int64_t stream_id, uint64_t app_error_code);
     int handle_acked_stream_data(int64_t stream_id, uint64_t offset,
                                  uint64_t datalen);
@@ -205,6 +206,7 @@ private:
     CidMapCallback           cid_map_cb_;
     CidUnmapCallback         cid_unmap_cb_;
     bool closed_ = false;
+    bool in_error_state_ = false;
 };
 
 } // namespace novaboot::quic

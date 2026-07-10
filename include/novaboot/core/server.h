@@ -24,6 +24,20 @@ namespace novaboot::di { class RootContainer; }
 namespace novaboot {
 
 namespace detail {
+
+inline std::string join_paths(std::string_view prefix, std::string_view path) {
+    if (prefix.empty()) return std::string(path);
+    if (path.empty()) return std::string(prefix);
+    
+    std::string result(prefix);
+    if (result.back() == '/' && path.front() == '/') {
+        result.pop_back();
+    } else if (result.back() != '/' && path.front() != '/') {
+        result += "/";
+    }
+    result += path;
+    return result;
+}
 #ifdef __cpp_impl_reflection
 template<typename T>
 consteval auto get_members() {
@@ -223,6 +237,9 @@ public:
         /// Set the event loop backend (default: IoUring)
         Builder& backend(core::EventLoopBackend b);
 
+        /// Set the static resources directory (like in Spring Boot)
+        Builder& static_resources(std::string_view path);
+
         /// Build and return the server
         std::unique_ptr<Server> build();
 
@@ -235,6 +252,7 @@ public:
         core::EventLoopBackend backend_ = core::EventLoopBackend::IoUring;
         di::RootContainer* di_root_     = nullptr;
         std::vector<std::shared_ptr<middleware::Middleware>> middlewares_;
+        std::string   static_resources_dir_;
     };
 
     /// Create a server builder
@@ -253,6 +271,21 @@ public:
     template<typename T>
     Server& register_controller() {
 #ifdef __cpp_impl_reflection
+        constexpr auto cls = ^^T;
+        static constexpr auto get_prefix = []() -> std::string_view {
+            if constexpr (!std::meta::annotations_of_with_type(cls, ^^novaboot::web::rest_controller).empty()) {
+                constexpr auto ann = std::meta::annotations_of_with_type(cls, ^^novaboot::web::rest_controller)[0];
+                static constexpr auto annot = std::meta::extract<novaboot::web::rest_controller>(ann);
+                return std::string_view(annot.path);
+            } else if constexpr (!std::meta::annotations_of_with_type(cls, ^^novaboot::web::controller).empty()) {
+                constexpr auto ann = std::meta::annotations_of_with_type(cls, ^^novaboot::web::controller)[0];
+                static constexpr auto annot = std::meta::extract<novaboot::web::controller>(ann);
+                return std::string_view(annot.path);
+            }
+            return "";
+        };
+        static constexpr std::string_view prefix = get_prefix();
+
         static constexpr auto members = detail::get_members<T>();
         template for (constexpr auto m : members) {
             if constexpr (std::meta::is_function(m) && !std::meta::is_constructor(m) && !std::meta::is_destructor(m)) {
@@ -260,49 +293,49 @@ public:
                 if constexpr (!std::meta::annotations_of_with_type(m, ^^novaboot::web::get).empty()) {
                     constexpr auto ann = std::meta::annotations_of_with_type(m, ^^novaboot::web::get)[0];
                     constexpr auto route_annot = std::meta::extract<novaboot::web::get>(ann);
-                    this->deduce_and_bind<T, m>(route_annot.path, router::Method::GET, &[:m:]);
+                    this->deduce_and_bind<T, m>(detail::join_paths(prefix, route_annot.path), router::Method::GET, &[:m:]);
                 }
                 // POST
                 else if constexpr (!std::meta::annotations_of_with_type(m, ^^novaboot::web::post).empty()) {
                     constexpr auto ann = std::meta::annotations_of_with_type(m, ^^novaboot::web::post)[0];
                     constexpr auto route_annot = std::meta::extract<novaboot::web::post>(ann);
-                    this->deduce_and_bind<T, m>(route_annot.path, router::Method::POST, &[:m:]);
+                    this->deduce_and_bind<T, m>(detail::join_paths(prefix, route_annot.path), router::Method::POST, &[:m:]);
                 }
                 // PUT
                 else if constexpr (!std::meta::annotations_of_with_type(m, ^^novaboot::web::put).empty()) {
                     constexpr auto ann = std::meta::annotations_of_with_type(m, ^^novaboot::web::put)[0];
                     constexpr auto route_annot = std::meta::extract<novaboot::web::put>(ann);
-                    this->deduce_and_bind<T, m>(route_annot.path, router::Method::PUT, &[:m:]);
+                    this->deduce_and_bind<T, m>(detail::join_paths(prefix, route_annot.path), router::Method::PUT, &[:m:]);
                 }
                 // DELETE
                 else if constexpr (!std::meta::annotations_of_with_type(m, ^^novaboot::web::del).empty()) {
                     constexpr auto ann = std::meta::annotations_of_with_type(m, ^^novaboot::web::del)[0];
                     constexpr auto route_annot = std::meta::extract<novaboot::web::del>(ann);
-                    this->deduce_and_bind<T, m>(route_annot.path, router::Method::DELETE_, &[:m:]);
+                    this->deduce_and_bind<T, m>(detail::join_paths(prefix, route_annot.path), router::Method::DELETE_, &[:m:]);
                 }
                 // PATCH
                 else if constexpr (!std::meta::annotations_of_with_type(m, ^^novaboot::web::patch).empty()) {
                     constexpr auto ann = std::meta::annotations_of_with_type(m, ^^novaboot::web::patch)[0];
                     constexpr auto route_annot = std::meta::extract<novaboot::web::patch>(ann);
-                    this->deduce_and_bind<T, m>(route_annot.path, router::Method::PATCH, &[:m:]);
+                    this->deduce_and_bind<T, m>(detail::join_paths(prefix, route_annot.path), router::Method::PATCH, &[:m:]);
                 }
                 // HEAD
                 else if constexpr (!std::meta::annotations_of_with_type(m, ^^novaboot::web::head).empty()) {
                     constexpr auto ann = std::meta::annotations_of_with_type(m, ^^novaboot::web::head)[0];
                     constexpr auto route_annot = std::meta::extract<novaboot::web::head>(ann);
-                    this->deduce_and_bind<T, m>(route_annot.path, router::Method::HEAD, &[:m:]);
+                    this->deduce_and_bind<T, m>(detail::join_paths(prefix, route_annot.path), router::Method::HEAD, &[:m:]);
                 }
                 // OPTIONS
                 else if constexpr (!std::meta::annotations_of_with_type(m, ^^novaboot::web::options).empty()) {
                     constexpr auto ann = std::meta::annotations_of_with_type(m, ^^novaboot::web::options)[0];
                     constexpr auto route_annot = std::meta::extract<novaboot::web::options>(ann);
-                    this->deduce_and_bind<T, m>(route_annot.path, router::Method::OPTIONS, &[:m:]);
+                    this->deduce_and_bind<T, m>(detail::join_paths(prefix, route_annot.path), router::Method::OPTIONS, &[:m:]);
                 }
                 // ANY
                 else if constexpr (!std::meta::annotations_of_with_type(m, ^^novaboot::web::any).empty()) {
                     constexpr auto ann = std::meta::annotations_of_with_type(m, ^^novaboot::web::any)[0];
                     constexpr auto route_annot = std::meta::extract<novaboot::web::any>(ann);
-                    this->deduce_and_bind<T, m>(route_annot.path, router::Method::ANY, &[:m:]);
+                    this->deduce_and_bind<T, m>(detail::join_paths(prefix, route_annot.path), router::Method::ANY, &[:m:]);
                 }
             }
         }
@@ -413,6 +446,7 @@ private:
     int          worker_count_ = 0;
     bool         running_      = false;
     core::EventLoopBackend backend_ = core::EventLoopBackend::IoUring;
+    std::string  static_resources_dir_;
 
     /// Static reference for signal handler
     static Server* instance_;

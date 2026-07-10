@@ -72,8 +72,25 @@ struct any {
 
 struct request_body {};
 
-struct controller {};
-struct rest_controller {};
+struct controller {
+    char path[64] = {};
+
+    consteval controller() = default;
+    consteval controller(const char* s) noexcept {
+        for (std::size_t i = 0; i < 63u && s[i]; ++i)
+            path[i] = s[i];
+    }
+};
+
+struct rest_controller {
+    char path[64] = {};
+
+    consteval rest_controller() = default;
+    consteval rest_controller(const char* s) noexcept {
+        for (std::size_t i = 0; i < 63u && s[i]; ++i)
+            path[i] = s[i];
+    }
+};
 
 struct controller_advice {};
 

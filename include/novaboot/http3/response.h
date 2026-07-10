@@ -94,6 +94,12 @@ public:
     }
     void add_bytes_sent(std::size_t n) noexcept { bytes_sent_ += n; }
 
+    /// How much of the body has been provided to nghttp3
+    [[nodiscard]] std::size_t bytes_provided() const noexcept {
+        return bytes_provided_;
+    }
+    void add_bytes_provided(std::size_t n) noexcept { bytes_provided_ += n; }
+
     [[nodiscard]] bool is_body_complete() const noexcept {
         return bytes_sent_ >= body_.size();
     }
@@ -104,6 +110,7 @@ private:
     std::string body_;
     bool        submitted_  = false;
     std::size_t bytes_sent_ = 0;
+    std::size_t bytes_provided_ = 0;
 };
 
 } // namespace novaboot::http3

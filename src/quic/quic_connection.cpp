@@ -255,12 +255,12 @@ int QuicConnection::on_write() {
                 if (nwrite == NGTCP2_ERR_WRITE_MORE) {
                     // Tell nghttp3 how much data was consumed
                     // ngtcp2 wants more data in the same packet
-                    http3_session_->add_write_offset(stream_id, datavcnt, datav);
+                    http3_session_->add_write_offset(stream_id, static_cast<size_t>(pdatalen));
                     continue;
                 }
                 if (nwrite == NGTCP2_ERR_STREAM_NOT_FOUND ||
                     nwrite == NGTCP2_ERR_STREAM_SHUT_WR) {
-                    http3_session_->add_write_offset(stream_id, datavcnt, datav);
+                    http3_session_->add_write_offset(stream_id, static_cast<size_t>(pdatalen));
                     continue;
                 }
                 spdlog::debug("ngtcp2_conn_writev_stream error: {}",
@@ -274,8 +274,8 @@ int QuicConnection::on_write() {
             }
 
             // Tell nghttp3 about written data
-            if (stream_id >= 0 && datavcnt > 0) {
-                http3_session_->add_write_offset(stream_id, datavcnt, datav);
+            if (stream_id >= 0 && pdatalen > 0) {
+                http3_session_->add_write_offset(stream_id, static_cast<size_t>(pdatalen));
             }
 
             // Send the packet
@@ -437,23 +437,32 @@ int QuicConnection::handle_handshake_completed() {
 
 int QuicConnection::on_recv_stream_data(
     ngtcp2_conn* /*conn*/, uint32_t flags,
-    int64_t stream_id, uint64_t /*offset*/,
+    int64_t stream_id, uint64_t offset,
     const uint8_t* data, size_t datalen,
     void* user_data, void* /*stream_user_data*/) {
     auto* self = static_cast<QuicConnection*>(user_data);
-    return self->handle_recv_stream_data(flags, stream_id, data, datalen);
+    return self->handle_recv_stream_data(flags, stream_id, offset, data, datalen);
 }
 
 int QuicConnection::handle_recv_stream_data(
-    uint32_t flags, int64_t stream_id,
+    uint32_t flags, int64_t stream_id, uint64_t offset,
     const uint8_t* data, size_t datalen) {
+
+    if (in_error_state_) {
+        return NGTCP2_ERR_CALLBACK_FAILURE;
+    }
 
     if (!http3_session_) {
         return 0; // HTTP/3 session not yet established
     }
 
-    return http3_session_->on_stream_data(stream_id, data, datalen,
-                                          flags & NGTCP2_STREAM_DATA_FLAG_FIN);
+    int rv = http3_session_->on_stream_data(stream_id, offset, data, datalen,
+                                            flags & NGTCP2_STREAM_DATA_FLAG_FIN);
+    if (rv != 0) {
+        in_error_state_ = true;
+        return NGTCP2_ERR_CALLBACK_FAILURE;
+    }
+    return 0;
 }
 
 int QuicConnection::on_stream_open(ngtcp2_conn* /*conn*/,

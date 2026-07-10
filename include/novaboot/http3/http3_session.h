@@ -40,7 +40,7 @@ public:
         RequestHandler handler);
 
     /// Feed stream data from ngtcp2 into nghttp3
-    int on_stream_data(int64_t stream_id, const uint8_t* data,
+    int on_stream_data(int64_t stream_id, uint64_t offset, const uint8_t* data,
                        size_t datalen, bool fin);
 
     /// Notify nghttp3 that a stream has been closed
@@ -59,8 +59,7 @@ public:
                                   ngtcp2_vec* vec, size_t veccnt);
 
     /// Inform nghttp3 that data has been written to the QUIC stream
-    void add_write_offset(int64_t stream_id, size_t datavcnt,
-                          ngtcp2_vec* datav);
+    void add_write_offset(int64_t stream_id, size_t datalen);
 
     /// Submit an HTTP response for a stream
     int submit_response(Http3Stream& stream);
@@ -114,6 +113,9 @@ private:
 
     /// Stream ID → Http3Stream
     std::unordered_map<int64_t, std::unique_ptr<Http3Stream>> streams_;
+
+    /// Stream ID → Read Offset (to discard duplicates/retransmissions)
+    std::unordered_map<int64_t, uint64_t> stream_read_offsets_;
 
     /// Called when request is ready for routing
     RequestHandler handler_;

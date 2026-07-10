@@ -1,0 +1,718 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NovaBoot Developer Console</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+        rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #0b0f19;
+            --card-bg: rgba(17, 24, 39, 0.7);
+            --border-color: rgba(255, 255, 255, 0.08);
+            --accent-primary: #6366f1;
+            --accent-secondary: #a855f7;
+            --accent-glow: rgba(99, 102, 241, 0.15);
+            --text-primary: #f3f4f6;
+            --text-secondary: #9ca3af;
+            --success-color: #10b981;
+            --danger-color: #ef4444;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Outfit', sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-primary);
+            min-height: 100vh;
+            overflow-x: hidden;
+            background-image:
+                radial-gradient(circle at 10% 20%, rgba(99, 102, 241, 0.08) 0%, transparent 40%),
+                radial-gradient(circle at 90% 80%, rgba(168, 85, 247, 0.08) 0%, transparent 40%);
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 24px 40px;
+            border-bottom: 1px solid var(--border-color);
+            background: rgba(11, 15, 25, 0.5);
+            backdrop-filter: blur(12px);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        .logo-container {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .logo-icon {
+            width: 32px;
+            height: 32px;
+            background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            color: white;
+            box-shadow: 0 0 16px rgba(99, 102, 241, 0.4);
+        }
+
+        .logo-text {
+            font-size: 20px;
+            font-weight: 700;
+            letter-spacing: -0.5px;
+            background: linear-gradient(to right, #ffffff, #d1d5db);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .badge {
+            background: rgba(99, 102, 241, 0.15);
+            border: 1px solid rgba(99, 102, 241, 0.3);
+            color: #818cf8;
+            padding: 4px 10px;
+            border-radius: 99px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+
+        main {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 40px 20px;
+            display: grid;
+            grid-template-columns: 1fr 1.2fr;
+            gap: 32px;
+        }
+
+        @media (max-width: 1024px) {
+            main {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .card {
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 28px;
+            backdrop-filter: blur(16px);
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+            transition: transform 0.3s ease, border-color 0.3s ease;
+        }
+
+        .card:hover {
+            border-color: rgba(99, 102, 241, 0.25);
+        }
+
+        .card-title {
+            font-size: 18px;
+            font-weight: 600;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 14px;
+        }
+
+        .card-title svg {
+            color: var(--accent-primary);
+        }
+
+        .shard-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+
+        .shard-node {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 16px 12px;
+            text-align: center;
+            position: relative;
+            overflow: hidden;
+            transition: all 0.3s ease;
+        }
+
+        .shard-node.active {
+            border-color: rgba(16, 185, 129, 0.2);
+            background: rgba(16, 185, 129, 0.02);
+        }
+
+        .shard-indicator {
+            width: 8px;
+            height: 8px;
+            background-color: var(--success-color);
+            border-radius: 50%;
+            display: inline-block;
+            margin-bottom: 8px;
+            box-shadow: 0 0 10px var(--success-color);
+            animation: pulse 1.5s infinite;
+        }
+
+        @keyframes pulse {
+            0% {
+                transform: scale(1);
+                opacity: 1;
+            }
+
+            50% {
+                transform: scale(1.3);
+                opacity: 0.5;
+            }
+
+            100% {
+                transform: scale(1);
+                opacity: 1;
+            }
+        }
+
+        .shard-name {
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .shard-load {
+            font-size: 11px;
+            color: var(--text-secondary);
+            margin-top: 4px;
+        }
+
+        .form-group {
+            margin-bottom: 18px;
+        }
+
+        .form-group label {
+            display: block;
+            font-size: 13px;
+            color: var(--text-secondary);
+            margin-bottom: 8px;
+            font-weight: 500;
+        }
+
+        .form-control {
+            width: 100%;
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 10px 14px;
+            color: var(--text-primary);
+            font-family: inherit;
+            font-size: 14px;
+            transition: all 0.3s ease;
+        }
+
+        .form-control:focus {
+            outline: none;
+            border-color: var(--accent-primary);
+            box-shadow: 0 0 12px var(--accent-glow);
+            background: rgba(255, 255, 255, 0.06);
+        }
+
+        .btn {
+            background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
+            color: white;
+            border: none;
+            padding: 12px 20px;
+            border-radius: 8px;
+            font-weight: 600;
+            font-size: 14px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            box-shadow: 0 4px 14px rgba(99, 102, 241, 0.2);
+        }
+
+        .btn:hover {
+            opacity: 0.95;
+            transform: translateY(-1px);
+            box-shadow: 0 6px 20px rgba(99, 102, 241, 0.3);
+        }
+
+        .btn:active {
+            transform: translateY(0);
+        }
+
+        .btn-secondary {
+            background: rgba(255, 255, 255, 0.06);
+            color: var(--text-primary);
+            border: 1px solid var(--border-color);
+            box-shadow: none;
+        }
+
+        .btn-secondary:hover {
+            background: rgba(255, 255, 255, 0.1);
+            border-color: rgba(255, 255, 255, 0.2);
+            box-shadow: none;
+        }
+
+        .api-list {
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+        }
+
+        .api-item {
+            background: rgba(255, 255, 255, 0.02);
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            transition: border-color 0.3s ease;
+        }
+
+        .api-item:hover {
+            border-color: rgba(255, 255, 255, 0.15);
+        }
+
+        .api-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .api-route {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 14px;
+        }
+
+        .method {
+            padding: 3px 8px;
+            border-radius: 6px;
+            font-size: 11px;
+            font-weight: 700;
+            text-transform: uppercase;
+        }
+
+        .method.get {
+            background: rgba(16, 185, 129, 0.15);
+            color: #34d399;
+            border: 1px solid rgba(16, 185, 129, 0.2);
+        }
+
+        .method.post {
+            background: rgba(99, 102, 241, 0.15);
+            color: #818cf8;
+            border: 1px solid rgba(99, 102, 241, 0.2);
+        }
+
+        .method.put {
+            background: rgba(245, 158, 11, 0.15);
+            color: #fbbf24;
+            border: 1px solid rgba(245, 158, 11, 0.2);
+        }
+
+        .method.delete {
+            background: rgba(239, 68, 68, 0.15);
+            color: #f87171;
+            border: 1px solid rgba(239, 68, 68, 0.2);
+        }
+
+        .api-desc {
+            font-size: 13px;
+            color: var(--text-secondary);
+        }
+
+        .console-container {
+            margin-top: 32px;
+        }
+
+        .console-header {
+            background: #111827;
+            border: 1px solid var(--border-color);
+            border-bottom: none;
+            border-top-left-radius: 12px;
+            border-top-right-radius: 12px;
+            padding: 12px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 13px;
+            color: var(--text-secondary);
+        }
+
+        .console-dots {
+            display: flex;
+            gap: 6px;
+        }
+
+        .console-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #ef4444;
+        }
+
+        .console-dot:nth-child(2) {
+            background: #f59e0b;
+        }
+
+        .console-dot:nth-child(3) {
+            background: #10b981;
+        }
+
+        .console-body {
+            background: #030712;
+            border: 1px solid var(--border-color);
+            border-bottom-left-radius: 12px;
+            border-bottom-right-radius: 12px;
+            padding: 20px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 13px;
+            color: #10b981;
+            min-height: 200px;
+            max-height: 400px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.8);
+        }
+
+        .toast {
+            position: fixed;
+            bottom: 24px;
+            right: 24px;
+            background: rgba(17, 24, 39, 0.9);
+            border: 1px solid var(--border-color);
+            border-left: 4px solid var(--success-color);
+            padding: 16px 24px;
+            border-radius: 8px;
+            backdrop-filter: blur(12px);
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.3);
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            transform: translateY(100px);
+            opacity: 0;
+            transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+            z-index: 1000;
+        }
+
+        .toast.show {
+            transform: translateY(0);
+            opacity: 1;
+        }
+
+        .toast.error {
+            border-left-color: var(--danger-color);
+        }
+    </style>
+</head>
+
+<body>
+    <header>
+        <div class="logo-container">
+            <div class="logo-icon">N</div>
+            <div class="logo-text">NovaBoot</div>
+            <div class="badge">HTTP/3 Server</div>
+        </div>
+        <div>
+            <span style="font-size: 14px; color: var(--text-secondary)">Status: </span>
+            <span style="color: var(--success-color); font-weight: 600; font-size: 14px">● Live</span>
+        </div>
+    </header>
+
+    <main>
+        <div style="display: flex; flex-direction: column; gap: 32px;">
+            <!-- Shards dashboard -->
+            <div class="card">
+                <div class="card-title">
+                    <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round"
+                            d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01">
+                        </path>
+                    </svg>
+                    QUIC / HTTP/3 Shards Engine
+                </div>
+                <div class="shard-grid" id="shards-container">
+                    <!-- Shards are generated by javascript -->
+                </div>
+                <div style="font-size: 12px; color: var(--text-secondary); text-align: center;">
+                    Multithreaded architecture leveraging SO_REUSEPORT and io_uring event loop.
+                </div>
+            </div>
+
+            <!-- DTO Sandbox Form -->
+            <div class="card">
+                <div class="card-title">
+                    <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round"
+                            d="M18 9v3m0 0v3m0-3h3m-3 0h-3m-2-5a4 4 0 11-8 0 4 4 0 018 0zM3 20a6 6 0 0112 0v1H3v-1z">
+                        </path>
+                    </svg>
+                    Create User Sandbox (DTO Validation)
+                </div>
+                <form id="create-user-form" onsubmit="createUser(event)">
+                    <div class="form-group">
+                        <label for="user-id">User ID (min: 0)</label>
+                        <input type="number" id="user-id" class="form-control" value="1" min="0" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="user-name">Name (size: 2-20 characters)</label>
+                        <input type="text" id="user-name" class="form-control" value="John Doe" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="user-email">Email (valid pattern)</label>
+                        <input type="email" id="user-email" class="form-control" value="john.doe@example.com" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="user-role">Role (custom validation: prefix ROLE_)</label>
+                        <input type="text" id="user-role" class="form-control" value="ROLE_USER" required>
+                    </div>
+                    <button type="submit" class="btn" style="width: 100%">
+                        Submit DTO Request
+                    </button>
+                </form>
+            </div>
+        </div>
+
+        <div>
+            <!-- API Testing sandbox -->
+            <div class="card">
+                <div class="card-title">
+                    <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round"
+                            d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z">
+                        </path>
+                    </svg>
+                    REST Controller Endpoints
+                </div>
+                <div class="api-list">
+                    <!-- Get Users -->
+                    <div class="api-item">
+                        <div class="api-header">
+                            <div class="api-route">
+                                <span class="method get">GET</span>
+                                <span>/api/users</span>
+                            </div>
+                            <button class="btn btn-secondary" onclick="runApi('GET', '/api/users')">Send
+                                Request</button>
+                        </div>
+                        <div class="api-desc">Fetch all mock users inside in-memory UserRepository.</div>
+                    </div>
+
+                    <!-- Get User by ID -->
+                    <div class="api-item">
+                        <div class="api-header">
+                            <div class="api-route">
+                                <span class="method get">GET</span>
+                                <span>/api/users/2</span>
+                            </div>
+                            <button class="btn btn-secondary" onclick="runApi('GET', '/api/users/2')">Send
+                                Request</button>
+                        </div>
+                        <div class="api-desc">Retrieve a single User DTO by ID. Values > 10 return 404.</div>
+                    </div>
+
+                    <!-- Put User -->
+                    <div class="api-item">
+                        <div class="api-header">
+                            <div class="api-route">
+                                <span class="method put">PUT</span>
+                                <span>/api/users/123</span>
+                            </div>
+                            <button class="btn btn-secondary" onclick="runPut()">Send Request</button>
+                        </div>
+                        <div class="api-desc">Modify a User DTO (auto-assigns ID 123 via Lombok Setter).</div>
+                    </div>
+                </div>
+
+                <!-- Console response output -->
+                <div class="console-container">
+                    <div class="console-header">
+                        <span>HTTP/3 Response Console</span>
+                        <div class="console-dots">
+                            <div class="console-dot"></div>
+                            <div class="console-dot"></div>
+                            <div class="console-dot"></div>
+                        </div>
+                    </div>
+                    <div class="console-body" id="console-output">// Click a request to see output...</div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- Toast message -->
+    <div class="toast" id="toast">
+        <span id="toast-message">Success! DTO validated and created.</span>
+    </div>
+
+    <script>
+        // Simulate real-time shard monitors
+        const numShards = 12;
+        const shardsContainer = document.getElementById('shards-container');
+        const shardData = [];
+
+        for (let i = 0; i < numShards; i++) {
+            const node = document.createElement('div');
+            node.className = 'shard-node active';
+            node.innerHTML = `
+                <div class="shard-indicator"></div>
+                <div class="shard-name">Core ${i}</div>
+                <div class="shard-load" id="shard-load-${i}">0 conn</div>
+            `;
+            shardsContainer.appendChild(node);
+            shardData.push({ id: i, conns: 0 });
+        }
+
+        // Periodically mutate shard loads randomly to simulate active network traffic
+        setInterval(() => {
+            shardData.forEach((s, idx) => {
+                s.conns = Math.floor(Math.random() * 5);
+                document.getElementById(`shard-load-${s.id}`).innerText = `${s.conns} conn`;
+            });
+        }, 2000);
+
+        function showToast(message, isError = false) {
+            const toast = document.getElementById('toast');
+            const toastMsg = document.getElementById('toast-message');
+            toastMsg.innerText = message;
+            if (isError) {
+                toast.classList.add('error');
+            } else {
+                toast.classList.remove('error');
+            }
+            toast.classList.add('show');
+            setTimeout(() => {
+                toast.classList.remove('show');
+            }, 3000);
+        }
+
+        function runApi(method, path) {
+            const out = document.getElementById('console-output');
+            out.innerText = `Sending HTTP/3 ${method} request to ${path}...`;
+
+            fetch(path, { method: method })
+                .then(async res => {
+                    const status = res.status;
+                    const headers = {};
+                    res.headers.forEach((val, key) => headers[key] = val);
+                    const body = await res.text();
+
+                    let bodyFormatted = body;
+                    try {
+                        bodyFormatted = JSON.stringify(JSON.parse(body), null, 2);
+                    } catch (e) { }
+
+                    out.innerText = `HTTP/3 Status: ${status}\n` +
+                        `Headers: ${JSON.stringify(headers, null, 2)}\n\n` +
+                        `Body:\n${bodyFormatted}`;
+
+                    if (status >= 200 && status < 300) {
+                        showToast(`Request ${method} ${path} Succeeded!`);
+                    } else {
+                        showToast(`Request Failed with Status ${status}`, true);
+                    }
+                })
+                .catch(err => {
+                    out.innerText = `Error: ${err.message}`;
+                    showToast("Network request failed", true);
+                });
+        }
+
+        function runPut() {
+            const mockUser = {
+                id: 123,
+                name: "Updated Name",
+                email: "updated@example.com",
+                role: "ROLE_ADMIN"
+            };
+
+            const out = document.getElementById('console-output');
+            out.innerText = `Sending HTTP/3 PUT request to /api/users/123...`;
+
+            fetch('/api/users/123', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(mockUser)
+            })
+                .then(async res => {
+                    const status = res.status;
+                    const body = await res.text();
+                    let bodyFormatted = body;
+                    try {
+                        bodyFormatted = JSON.stringify(JSON.parse(body), null, 2);
+                    } catch (e) { }
+
+                    out.innerText = `HTTP/3 Status: ${status}\n\nBody:\n${bodyFormatted}`;
+                    showToast("PUT Request succeeded");
+                })
+                .catch(err => {
+                    out.innerText = `Error: ${err.message}`;
+                    showToast("PUT Request failed", true);
+                });
+        }
+
+        function createUser(event) {
+            event.preventDefault();
+            const id = parseInt(document.getElementById('user-id').value);
+            const name = document.getElementById('user-name').value;
+            const email = document.getElementById('user-email').value;
+            const role = document.getElementById('user-role').value;
+
+            const dto = { id, name, email, role };
+            const out = document.getElementById('console-output');
+
+            out.innerText = `Posting User DTO to /api/users...\nRequest Body:\n${JSON.stringify(dto, null, 2)}`;
+
+            fetch('/api/users', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(dto)
+            })
+                .then(async res => {
+                    const status = res.status;
+                    const body = await res.text();
+                    let bodyFormatted = body;
+                    try {
+                        bodyFormatted = JSON.stringify(JSON.parse(body), null, 2);
+                    } catch (e) { }
+
+                    out.innerText = `HTTP/3 Status: ${status}\n\nBody:\n${bodyFormatted}`;
+
+                    if (status === 201) {
+                        showToast("User DTO successfully validated and created (201)!");
+                    } else if (status === 400) {
+                        showToast("Validation Failed (400 Bad Request)!", true);
+                    } else {
+                        showToast(`Error: Status ${status}`, true);
+                    }
+                })
+                .catch(err => {
+                    out.innerText = `Error: ${err.message}`;
+                    showToast("POST Request failed", true);
+                });
+        }
+    </script>
+</body>
+
+</html>

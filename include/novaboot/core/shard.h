@@ -24,6 +24,7 @@ struct ShardConfig {
     int               cpu_core = -1;       ///< CPU core to pin to (-1 = no pinning)
     net::Address      bind_address;        ///< Address to bind UDP socket
     EventLoopBackend  backend = EventLoopBackend::IoUring; ///< Event loop backend
+    std::string       static_resources_dir; ///< Configured static resources directory path
 };
 
 /// Per-core shard — the fundamental execution unit.
@@ -72,6 +73,9 @@ private:
 
     /// Handle an HTTP request (called by Http3Session when request is ready)
     void on_request(http3::Http3Stream& stream);
+
+    /// Attempt to serve a static file from static resources directory
+    bool serve_static_file(std::string_view path, http3::Response& res, bool head_only);
 
     /// Send a packet via the UDP socket
     void send_packet(const net::OutgoingPacket& packet);
