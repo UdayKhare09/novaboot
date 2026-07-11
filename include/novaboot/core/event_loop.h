@@ -23,7 +23,6 @@ using TimePoint = Clock::time_point;
 
 /// Backend selection for the event loop
 enum class EventLoopBackend {
-    Epoll,    ///< Traditional epoll (portable Linux 2.6+)
     IoUring,  ///< io_uring (Linux 5.19+, recommended)
 };
 

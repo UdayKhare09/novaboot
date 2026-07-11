@@ -76,7 +76,7 @@ public:
     /// Create and bind a UDP socket
     static std::expected<UdpSocket, Error> create(const UdpSocketConfig& config);
 
-    /// Get the raw file descriptor (for epoll registration)
+    /// Get the raw file descriptor (for event loop registration)
     [[nodiscard]] int fd() const noexcept { return fd_; }
 
     /// Receive multiple datagrams via recvmmsg()

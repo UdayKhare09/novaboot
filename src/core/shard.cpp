@@ -1,5 +1,4 @@
 #include "novaboot/core/shard.h"
-#include "novaboot/core/epoll_event_loop.h"
 #include "novaboot/core/io_uring_event_loop.h"
 #include "novaboot/http3/http3_session.h"
 
@@ -59,14 +58,9 @@ void Shard::run() {
         pin_to_core();
     }
 
-    // Create the event loop based on configured backend
-    if (config_.backend == EventLoopBackend::IoUring) {
-        spdlog::debug("Shard {}: Using io_uring backend", config_.shard_id);
-        event_loop_ = std::make_unique<IoUringEventLoop>();
-    } else {
-        spdlog::debug("Shard {}: Using epoll backend", config_.shard_id);
-        event_loop_ = std::make_unique<EpollEventLoop>();
-    }
+    // Create the event loop (unconditionally using io_uring)
+    spdlog::debug("Shard {}: Using io_uring backend", config_.shard_id);
+    event_loop_ = std::make_unique<IoUringEventLoop>();
 
     // Create and bind the UDP socket
     net::UdpSocketConfig sock_config;

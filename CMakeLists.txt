@@ -64,7 +64,6 @@ add_library(novaboot STATIC
     src/net/udp_socket.cpp
 
     # Core
-    src/core/epoll_event_loop.cpp
     src/core/io_uring_event_loop.cpp
     src/core/shard.cpp
     src/core/server.cpp

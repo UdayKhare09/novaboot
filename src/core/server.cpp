@@ -132,9 +132,7 @@ std::unique_ptr<Server> Server::Builder::build() {
     spdlog::info("NovaBoot server configured:");
     spdlog::info("  Bind:    {}", server->bind_address_.to_string());
     spdlog::info("  Workers: {}", server->worker_count_);
-    spdlog::info("  Backend: {}",
-                 server->backend_ == core::EventLoopBackend::IoUring
-                     ? "io_uring" : "epoll");
+    spdlog::info("  Backend: io_uring");
     spdlog::info("  TLS:     {} / {}", cert_path_, key_path_);
     if (!static_resources_dir_.empty()) {
         spdlog::info("  Static:  {}", static_resources_dir_);

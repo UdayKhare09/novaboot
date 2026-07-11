@@ -30,7 +30,7 @@ struct ShardConfig {
 /// Per-core shard — the fundamental execution unit.
 ///
 /// Each shard owns:
-///   - An EventLoop (epoll-based)
+///   - An EventLoop (io_uring-based)
 ///   - A UDP socket (SO_REUSEPORT)
 ///   - A ConnectionManager (CID → QUIC connections)
 ///   - References to the shared Router and Middleware pipeline
