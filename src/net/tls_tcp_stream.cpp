@@ -5,7 +5,7 @@
 
 namespace novaboot::net {
 
-TlsTcpStream::TlsTcpStream(int fd, SSL_CTX* ssl_ctx) : fd_(fd) {
+TlsTcpStream::TlsTcpStream(int fd, SSL_CTX* ssl_ctx, bool is_server, const std::string& host) : fd_(fd) {
     ssl_ = ::SSL_new(ssl_ctx);
     if (!ssl_) {
         spdlog::error("SSL_new failed");
@@ -33,7 +33,16 @@ TlsTcpStream::TlsTcpStream(int fd, SSL_CTX* ssl_ctx) : fd_(fd) {
 
     // SSL_set_bio transfers ownership of BIOs to SSL object
     ::SSL_set_bio(ssl_, rbio_, wbio_);
-    ::SSL_set_accept_state(ssl_);
+    
+    if (is_server) {
+        ::SSL_set_accept_state(ssl_);
+    } else {
+        ::SSL_set_connect_state(ssl_);
+        if (!host.empty()) {
+            ::SSL_set_tlsext_host_name(ssl_, host.c_str());
+            ::SSL_set1_host(ssl_, host.c_str());
+        }
+    }
 }
 
 TlsTcpStream::~TlsTcpStream() {

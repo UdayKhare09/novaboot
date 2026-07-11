@@ -27,7 +27,7 @@ struct ServerConfig {
     uint32_t workers = 0;
     std::string tls_cert = "cert.pem";
     std::string tls_key = "key.pem";
-    std::string static_resources = "examples/src/resources/static";
+    std::string static_resources = "examples/server/src/resources/static";
 };
 
 struct PostgresConfig {

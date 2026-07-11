@@ -19,7 +19,7 @@ public:
         Failed,
     };
 
-    TlsTcpStream(int fd, SSL_CTX* ssl_ctx);
+    TlsTcpStream(int fd, SSL_CTX* ssl_ctx, bool is_server = true, const std::string& host = "");
     ~TlsTcpStream();
 
     TlsTcpStream(const TlsTcpStream&) = delete;

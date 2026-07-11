@@ -1,3 +1,4 @@
 build
 *.lombok.h
+*.client.h
 odb_gcc_bin

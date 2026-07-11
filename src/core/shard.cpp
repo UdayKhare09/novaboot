@@ -113,25 +113,33 @@ void Shard::run() {
     }
     tcp_listener_ = std::make_unique<net::TcpListener>(std::move(*tcp_res));
 
-    // Route TCP requests back to the middleware pipeline and router
+    // Route TCP requests through the middleware pipeline.
+    // The pipeline always runs first so middleware (e.g. CORS) can act on
+    // every request — including OPTIONS preflight on unregistered paths.
     auto tcp_req_handler = [this](http3::Request& req, http3::Response& res) {
-        auto result = router_.match(req.method(), req.path());
-        if (!result.handler) {
-            if (req.method() == "GET" || req.method() == "HEAD") {
-                if (serve_static_file(req.path(), res, req.method() == "HEAD")) {
+        // Build the final handler that contains routing + 404 logic.
+        router::Handler final_handler =
+            [this](http3::Request& rq, http3::Response& rs,
+                   context::RequestContext& ctx) {
+                auto result = router_.match(rq.method(), rq.path());
+                if (!result.handler) {
+                    if (rq.method() == "GET" || rq.method() == "HEAD") {
+                        if (serve_static_file(rq.path(), rs,
+                                              rq.method() == "HEAD")) {
+                            return;
+                        }
+                    }
+                    rs.status(404)
+                      .header("content-type", "text/plain")
+                      .body("Not Found");
                     return;
                 }
-            }
-            res.status(404)
-               .header("content-type", "text/plain")
-               .body("Not Found");
-            return;
-        }
-
-        req.path_params() = std::move(result.params);
+                rq.path_params() = std::move(result.params);
+                (*result.handler)(rq, rs, ctx);
+            };
 
         context::RequestContext ctx;
-        pipeline_.execute(req, res, ctx, *result.handler);
+        pipeline_.execute(req, res, ctx, final_handler);
     };
 
     tcp_conn_mgr_ = std::make_unique<net::TcpConnectionManager>(std::move(tcp_req_handler));
@@ -254,30 +262,33 @@ void Shard::on_request(http3::Http3Stream& stream) {
     auto& req = stream.request();
     auto& res = stream.response();
 
-    // Route the request
-    auto result = router_.match(req.method(), req.path());
-
-    if (!result.handler) {
-        // Fallback to serving static files for GET and HEAD requests
-        if (req.method() == "GET" || req.method() == "HEAD") {
-            if (serve_static_file(req.path(), res, req.method() == "HEAD")) {
+    // Always execute through the middleware pipeline first so that middleware
+    // (e.g. CORS) can handle every request — including OPTIONS preflight on
+    // paths that have no registered handler.
+    router::Handler final_handler =
+        [this](http3::Request& rq, http3::Response& rs,
+               context::RequestContext& ctx) {
+            auto result = router_.match(rq.method(), rq.path());
+            if (!result.handler) {
+                // Fallback to serving static files for GET and HEAD requests
+                if (rq.method() == "GET" || rq.method() == "HEAD") {
+                    if (serve_static_file(rq.path(), rs,
+                                         rq.method() == "HEAD")) {
+                        return;
+                    }
+                }
+                // 404 Not Found
+                rs.status(404)
+                  .header("content-type", "text/plain")
+                  .body("Not Found");
                 return;
             }
-        }
+            rq.path_params() = std::move(result.params);
+            (*result.handler)(rq, rs, ctx);
+        };
 
-        // 404 Not Found
-        res.status(404)
-           .header("content-type", "text/plain")
-           .body("Not Found");
-        return;
-    }
-
-    // Set path parameters on the request
-    req.path_params() = std::move(result.params);
-
-    // Execute through middleware pipeline
     context::RequestContext ctx;
-    pipeline_.execute(req, res, ctx, *result.handler);
+    pipeline_.execute(req, res, ctx, final_handler);
 }
 
 void Shard::send_packet(const net::OutgoingPacket& packet) {

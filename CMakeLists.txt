@@ -98,6 +98,8 @@ add_library(novaboot STATIC
 
     # Middleware
     src/middleware/pipeline.cpp
+    src/middleware/cors_middleware.cpp
+    src/middleware/request_logging_middleware.cpp
 
     # Context
     src/context/request_context.cpp
@@ -156,4 +158,3 @@ endif()
 # ─── Tools ────────────────────────────────────────────────────────────────────
 add_executable(novaboot-scanner src/tools/di_scanner.cpp)
 target_compile_features(novaboot-scanner PRIVATE cxx_std_17)
-

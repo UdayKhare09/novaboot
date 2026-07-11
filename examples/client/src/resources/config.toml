@@ -1,0 +1,6 @@
+[server]
+host = "::"
+port = 4434
+workers = 2
+tls.cert = "cert.pem"
+tls.key = "key.pem"

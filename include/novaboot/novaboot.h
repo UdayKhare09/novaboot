@@ -31,6 +31,8 @@
 // Middleware
 #include "novaboot/middleware/middleware.h"
 #include "novaboot/middleware/pipeline.h"
+#include "novaboot/middleware/cors_middleware.h"
+#include "novaboot/middleware/request_logging_middleware.h"
 
 // Context
 #include "novaboot/context/request_context.h"

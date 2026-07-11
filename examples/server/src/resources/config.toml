@@ -4,7 +4,7 @@ port = 4433
 workers = 4
 tls.cert = "cert.pem"
 tls.key = "key.pem"
-static_resources = "examples/src/resources/static"
+static_resources = "examples/server/src/resources/static"
 
 [datasource.postgres]
 host     = "127.0.0.1"

@@ -104,11 +104,18 @@ struct rest_controller {
 ///   };
 struct rest_client {
     char url[256] = {};  ///< Full URL including scheme + host + port
+    char protocol[32] = "http3"; ///< Protocol: "http3", "http2", or "http1.1"
 
     consteval rest_client() = default;
     consteval rest_client(const char* u) noexcept {
         for (std::size_t i = 0; i < 255u && u[i]; ++i)
             url[i] = u[i];
+    }
+    consteval rest_client(const char* u, const char* p) noexcept {
+        for (std::size_t i = 0; i < 255u && u[i]; ++i)
+            url[i] = u[i];
+        for (std::size_t i = 0; i < 31u && p[i]; ++i)
+            protocol[i] = p[i];
     }
     consteval const char* str() const noexcept { return url; }
 };

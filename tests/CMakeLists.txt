@@ -15,6 +15,8 @@ novaboot_test(test_arena_allocator   unit/test_arena_allocator.cpp)
 novaboot_test(test_router            unit/test_router.cpp)
 novaboot_test(test_header_map        unit/test_header_map.cpp)
 novaboot_test(test_middleware_pipeline unit/test_middleware_pipeline.cpp)
+novaboot_test(test_middleware          unit/test_middleware.cpp)
+
 novaboot_test(test_request_context   unit/test_request_context.cpp)
 novaboot_test(test_json_reflection   unit/test_json_reflection.cpp)
 
@@ -33,11 +35,12 @@ novaboot_test(test_server_basic integration/test_server_basic.cpp)
 novaboot_test(test_exception_handler unit/test_exception_handler.cpp)
 novaboot_test(test_validation unit/test_validation.cpp)
 novaboot_test(test_lombok unit/test_lombok.cpp)
-target_include_directories(test_lombok PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../examples/src)
+target_include_directories(test_lombok PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../examples/server/src)
 add_dependencies(test_lombok sample_app)
 
 # ─── Config unit tests ────────────────────────────────────────────────────────
 novaboot_test(test_app_config unit/test_app_config.cpp)
+novaboot_test(test_client_protocols unit/test_client_protocols.cpp)
 
 # ─── Data Source unit tests ───────────────────────────────────────────────────
 novaboot_test(test_pgsql_data_source unit/test_pgsql_data_source.cpp)

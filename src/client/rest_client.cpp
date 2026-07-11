@@ -2,19 +2,25 @@
 
 #include <netdb.h>
 #include <sys/socket.h>
-
+#include <fcntl.h>
+#include <unistd.h>
+#include <cerrno>
+#include <cstring>
+#include <algorithm>
 #include <chrono>
 #include <format>
 #include <stdexcept>
 #include <thread>
 
 #include <spdlog/spdlog.h>
+#include <nghttp2/nghttp2.h>
 
 #include "novaboot/core/event_loop.h"
 #include "novaboot/http3/http3_client_session.h"
 #include "novaboot/net/address.h"
 #include "novaboot/net/packet.h"
 #include "novaboot/net/udp_socket.h"
+#include "novaboot/net/tls_tcp_stream.h"
 #include "novaboot/quic/quic_client_connection.h"
 #include "novaboot/router/json.h"
 
@@ -59,6 +65,13 @@ RestClient::~RestClient() {
     if (socket_ && event_loop_) {
         event_loop_->remove_fd(socket_->fd());
     }
+    if (tcp_fd_ != -1 && event_loop_) {
+        event_loop_->remove_fd(tcp_fd_);
+        ::close(tcp_fd_);
+    }
+    if (h2_session_) {
+        ::nghttp2_session_del(h2_session_);
+    }
 }
 
 std::unique_ptr<RestClient> RestClient::create(const Config& cfg,
@@ -71,6 +84,13 @@ std::unique_ptr<RestClient> RestClient::create(const Config& cfg,
     quic::TlsContext::ClientConfig tls_cfg;
     tls_cfg.verify_peer = cfg.verify_ssl;
     tls_cfg.ca_file     = cfg.ca_file;
+    if (cfg.protocol == Protocol::HTTP1_1) {
+        tls_cfg.alpn = "http/1.1";
+    } else if (cfg.protocol == Protocol::HTTP2) {
+        tls_cfg.alpn = "h2";
+    } else {
+        tls_cfg.alpn = "h3";
+    }
     client->tls_ctx_    = quic::TlsContext::create_client(tls_cfg);
 
     // Resolve hostname if IP not provided
@@ -86,6 +106,11 @@ std::unique_ptr<RestClient> RestClient::create(const Config& cfg,
 }
 
 void RestClient::do_connect() {
+    if (cfg_.protocol == Protocol::HTTP1_1 || cfg_.protocol == Protocol::HTTP2) {
+        do_connect_tcp();
+        return;
+    }
+
     // Create UDP socket bound to ephemeral local port
     net::Address remote_addr = net::Address::from_string(cfg_.ip, cfg_.port);
 
@@ -154,6 +179,396 @@ void RestClient::do_connect() {
     spdlog::debug("RestClient: initiating QUIC handshake → {}:{}", cfg_.ip, cfg_.port);
 }
 
+void RestClient::do_connect_tcp() {
+    net::Address remote_addr = net::Address::from_string(cfg_.ip, cfg_.port);
+    int fd = ::socket(remote_addr.is_v6() ? AF_INET6 : AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    if (fd < 0) {
+        throw ClientError("RestClient: failed to create TCP socket");
+    }
+
+    int rv = ::connect(fd, remote_addr.sockaddr_ptr(), remote_addr.sockaddr_len());
+    tcp_fd_ = fd;
+    tcp_connected_ = false;
+    tls_handshake_done_ = false;
+
+    // Create TlsTcpStream in client mode, passing host for SNI hostname verification
+    tls_stream_ = std::make_unique<net::TlsTcpStream>(fd, tls_ctx_->native_handle(), false, cfg_.host);
+
+    if (rv == 0) {
+        tcp_connected_ = true;
+        std::vector<uint8_t> out;
+        auto hs = tls_stream_->do_handshake(out);
+        if (!out.empty()) {
+            tcp_write_buf_.insert(tcp_write_buf_.end(), out.begin(), out.end());
+            write_pending_tcp_data();
+        }
+        if (hs && *hs == net::TlsTcpStream::HandshakeStatus::Complete) {
+            tls_handshake_done_ = true;
+            if (cfg_.protocol == Protocol::HTTP2) {
+                init_h2_session();
+            }
+        }
+    } else {
+        if (errno != EINPROGRESS) {
+            ::close(fd);
+            tcp_fd_ = -1;
+            throw ClientError(std::format("RestClient: connect failed: {}", std::strerror(errno)));
+        }
+    }
+
+    // Register on the event loop
+    uint32_t flags = core::EventFlags::Readable;
+    if (!tcp_connected_ || !tcp_write_buf_.empty() ||
+        tls_stream_->handshake_status() == net::TlsTcpStream::HandshakeStatus::Handshaking) {
+        flags |= core::EventFlags::Writable;
+    }
+
+    tcp_event_flags_ = flags;
+    event_loop_->add_fd(tcp_fd_, flags, [this](uint32_t events) {
+        if (events & core::EventFlags::HangUp) {
+            on_disconnect();
+            return;
+        }
+        if (events & core::EventFlags::Writable) {
+            handle_tcp_writable();
+        }
+        if (events & core::EventFlags::Readable) {
+            handle_tcp_readable();
+        }
+    });
+}
+
+void RestClient::handle_tcp_writable() {
+    if (!tcp_connected_) {
+        int err = 0;
+        socklen_t len = sizeof(err);
+        if (::getsockopt(tcp_fd_, SOL_SOCKET, SO_ERROR, &err, &len) < 0 || err != 0) {
+            spdlog::error("RestClient: TCP connection failed: {}", std::strerror(err));
+            on_disconnect();
+            return;
+        }
+        tcp_connected_ = true;
+        spdlog::info("RestClient: TCP connected to {}:{}", cfg_.host, cfg_.port);
+
+        std::vector<uint8_t> out;
+        auto hs = tls_stream_->do_handshake(out);
+        if (!out.empty()) {
+            tcp_write_buf_.insert(tcp_write_buf_.end(), out.begin(), out.end());
+        }
+        if (hs && *hs == net::TlsTcpStream::HandshakeStatus::Complete) {
+            tls_handshake_done_ = true;
+            if (cfg_.protocol == Protocol::HTTP2) {
+                init_h2_session();
+            }
+        }
+    }
+
+    write_pending_tcp_data();
+
+    uint32_t flags = core::EventFlags::Readable;
+    if (!tcp_write_buf_.empty() || !tls_handshake_done_) {
+        flags |= core::EventFlags::Writable;
+    }
+    if (tcp_fd_ != -1 && flags != tcp_event_flags_) {
+        tcp_event_flags_ = flags;
+        event_loop_->modify_fd(tcp_fd_, flags);
+    }
+}
+
+void RestClient::handle_tcp_readable() {
+    uint8_t buf[4096];
+    ssize_t n = ::recv(tcp_fd_, buf, sizeof(buf), 0);
+    if (n > 0) {
+        auto feed_opt = tls_stream_->feed_network_data(std::span<const uint8_t>(buf, static_cast<size_t>(n)));
+        if (!feed_opt) {
+            spdlog::error("RestClient: TLS feed failed");
+            on_disconnect();
+            return;
+        }
+
+        if (!feed_opt->handshake_send_data.empty()) {
+            tcp_write_buf_.insert(tcp_write_buf_.end(), feed_opt->handshake_send_data.begin(), feed_opt->handshake_send_data.end());
+            write_pending_tcp_data();
+        }
+
+        if (tls_stream_->handshake_status() == net::TlsTcpStream::HandshakeStatus::Complete) {
+            if (!tls_handshake_done_) {
+                tls_handshake_done_ = true;
+                spdlog::info("RestClient: TLS handshake complete");
+                if (cfg_.protocol == Protocol::HTTP2) {
+                    init_h2_session();
+                }
+            }
+            if (!feed_opt->decrypted_app_data.empty()) {
+                process_decrypted_tcp_data(feed_opt->decrypted_app_data);
+            }
+        }
+    } else if (n < 0) {
+        if (errno != EAGAIN && errno != EWOULDBLOCK) {
+            on_disconnect();
+        }
+    } else {
+        on_disconnect(); // EOF
+    }
+
+    uint32_t flags = core::EventFlags::Readable;
+    if (!tcp_write_buf_.empty() || !tls_handshake_done_) {
+        flags |= core::EventFlags::Writable;
+    }
+    if (tcp_fd_ != -1 && flags != tcp_event_flags_) {
+        tcp_event_flags_ = flags;
+        event_loop_->modify_fd(tcp_fd_, flags);
+    }
+}
+
+void RestClient::write_pending_tcp_data() {
+    while (!tcp_write_buf_.empty()) {
+        ssize_t n = ::send(tcp_fd_, tcp_write_buf_.data(), tcp_write_buf_.size(), MSG_NOSIGNAL);
+        if (n > 0) {
+            tcp_write_buf_.erase(tcp_write_buf_.begin(), tcp_write_buf_.begin() + n);
+        } else if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                break;
+            }
+            spdlog::error("RestClient: TCP send failed: {}", std::strerror(errno));
+            on_disconnect();
+            return;
+        } else {
+            on_disconnect();
+            return;
+        }
+    }
+}
+
+void RestClient::process_decrypted_tcp_data(std::span<const uint8_t> data) {
+    if (cfg_.protocol == Protocol::HTTP1_1) {
+        http1_recv_buf_.append(reinterpret_cast<const char*>(data.data()), data.size());
+        try_parse_http1_response();
+    } else if (cfg_.protocol == Protocol::HTTP2) {
+        if (h2_session_) {
+            ssize_t rv = nghttp2_session_mem_recv2(h2_session_, data.data(), data.size());
+            if (rv < 0) {
+                spdlog::error("RestClient: H2 session recv failed: {}", nghttp2_strerror((int)rv));
+                on_disconnect();
+                return;
+            }
+            // Send any generated H2 frames
+            const uint8_t* out_data = nullptr;
+            while (true) {
+                ssize_t send_rv = nghttp2_session_mem_send2(h2_session_, &out_data);
+                if (send_rv > 0) {
+                    auto enc_opt = tls_stream_->encrypt_app_data(std::span<const uint8_t>(out_data, static_cast<size_t>(send_rv)));
+                    if (enc_opt) {
+                        tcp_write_buf_.insert(tcp_write_buf_.end(), enc_opt->begin(), enc_opt->end());
+                    }
+                } else {
+                    break;
+                }
+            }
+            write_pending_tcp_data();
+        }
+    }
+}
+
+void RestClient::try_parse_http1_response() {
+    std::string_view view = http1_recv_buf_;
+
+    size_t status_line_end = view.find("\r\n");
+    if (status_line_end == std::string_view::npos) return;
+
+    std::string_view status_line = view.substr(0, status_line_end);
+    if (!status_line.starts_with("HTTP/1.")) return;
+
+    size_t code_start = status_line.find(' ');
+    if (code_start == std::string_view::npos) return;
+    code_start++;
+    size_t code_end = status_line.find(' ', code_start);
+    if (code_end == std::string_view::npos) code_end = status_line.size();
+
+    int status_code = 0;
+    try {
+        status_code = std::stoi(std::string(status_line.substr(code_start, code_end - code_start)));
+    } catch (...) {
+        return;
+    }
+
+    size_t headers_start = status_line_end + 2;
+    size_t body_start = view.find("\r\n\r\n", headers_start);
+    if (body_start == std::string_view::npos) return;
+
+    std::string_view headers_block = view.substr(headers_start, body_start - headers_start);
+    body_start += 4; // skip \r\n\r\n
+
+    http3::HeaderMap response_headers;
+    size_t content_length = 0;
+    bool is_chunked = false;
+
+    size_t pos = 0;
+    while (pos < headers_block.size()) {
+        size_t line_end = headers_block.find("\r\n", pos);
+        if (line_end == std::string_view::npos) line_end = headers_block.size();
+
+        std::string_view line = headers_block.substr(pos, line_end - pos);
+        size_t colon = line.find(':');
+        if (colon != std::string_view::npos) {
+            std::string name = std::string(line.substr(0, colon));
+            std::string value = std::string(line.substr(colon + 1));
+            // trim
+            name.erase(0, name.find_first_not_of(" \t"));
+            name.erase(name.find_last_not_of(" \t") + 1);
+            value.erase(0, value.find_first_not_of(" \t"));
+            value.erase(value.find_last_not_of(" \t") + 1);
+
+            response_headers.add(name, value);
+
+            std::string name_lower = name;
+            std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
+            if (name_lower == "content-length") {
+                content_length = std::stoull(value);
+            } else if (name_lower == "transfer-encoding") {
+                std::string val_lower = value;
+                std::transform(val_lower.begin(), val_lower.end(), val_lower.begin(), ::tolower);
+                if (val_lower == "chunked") {
+                    is_chunked = true;
+                }
+            }
+        }
+        pos = line_end + 2;
+    }
+
+    std::string body;
+    size_t total_parsed_len = body_start;
+
+    if (is_chunked) {
+        size_t body_pos = body_start;
+        while (true) {
+            size_t size_line_end = http1_recv_buf_.find("\r\n", body_pos);
+            if (size_line_end == std::string::npos) return;
+
+            std::string size_str = http1_recv_buf_.substr(body_pos, size_line_end - body_pos);
+            size_t chunk_size = 0;
+            try {
+                chunk_size = std::stoull(size_str, nullptr, 16);
+            } catch (...) {
+                spdlog::error("RestClient: failed to parse chunk size");
+                on_disconnect();
+                return;
+            }
+
+            body_pos = size_line_end + 2;
+            if (chunk_size == 0) {
+                if (http1_recv_buf_.size() < body_pos + 2) return;
+                total_parsed_len = body_pos + 2;
+                break;
+            }
+
+            if (http1_recv_buf_.size() < body_pos + chunk_size + 2) return;
+
+            body.append(http1_recv_buf_.substr(body_pos, chunk_size));
+            body_pos += chunk_size + 2;
+        }
+    } else {
+        if (http1_recv_buf_.size() < body_start + content_length) return;
+        body = http1_recv_buf_.substr(body_start, content_length);
+        total_parsed_len = body_start + content_length;
+    }
+
+    // Done!
+    http3::ClientResponse resp{status_code, response_headers, std::move(body)};
+    http1_recv_buf_.erase(0, total_parsed_len);
+
+    tcp_response_ = std::move(resp);
+    auto handle = pending_tcp_handle_;
+    pending_tcp_handle_ = nullptr;
+    if (handle) {
+        handle.resume();
+    }
+}
+
+void RestClient::init_h2_session() {
+    if (h2_session_) {
+        nghttp2_session_del(h2_session_);
+        h2_session_ = nullptr;
+    }
+
+    nghttp2_session_callbacks* callbacks;
+    nghttp2_session_callbacks_new(&callbacks);
+
+    nghttp2_session_callbacks_set_on_header_callback(callbacks, h2_on_header_cb);
+    nghttp2_session_callbacks_set_on_data_chunk_recv_callback(callbacks, h2_on_data_chunk_recv_cb);
+    nghttp2_session_callbacks_set_on_stream_close_callback(callbacks, h2_on_stream_close_cb);
+
+    nghttp2_session_client_new2(&h2_session_, callbacks, this, nullptr);
+    nghttp2_session_callbacks_del(callbacks);
+
+    // Send connection preface
+    nghttp2_settings_entry iv[1] = {
+        {NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS, 100}
+    };
+    nghttp2_submit_settings(h2_session_, NGHTTP2_FLAG_NONE, iv, 1);
+
+    const uint8_t* out_data = nullptr;
+    while (true) {
+        ssize_t send_rv = nghttp2_session_mem_send2(h2_session_, &out_data);
+        if (send_rv > 0) {
+            auto enc_opt = tls_stream_->encrypt_app_data(std::span<const uint8_t>(out_data, static_cast<size_t>(send_rv)));
+            if (enc_opt) {
+                tcp_write_buf_.insert(tcp_write_buf_.end(), enc_opt->begin(), enc_opt->end());
+            }
+        } else {
+            break;
+        }
+    }
+    write_pending_tcp_data();
+}
+
+int RestClient::h2_on_header_cb(nghttp2_session* /*session*/,
+                               const nghttp2_frame* frame,
+                               const uint8_t* name, size_t namelen,
+                               const uint8_t* value, size_t valuelen,
+                               uint8_t /*flags*/, void* user_data) {
+    auto* self = static_cast<RestClient*>(user_data);
+    if (frame->hd.type == NGHTTP2_HEADERS && frame->headers.cat == NGHTTP2_HCAT_RESPONSE) {
+        int32_t stream_id = frame->hd.stream_id;
+        auto& pending = self->h2_pending_[stream_id];
+
+        std::string_view name_sv(reinterpret_cast<const char*>(name), namelen);
+        std::string_view value_sv(reinterpret_cast<const char*>(value), valuelen);
+
+        if (name_sv == ":status") {
+            pending.response.status_code = std::stoi(std::string(value_sv));
+        } else {
+            pending.response.headers.add(name_sv, value_sv);
+        }
+    }
+    return 0;
+}
+
+int RestClient::h2_on_data_chunk_recv_cb(nghttp2_session* /*session*/, uint8_t /*flags*/,
+                                        int32_t stream_id, const uint8_t* data,
+                                        size_t len, void* user_data) {
+    auto* self = static_cast<RestClient*>(user_data);
+    auto it = self->h2_pending_.find(stream_id);
+    if (it != self->h2_pending_.end()) {
+        it->second.response.body.append(reinterpret_cast<const char*>(data), len);
+    }
+    return 0;
+}
+
+int RestClient::h2_on_stream_close_cb(nghttp2_session* /*session*/, int32_t stream_id,
+                                     uint32_t /*error_code*/, void* user_data) {
+    auto* self = static_cast<RestClient*>(user_data);
+    auto it = self->h2_pending_.find(stream_id);
+    if (it != self->h2_pending_.end()) {
+        it->second.complete = true;
+        auto handle = it->second.coroutine;
+        if (handle) {
+            handle.resume();
+        }
+    }
+    return 0;
+}
+
 void RestClient::on_packet_received(net::IncomingPacket&& pkt) {
     if (!conn_) return;
     conn_->on_read(pkt, quic::QuicClientConnection::timestamp_now());
@@ -179,6 +594,36 @@ void RestClient::on_disconnect() {
         if (entry.second) entry.second.resume();
     }
     pending_.clear();
+
+    for (auto& [stream_id, entry] : h2_pending_) {
+        entry.complete = true;
+        entry.response = http3::ClientResponse{0, {}, "Connection lost"};
+        if (entry.coroutine) entry.coroutine.resume();
+    }
+    h2_pending_.clear();
+
+    if (pending_tcp_handle_) {
+        tcp_response_ = http3::ClientResponse{0, {}, "Connection lost"};
+        auto handle = pending_tcp_handle_;
+        pending_tcp_handle_ = nullptr;
+        handle.resume();
+    }
+
+    if (tcp_fd_ != -1) {
+        event_loop_->remove_fd(tcp_fd_);
+        ::close(tcp_fd_);
+        tcp_fd_ = -1;
+    }
+    tcp_connected_ = false;
+    tls_handshake_done_ = false;
+    tcp_event_flags_ = 0;
+    tls_stream_.reset();
+    http1_recv_buf_.clear();
+
+    if (h2_session_) {
+        nghttp2_session_del(h2_session_);
+        h2_session_ = nullptr;
+    }
 
     if (reconnect_pending_) return;
     reconnect_pending_ = true;
@@ -207,13 +652,29 @@ void RestClient::on_disconnect() {
 void RestClient::do_reconnect() {
     spdlog::info("RestClient: attempting reconnect to {}:{}", cfg_.host, cfg_.port);
     try {
-        // Remove old socket from event loop
-        if (socket_) {
-            event_loop_->remove_fd(socket_->fd());
+        if (cfg_.protocol == Protocol::HTTP1_1 || cfg_.protocol == Protocol::HTTP2) {
+            if (tcp_fd_ != -1) {
+                event_loop_->remove_fd(tcp_fd_);
+                ::close(tcp_fd_);
+                tcp_fd_ = -1;
+            }
+            tcp_connected_ = false;
+            tls_handshake_done_ = false;
+            tls_stream_.reset();
+            http1_recv_buf_.clear();
+            if (h2_session_) {
+                nghttp2_session_del(h2_session_);
+                h2_session_ = nullptr;
+            }
+            do_connect_tcp();
+        } else {
+            if (socket_) {
+                event_loop_->remove_fd(socket_->fd());
+            }
+            conn_.reset();
+            socket_.reset();
+            do_connect();
         }
-        conn_.reset();
-        socket_.reset();
-        do_connect();
     } catch (const std::exception& e) {
         spdlog::error("RestClient: reconnect failed: {}", e.what());
         on_disconnect(); // will schedule next retry
@@ -221,6 +682,9 @@ void RestClient::do_reconnect() {
 }
 
 bool RestClient::is_connected() const noexcept {
+    if (cfg_.protocol == Protocol::HTTP1_1 || cfg_.protocol == Protocol::HTTP2) {
+        return tcp_fd_ != -1 && tcp_connected_ && tls_handshake_done_;
+    }
     return conn_ && conn_->is_handshake_complete() &&
            !conn_->is_closed() && !conn_->is_draining();
 }
@@ -229,10 +693,18 @@ void RestClient::wait_for_connection() {
     auto deadline = std::chrono::steady_clock::now() +
                     std::chrono::milliseconds(cfg_.connect_timeout_ms);
     while (!is_connected()) {
-        if (conn_ && (conn_->is_closed() || conn_->is_draining())) {
-            throw ClientError(
-                std::format("RestClient: connection to {}:{} failed",
-                            cfg_.host, cfg_.port));
+        if (cfg_.protocol == Protocol::HTTP1_1 || cfg_.protocol == Protocol::HTTP2) {
+            if (tcp_fd_ == -1) {
+                throw ClientError(
+                    std::format("RestClient: connection to {}:{} failed",
+                                cfg_.host, cfg_.port));
+            }
+        } else {
+            if (conn_ && (conn_->is_closed() || conn_->is_draining())) {
+                throw ClientError(
+                    std::format("RestClient: connection to {}:{} failed",
+                                cfg_.host, cfg_.port));
+            }
         }
         if (std::chrono::steady_clock::now() >= deadline) {
             throw ClientError(
@@ -261,6 +733,150 @@ async::Task<http3::ClientResponse> RestClient::async_request(
         }
     }
 
+    if (cfg_.protocol == Protocol::HTTP1_1) {
+        std::string req = std::format("{} {} HTTP/1.1\r\n", method, path);
+        req += std::format("Host: {}\r\n", cfg_.host);
+
+        bool has_content_length = false;
+        for (const auto& h : headers.entries()) {
+            req += std::format("{}: {}\r\n", h.name, h.value);
+            std::string name_lower = h.name;
+            std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
+            if (name_lower == "content-length") {
+                has_content_length = true;
+            }
+        }
+
+        if (!body.empty() && !has_content_length) {
+            req += std::format("Content-Length: {}\r\n", body.size());
+        }
+        req += "Connection: keep-alive\r\n\r\n";
+        if (!body.empty()) {
+            req += body;
+        }
+
+        auto enc_opt = tls_stream_->encrypt_app_data(std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(req.data()), req.size()));
+        if (!enc_opt) {
+            throw ClientError("RestClient: failed to encrypt HTTP/1.1 request");
+        }
+        tcp_write_buf_.insert(tcp_write_buf_.end(), enc_opt->begin(), enc_opt->end());
+        write_pending_tcp_data();
+
+        uint32_t flags = core::EventFlags::Readable;
+        if (!tcp_write_buf_.empty()) {
+            flags |= core::EventFlags::Writable;
+        }
+        if (tcp_fd_ != -1 && flags != tcp_event_flags_) {
+            tcp_event_flags_ = flags;
+            event_loop_->modify_fd(tcp_fd_, flags);
+        }
+
+        co_await async::EventLoopSuspend{&pending_tcp_handle_};
+
+        if (tcp_response_) {
+            auto resp = std::move(*tcp_response_);
+            tcp_response_.reset();
+            co_return resp;
+        }
+        throw ClientError("RestClient: request failed or connection lost");
+    }
+
+    if (cfg_.protocol == Protocol::HTTP2) {
+        if (!h2_session_) {
+            throw ClientError("RestClient: HTTP/2 session not ready");
+        }
+
+        std::vector<nghttp2_nv> nvs;
+        auto add_nv = [&](std::string_view name, std::string_view value) {
+            nghttp2_nv nv;
+            nv.name = const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(name.data()));
+            nv.namelen = name.size();
+            nv.value = const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(value.data()));
+            nv.valuelen = value.size();
+            nv.flags = NGHTTP2_NV_FLAG_NONE;
+            nvs.push_back(nv);
+        };
+
+        add_nv(":method", method);
+        add_nv(":path", path);
+        add_nv(":scheme", "https");
+        std::string authority = cfg_.host + ":" + std::to_string(cfg_.port);
+        add_nv(":authority", authority);
+
+        for (const auto& h : headers.entries()) {
+            add_nv(h.name, h.value);
+        }
+
+        struct RequestBodySource {
+            std::string_view body;
+            size_t offset = 0;
+        } body_source{body, 0};
+
+        nghttp2_data_provider2 data_prd;
+
+        auto h2_client_read_cb = [](nghttp2_session* /*session*/, int32_t /*stream_id*/,
+                                    uint8_t* buf, size_t length, uint32_t* data_flags,
+                                    nghttp2_data_source* source, void* /*user_data*/) -> nghttp2_ssize {
+            auto* src = static_cast<RequestBodySource*>(source->ptr);
+            size_t available = src->body.size() - src->offset;
+            size_t to_write = std::min(length, available);
+            if (to_write > 0) {
+                std::memcpy(buf, src->body.data() + src->offset, to_write);
+                src->offset += to_write;
+            }
+            if (src->offset >= src->body.size()) {
+                *data_flags |= NGHTTP2_DATA_FLAG_EOF;
+            }
+            return static_cast<nghttp2_ssize>(to_write);
+        };
+
+        data_prd.source.ptr = &body_source;
+        data_prd.read_callback = h2_client_read_cb;
+
+        int32_t stream_id = nghttp2_submit_request2(
+            h2_session_, nullptr, nvs.data(), nvs.size(),
+            body.empty() ? nullptr : &data_prd, nullptr);
+
+        if (stream_id < 0) {
+            throw ClientError(std::format("RestClient: failed to submit H2 request: {}", nghttp2_strerror(stream_id)));
+        }
+
+        const uint8_t* out_data = nullptr;
+        while (true) {
+            ssize_t send_rv = nghttp2_session_mem_send2(h2_session_, &out_data);
+            if (send_rv > 0) {
+                auto enc_opt = tls_stream_->encrypt_app_data(std::span<const uint8_t>(out_data, static_cast<size_t>(send_rv)));
+                if (enc_opt) {
+                    tcp_write_buf_.insert(tcp_write_buf_.end(), enc_opt->begin(), enc_opt->end());
+                }
+            } else {
+                break;
+            }
+        }
+        write_pending_tcp_data();
+
+        uint32_t flags = core::EventFlags::Readable;
+        if (!tcp_write_buf_.empty()) {
+            flags |= core::EventFlags::Writable;
+        }
+        if (tcp_fd_ != -1 && flags != tcp_event_flags_) {
+            tcp_event_flags_ = flags;
+            event_loop_->modify_fd(tcp_fd_, flags);
+        }
+
+        co_await async::EventLoopSuspend{&h2_pending_[stream_id].coroutine};
+
+        auto it = h2_pending_.find(stream_id);
+        if (it != h2_pending_.end() && it->second.complete) {
+            auto resp = std::move(it->second.response);
+            h2_pending_.erase(it);
+            co_return resp;
+        }
+
+        throw ClientError("RestClient: HTTP/2 request failed or connection lost");
+    }
+
+    // QUIC (HTTP/3) connection
     auto* h3 = conn_->http3_session();
     if (!h3) {
         throw ClientError("RestClient: HTTP/3 session not ready");
@@ -273,15 +889,10 @@ async::Task<http3::ClientResponse> RestClient::async_request(
             std::format("RestClient: failed to submit {} {}", method, path));
     }
 
-    // Flush the request to the wire
     conn_->on_write();
 
-    // Suspend until the response callback fills pending_[stream_id]
-    // We must store the coroutine handle INSIDE the pending_ map so the
-    // response callback can resume it when the response arrives.
     co_await async::EventLoopSuspend{&pending_[stream_id].second};
 
-    // We've been resumed — find the stored response
     auto it = pending_.find(stream_id);
     if (it != pending_.end() && it->second.first) {
         auto resp = std::move(*it->second.first);
@@ -323,12 +934,10 @@ async::Task<http3::ClientResponse> RestClient::async_patch(
 }
 
 // ─── Synchronous API ─────────────────────────────────────────────────────────
-// Runs the event loop until the async task completes (or timeout fires).
 
 http3::ClientResponse RestClient::sync_execute(
     async::Task<http3::ClientResponse> task) {
 
-    // Run event loop iterations until the task is done or timeout
     auto deadline = std::chrono::steady_clock::now() +
                     std::chrono::milliseconds(cfg_.request_timeout_ms);
 
@@ -341,7 +950,7 @@ http3::ClientResponse RestClient::sync_execute(
         }
     }
 
-    return task.await_resume(); // throws if coroutine threw
+    return task.await_resume();
 }
 
 http3::ClientResponse RestClient::get(std::string_view path,
@@ -356,7 +965,6 @@ http3::ClientResponse RestClient::post(std::string_view path,
     wait_for_connection();
     return sync_execute(async_post(path, body, headers));
 }
-
 
 http3::ClientResponse RestClient::put(std::string_view path,
                                       std::string_view body,

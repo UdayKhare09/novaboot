@@ -70,7 +70,7 @@ TEST(ServerIntegrationTest, StaticResourcesConfiguration) {
         .bind("127.0.0.1", 4436)
         .tls(cert, key)
         .workers(1)
-        .static_resources("examples/src/resources/static")
+        .static_resources("examples/server/src/resources/static")
         .build();
 
     ASSERT_NE(app, nullptr);
