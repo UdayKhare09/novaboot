@@ -62,6 +62,11 @@ add_library(novaboot STATIC
     # Net
     src/net/address.cpp
     src/net/udp_socket.cpp
+    src/net/tcp_listener.cpp
+    src/net/tls_tcp_stream.cpp
+    src/net/tcp_connection_manager.cpp
+    src/http1/http1_session.cpp
+    src/http2/http2_session.cpp
 
     # Core
     src/core/io_uring_event_loop.cpp
@@ -117,6 +122,7 @@ target_link_libraries(novaboot
         PkgConfig::NGTCP2
         PkgConfig::NGTCP2_CRYPTO_OSSL
         PkgConfig::NGHTTP3
+        PkgConfig::NGHTTP2
         PkgConfig::URING
         OpenSSL::SSL
         OpenSSL::Crypto

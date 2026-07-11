@@ -18,7 +18,7 @@ using namespace novaboot::di;
 
 int main() {
     // Set logging level
-    spdlog::set_level(spdlog::level::debug);
+    spdlog::set_level(spdlog::level::info);
     spdlog::info("Starting Spring Boot-style C++ DI Sample App with TOML Config");
 
     // 0. Load TOML configuration

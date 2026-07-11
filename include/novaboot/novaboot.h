@@ -56,3 +56,7 @@ namespace novaboot { class Server; }
 void novaboot_di_register_all(novaboot::di::RootContainer& root);
 void novaboot_web_register_all(novaboot::Server& app);
 
+namespace novaboot {
+namespace http = http3;
+}
+

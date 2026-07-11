@@ -16,6 +16,9 @@ namespace novaboot::http3 {
 class Http3Stream;
 }
 
+#include "novaboot/net/tcp_listener.h"
+#include "novaboot/net/tcp_connection_manager.h"
+
 namespace novaboot::core {
 
 /// Per-core shard configuration
@@ -91,6 +94,9 @@ private:
     std::unique_ptr<EventLoop>                  event_loop_;
     std::unique_ptr<net::UdpSocket>         socket_;
     std::unique_ptr<quic::ConnectionManager> conn_mgr_;
+
+    std::unique_ptr<net::TcpListener>           tcp_listener_;
+    std::unique_ptr<net::TcpConnectionManager>  tcp_conn_mgr_;
 
     std::thread thread_;
 

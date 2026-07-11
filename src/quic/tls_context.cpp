@@ -26,15 +26,15 @@ int alpn_select_callback(SSL* /*ssl*/,
                          unsigned char* outlen,
                          const unsigned char* in,
                          unsigned int inlen,
-                         void* arg) {
-    auto* alpn = static_cast<std::string*>(arg);
-
-    // Build the wire-format ALPN: length-prefixed
-    // "h3" → \x02h3
-    unsigned char alpn_wire[256];
-    alpn_wire[0] = static_cast<unsigned char>(alpn->size());
-    std::memcpy(alpn_wire + 1, alpn->data(), alpn->size());
-    unsigned int alpn_wire_len = static_cast<unsigned int>(1 + alpn->size());
+                         void* /*arg*/) {
+    // Supported protocols list in TLS wire format (length-prefixed)
+    // "\x02h3\x02h2\x08http/1.1"
+    static const unsigned char alpn_wire[] = {
+        2, 'h', '3',
+        2, 'h', '2',
+        8, 'h', 't', 't', 'p', '/', '1', '.', '1'
+    };
+    unsigned int alpn_wire_len = sizeof(alpn_wire);
 
     if (SSL_select_next_proto(
             const_cast<unsigned char**>(out), outlen,

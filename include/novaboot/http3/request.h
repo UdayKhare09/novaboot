@@ -103,3 +103,7 @@ private:
 };
 
 } // namespace novaboot::http3
+
+namespace novaboot {
+namespace http = http3;
+}

@@ -43,31 +43,39 @@ IoUringEventLoop::decode_user_data(std::uint64_t ud) noexcept {
 
 IoUringEventLoop::IoUringEventLoop() {
     struct io_uring_params params{};
-    params.flags = IORING_SETUP_COOP_TASKRUN
-                 | IORING_SETUP_SINGLE_ISSUER
-                 | IORING_SETUP_DEFER_TASKRUN;
+    params.flags = IORING_SETUP_SQPOLL; // Enable SQPOLL
 
     int rv = io_uring_queue_init_params(kRingSize, &ring_, &params);
     if (rv < 0) {
-        // Fall back without DEFER_TASKRUN (requires SINGLE_ISSUER +
-        // COOP_TASKRUN on some older kernels)
-        spdlog::debug("io_uring init with DEFER_TASKRUN failed ({}), "
-                      "retrying without it", std::strerror(-rv));
+        spdlog::debug("io_uring init with SQPOLL failed ({}), retrying without SQPOLL", std::strerror(-rv));
 
         std::memset(&params, 0, sizeof(params));
         params.flags = IORING_SETUP_COOP_TASKRUN
-                     | IORING_SETUP_SINGLE_ISSUER;
+                     | IORING_SETUP_SINGLE_ISSUER
+                     | IORING_SETUP_DEFER_TASKRUN;
 
         rv = io_uring_queue_init_params(kRingSize, &ring_, &params);
         if (rv < 0) {
-            // Last resort: plain init
-            spdlog::debug("io_uring init with SINGLE_ISSUER failed ({}), "
-                          "using basic init", std::strerror(-rv));
-            rv = io_uring_queue_init(kRingSize, &ring_, 0);
+            // Fall back without DEFER_TASKRUN (requires SINGLE_ISSUER +
+            // COOP_TASKRUN on some older kernels)
+            spdlog::debug("io_uring init with DEFER_TASKRUN failed ({}), "
+                          "retrying without it", std::strerror(-rv));
+
+            std::memset(&params, 0, sizeof(params));
+            params.flags = IORING_SETUP_COOP_TASKRUN
+                         | IORING_SETUP_SINGLE_ISSUER;
+
+            rv = io_uring_queue_init_params(kRingSize, &ring_, &params);
             if (rv < 0) {
-                throw std::system_error(
-                    -rv, std::system_category(),
-                    "io_uring_queue_init failed");
+                // Last resort: plain init
+                spdlog::debug("io_uring init with SINGLE_ISSUER failed ({}), "
+                              "using basic init", std::strerror(-rv));
+                rv = io_uring_queue_init(kRingSize, &ring_, 0);
+                if (rv < 0) {
+                    throw std::system_error(
+                        -rv, std::system_category(),
+                        "io_uring_queue_init failed");
+                }
             }
         }
     }
@@ -75,18 +83,30 @@ IoUringEventLoop::IoUringEventLoop() {
     ring_initialized_ = true;
     cached_now_ = Clock::now();
 
-    // Initialize recv contexts
-    for (std::size_t i = 0; i < kRecvContextsCount; ++i) {
-        recv_contexts_[i].idx = static_cast<int>(i);
-        recv_contexts_[i].iov.iov_base = recv_contexts_[i].buffer.data();
-        recv_contexts_[i].iov.iov_len  = recv_contexts_[i].buffer.size();
-        recv_contexts_[i].msg.msg_name = &recv_contexts_[i].remote_addr;
-        recv_contexts_[i].msg.msg_namelen = sizeof(recv_contexts_[i].remote_addr);
-        recv_contexts_[i].msg.msg_iov  = &recv_contexts_[i].iov;
-        recv_contexts_[i].msg.msg_iovlen = 1;
-        recv_contexts_[i].msg.msg_control = recv_contexts_[i].cmsg.data();
-        recv_contexts_[i].msg.msg_controllen = recv_contexts_[i].cmsg.size();
+    // ─── Initialize Registered Files ─────────────────────────────────
+    registered_files_.fill(-1);
+    io_uring_register_files(&ring_, registered_files_.data(), static_cast<unsigned int>(registered_files_.size()));
+
+    // ─── Initialize Provided Buffer Ring ──────────────────────────────
+    int error = 0;
+    buf_ring_ = io_uring_setup_buf_ring(&ring_, kBufRingEntries, kBufRingGroup, 0, &error);
+    if (!buf_ring_) {
+        io_uring_queue_exit(&ring_);
+        throw std::system_error(
+            error, std::system_category(), "io_uring_setup_buf_ring failed");
     }
+
+    recv_buffers_.reserve(kBufRingEntries);
+    for (std::size_t i = 0; i < kBufRingEntries; ++i) {
+        recv_buffers_.push_back(std::make_unique<std::array<std::uint8_t, kBufSize>>());
+        io_uring_buf_ring_add(buf_ring_, recv_buffers_[i]->data(), kBufSize, static_cast<unsigned short>(i),
+                              static_cast<int>(io_uring_buf_ring_mask(kBufRingEntries)), static_cast<int>(i));
+    }
+    io_uring_buf_ring_advance(buf_ring_, kBufRingEntries);
+
+    std::memset(&recv_multishot_msg_, 0, sizeof(recv_multishot_msg_));
+    recv_multishot_msg_.msg_namelen = sizeof(struct sockaddr_in6);
+    recv_multishot_msg_.msg_controllen = 512;
 
     // Initialize send contexts
     free_send_indices_.reserve(kSendContextsCount);
@@ -104,6 +124,7 @@ IoUringEventLoop::IoUringEventLoop() {
 
     wakeup_fd_ = ::eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
     if (wakeup_fd_ < 0) {
+        io_uring_free_buf_ring(&ring_, buf_ring_, kBufRingEntries, kBufRingGroup);
         io_uring_queue_exit(&ring_);
         throw std::system_error(
             errno, std::system_category(), "eventfd creation failed");
@@ -114,24 +135,58 @@ IoUringEventLoop::IoUringEventLoop() {
         [[maybe_unused]] auto n = ::read(wakeup_fd_, &val, sizeof(val));
     });
 
-    spdlog::debug("io_uring initialized (sq_entries={}, cq_entries={}, "
-                  "features=0x{:08x})",
-                  params.sq_entries, params.cq_entries, params.features);
+    bool sqpoll_enabled = (params.flags & IORING_SETUP_SQPOLL) != 0;
+    spdlog::info("io_uring initialized (sq_entries={}, cq_entries={}, "
+                 "features=0x{:08x}, SQPOLL={})",
+                 params.sq_entries, params.cq_entries, params.features,
+                 sqpoll_enabled ? "enabled" : "disabled");
 }
 
 IoUringEventLoop::~IoUringEventLoop() {
     if (wakeup_fd_ >= 0) {
         ::close(wakeup_fd_);
     }
+    if (buf_ring_) {
+        io_uring_free_buf_ring(&ring_, buf_ring_, kBufRingEntries, kBufRingGroup);
+    }
     if (ring_initialized_) {
         io_uring_queue_exit(&ring_);
+    }
+}
+
+int IoUringEventLoop::get_or_register_file(int fd) {
+    for (std::size_t i = 0; i < kMaxRegisteredFiles; ++i) {
+        if (registered_files_[i] == fd) {
+            return static_cast<int>(i);
+        }
+    }
+    for (std::size_t i = 0; i < kMaxRegisteredFiles; ++i) {
+        if (registered_files_[i] == -1) {
+            registered_files_[i] = fd;
+            io_uring_register_files_update(&ring_, static_cast<unsigned int>(i), &fd, 1);
+            return static_cast<int>(i);
+        }
+    }
+    spdlog::warn("get_or_register_file: Registered file table is full for fd {}", fd);
+    return -1;
+}
+
+void IoUringEventLoop::unregister_file(int fd) {
+    for (std::size_t i = 0; i < kMaxRegisteredFiles; ++i) {
+        if (registered_files_[i] == fd) {
+            registered_files_[i] = -1;
+            int sentinel = -1;
+            io_uring_register_files_update(&ring_, static_cast<unsigned int>(i), &sentinel, 1);
+            return;
+        }
     }
 }
 
 // ─── FD Management ───────────────────────────────────────────────────────────
 
 void IoUringEventLoop::add_fd(int fd, std::uint32_t events, FdCallback cb) {
-    fd_entries_[fd] = FdEntry{fd, events, std::move(cb), false};
+    int idx = get_or_register_file(fd);
+    fd_entries_[fd] = FdEntry{fd, events, std::move(cb), false, idx};
     submit_poll(fd, events);
 }
 
@@ -160,6 +215,7 @@ void IoUringEventLoop::remove_fd(int fd) {
         cancel_poll(fd);
     }
 
+    unregister_file(fd);
     fd_entries_.erase(it);
 }
 
@@ -196,6 +252,10 @@ void IoUringEventLoop::cancel_timer(TimerHandle handle) {
 
     // Submit a timeout_remove to cancel the in-flight SQE
     auto* sqe = io_uring_get_sqe(&ring_);
+    if (!sqe) {
+        io_uring_submit(&ring_);
+        sqe = io_uring_get_sqe(&ring_);
+    }
     if (sqe) {
         io_uring_prep_timeout_remove(
             sqe, encode_user_data(OpType::Timer, handle.id), 0);
@@ -264,15 +324,28 @@ TimePoint IoUringEventLoop::now() const noexcept {
 void IoUringEventLoop::submit_poll(int fd, std::uint32_t events) {
     auto* sqe = io_uring_get_sqe(&ring_);
     if (!sqe) {
+        io_uring_submit(&ring_);
+        sqe = io_uring_get_sqe(&ring_);
+    }
+    if (!sqe) {
         spdlog::error("io_uring SQ full, cannot submit poll for fd {}", fd);
         return;
     }
 
-    io_uring_prep_poll_multishot(sqe, fd, events);
+    auto it = fd_entries_.find(fd);
+    int fd_val = fd;
+    if (it != fd_entries_.end() && it->second.registered_index != -1) {
+        fd_val = it->second.registered_index;
+    }
+
+    io_uring_prep_poll_multishot(sqe, fd_val, events);
+    if (fd_val != fd) {
+        sqe->flags |= IOSQE_FIXED_FILE;
+    }
+
     io_uring_sqe_set_data64(sqe,
         encode_user_data(OpType::Poll, static_cast<std::uint64_t>(fd)));
 
-    auto it = fd_entries_.find(fd);
     if (it != fd_entries_.end()) {
         it->second.poll_active = true;
     }
@@ -280,6 +353,10 @@ void IoUringEventLoop::submit_poll(int fd, std::uint32_t events) {
 
 void IoUringEventLoop::submit_timer(std::uint64_t timer_id, Duration delay) {
     auto* sqe = io_uring_get_sqe(&ring_);
+    if (!sqe) {
+        io_uring_submit(&ring_);
+        sqe = io_uring_get_sqe(&ring_);
+    }
     if (!sqe) {
         spdlog::error("io_uring SQ full, cannot submit timer {}", timer_id);
         return;
@@ -301,6 +378,10 @@ void IoUringEventLoop::submit_timer(std::uint64_t timer_id, Duration delay) {
 
 void IoUringEventLoop::cancel_poll(int fd) {
     auto* sqe = io_uring_get_sqe(&ring_);
+    if (!sqe) {
+        io_uring_submit(&ring_);
+        sqe = io_uring_get_sqe(&ring_);
+    }
     if (!sqe) {
         spdlog::warn("io_uring SQ full, cannot cancel poll for fd {}", fd);
         return;
@@ -368,27 +449,36 @@ void IoUringEventLoop::process_cqe(struct io_uring_cqe* cqe) {
     }
 
     case OpType::RecvMsg: {
-        int idx = static_cast<int>(id);
-        auto& ctx = recv_contexts_[idx];
+        int fd = static_cast<int>(id);
 
         if (cqe->res < 0) {
             if (cqe->res != -ECANCELED && cqe->res != -EAGAIN && cqe->res != -EWOULDBLOCK && running_) {
-                spdlog::warn("io_uring recvmsg error on fd {} idx {}: {}",
-                             ctx.fd, idx, std::strerror(-cqe->res));
+                spdlog::warn("io_uring recvmsg error on fd {}: {}",
+                             fd, std::strerror(-cqe->res));
             }
         } else if (cqe->res > 0) {
+            std::uint32_t buf_id = cqe->flags >> IORING_CQE_BUFFER_SHIFT;
+            auto& buffer = *recv_buffers_[buf_id];
+
+            auto* out = io_uring_recvmsg_validate(buffer.data(), cqe->res, &recv_multishot_msg_);
+            if (!out) {
+                spdlog::error("io_uring_recvmsg_validate failed!");
+                io_uring_buf_ring_add(buf_ring_, buffer.data(), kBufSize, buf_id, io_uring_buf_ring_mask(kBufRingEntries), 0);
+                io_uring_buf_ring_advance(buf_ring_, 1);
+                break;
+            }
+
             net::IncomingPacket pkt;
-            pkt.data = ctx.buffer.data();
-            pkt.size = static_cast<std::size_t>(cqe->res);
+            void* name_ptr = io_uring_recvmsg_name(out);
             pkt.remote = net::Address::from_sockaddr(
-                reinterpret_cast<struct sockaddr*>(&ctx.remote_addr),
-                ctx.msg.msg_namelen);
+                reinterpret_cast<struct sockaddr*>(name_ptr),
+                out->namelen);
 
             // Fetch local port
             struct sockaddr_storage local_ss{};
             socklen_t local_len = sizeof(local_ss);
             std::uint16_t local_port = 0;
-            if (::getsockname(ctx.fd, reinterpret_cast<struct sockaddr*>(&local_ss),
+            if (::getsockname(fd, reinterpret_cast<struct sockaddr*>(&local_ss),
                              &local_len) == 0) {
                 if (local_ss.ss_family == AF_INET) {
                     local_port = ntohs(
@@ -401,9 +491,9 @@ void IoUringEventLoop::process_cqe(struct io_uring_cqe* cqe) {
             pkt.local.set_port(local_port);
 
             // Parse ancillary data
-            for (struct cmsghdr* cmsg = CMSG_FIRSTHDR(&ctx.msg);
+            for (struct cmsghdr* cmsg = io_uring_recvmsg_cmsg_firsthdr(out, &recv_multishot_msg_);
                  cmsg != nullptr;
-                 cmsg = CMSG_NXTHDR(&ctx.msg, cmsg)) {
+                 cmsg = io_uring_recvmsg_cmsg_nexthdr(out, &recv_multishot_msg_, cmsg)) {
 
                 if (cmsg->cmsg_level == IPPROTO_IP &&
                     cmsg->cmsg_type == IP_PKTINFO) {
@@ -437,15 +527,40 @@ void IoUringEventLoop::process_cqe(struct io_uring_cqe* cqe) {
                 }
             }
 
-            auto it = packet_recv_cbs_.find(ctx.fd);
+            void* payload = io_uring_recvmsg_payload(out, &recv_multishot_msg_);
+            pkt.data = reinterpret_cast<const std::uint8_t*>(payload);
+            pkt.size = out->payloadlen;
+
+            auto it = packet_recv_cbs_.find(fd);
             if (it != packet_recv_cbs_.end() && it->second) {
                 it->second(std::move(pkt));
             }
+
+            // Recycle buffer
+            io_uring_buf_ring_add(buf_ring_, buffer.data(), kBufSize, static_cast<unsigned short>(buf_id), static_cast<int>(io_uring_buf_ring_mask(kBufRingEntries)), 0);
+            io_uring_buf_ring_advance(buf_ring_, 1);
         }
 
-        // Re-submit the SQE
-        if (running_) {
-            submit_recvmsg(idx);
+        // Re-submit the SQE if multishot was cancelled
+        if (!(cqe->flags & IORING_CQE_F_MORE) && running_) {
+            auto* sqe = io_uring_get_sqe(&ring_);
+            if (!sqe) {
+                io_uring_submit(&ring_);
+                sqe = io_uring_get_sqe(&ring_);
+            }
+            if (sqe) {
+                int fd_val = get_or_register_file(fd);
+                int sqe_fd = (fd_val == -1) ? fd : fd_val;
+                io_uring_prep_recvmsg_multishot(sqe, sqe_fd, &recv_multishot_msg_, 0);
+                if (fd_val != -1 && fd_val != fd) {
+                    sqe->flags |= IOSQE_FIXED_FILE;
+                }
+                sqe->flags |= IOSQE_BUFFER_SELECT;
+                sqe->buf_group = kBufRingGroup;
+                io_uring_sqe_set_data64(sqe, encode_user_data(OpType::RecvMsg, static_cast<std::uint64_t>(fd)));
+            } else {
+                spdlog::error("IoUringEventLoop: SQ full, cannot re-submit multishot recvmsg!");
+            }
         }
         break;
     }
@@ -453,11 +568,18 @@ void IoUringEventLoop::process_cqe(struct io_uring_cqe* cqe) {
     case OpType::SendMsg: {
         int idx = static_cast<int>(id);
         auto& ctx = send_contexts_[idx];
-        ctx.in_use = false;
-        free_send_indices_.push_back(idx);
 
-        if (cqe->res < 0) {
-            spdlog::warn("io_uring sendmsg failed idx {}: {}", idx, std::strerror(-cqe->res));
+        if (cqe->flags & IORING_CQE_F_NOTIF) {
+            ctx.notif_pending = false;
+        } else {
+            ctx.in_use = false;
+            if (cqe->res < 0) {
+                spdlog::warn("io_uring sendmsg failed idx {}: {}", idx, std::strerror(-cqe->res));
+            }
+        }
+
+        if (!ctx.in_use && !ctx.notif_pending) {
+            free_send_indices_.push_back(idx);
         }
         break;
     }
@@ -487,16 +609,34 @@ void IoUringEventLoop::start_packet_recv(
     int fd, std::move_only_function<void(net::IncomingPacket&&)> cb) {
     packet_recv_cbs_[fd] = std::move(cb);
 
-    // Clear O_NONBLOCK for io_uring async I/O to prevent EAGAIN completions
+    // Clear O_NONBLOCK for io_uring async I/O
     int flags = ::fcntl(fd, F_GETFL, 0);
     if (flags != -1) {
         ::fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
     }
 
-    for (std::size_t i = 0; i < kRecvContextsCount; ++i) {
-        recv_contexts_[i].fd = fd;
-        submit_recvmsg(static_cast<int>(i));
+    int fd_val = get_or_register_file(fd);
+    int sqe_fd = (fd_val == -1) ? fd : fd_val;
+
+    auto* sqe = io_uring_get_sqe(&ring_);
+    if (!sqe) {
+        io_uring_submit(&ring_);
+        sqe = io_uring_get_sqe(&ring_);
     }
+    if (!sqe) {
+        spdlog::error("IoUringEventLoop: SQ full, cannot submit multishot recvmsg for fd {}", fd);
+        return;
+    }
+
+    io_uring_prep_recvmsg_multishot(sqe, sqe_fd, &recv_multishot_msg_, 0);
+    if (fd_val != -1 && fd_val != fd) {
+        sqe->flags |= IOSQE_FIXED_FILE;
+    }
+    sqe->flags |= IOSQE_BUFFER_SELECT;
+    sqe->buf_group = kBufRingGroup;
+
+    io_uring_sqe_set_data64(sqe, encode_user_data(OpType::RecvMsg, static_cast<std::uint64_t>(fd)));
+
     io_uring_submit(&ring_);
 }
 
@@ -512,6 +652,7 @@ void IoUringEventLoop::async_send(
 
     auto& ctx = send_contexts_[idx];
     ctx.in_use = true;
+    ctx.notif_pending = false;
 
     // Copy payload
     std::memcpy(ctx.buffer.data(), pkt.data, pkt.size);
@@ -600,28 +741,27 @@ void IoUringEventLoop::async_send(
 
     auto* sqe = io_uring_get_sqe(&ring_);
     if (!sqe) {
+        io_uring_submit(&ring_);
+        sqe = io_uring_get_sqe(&ring_);
+    }
+    if (!sqe) {
         spdlog::error("IoUringEventLoop: SQ full, cannot submit sendmsg!");
         ctx.in_use = false;
+        ctx.notif_pending = false;
         free_send_indices_.push_back(idx);
         return;
     }
 
-    io_uring_prep_sendmsg(sqe, fd, &ctx.msg, 0);
+    int fd_val = get_or_register_file(fd);
+    int sqe_fd = (fd_val == -1) ? fd : fd_val;
+    io_uring_prep_sendmsg(sqe, sqe_fd, &ctx.msg, 0);
+    if (fd_val != -1 && fd_val != fd) {
+        sqe->flags |= IOSQE_FIXED_FILE;
+    }
     io_uring_sqe_set_data64(sqe, encode_user_data(OpType::SendMsg, idx));
 
     io_uring_submit(&ring_);
 }
 
-void IoUringEventLoop::submit_recvmsg(int idx) {
-    auto& ctx = recv_contexts_[idx];
-    auto* sqe = io_uring_get_sqe(&ring_);
-    if (!sqe) {
-        spdlog::error("IoUringEventLoop: SQ full, cannot submit recvmsg for context {}", idx);
-        return;
-    }
-
-    io_uring_prep_recvmsg(sqe, ctx.fd, &ctx.msg, 0);
-    io_uring_sqe_set_data64(sqe, encode_user_data(OpType::RecvMsg, idx));
-}
 
 } // namespace novaboot::core

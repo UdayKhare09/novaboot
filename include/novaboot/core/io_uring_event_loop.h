@@ -97,6 +97,7 @@ private:
         std::uint32_t  events;
         FdCallback     callback;
         bool           poll_active = false; // multishot poll SQE is in flight
+        int            registered_index = -1; // registered index in io_uring file table
     };
     std::unordered_map<int, FdEntry> fd_entries_;
 
@@ -128,6 +129,7 @@ private:
     struct SendContext {
         int idx = -1;
         bool in_use = false;
+        bool notif_pending = false; // Zero-copy send notification pending from kernel
         alignas(64) std::array<std::uint8_t, 65536> buffer{};
         struct iovec iov{};
         alignas(struct cmsghdr) std::array<std::uint8_t, 256> cmsg{};
@@ -137,7 +139,21 @@ private:
 
     void submit_recvmsg(int idx);
 
-    std::array<RecvContext, kRecvContextsCount> recv_contexts_;
+    // ─── Fixed File Table ────────────────────────────────────────────
+    static constexpr std::size_t kMaxRegisteredFiles = 64;
+    std::array<int, kMaxRegisteredFiles> registered_files_{};
+    int get_or_register_file(int fd);
+    void unregister_file(int fd);
+
+    // ─── Provided Buffer Ring ────────────────────────────────────────
+    static constexpr std::size_t kBufRingEntries = 32;
+    static constexpr std::size_t kBufSize = 65536 + 1024;
+    static constexpr int kBufRingGroup = 1;
+
+    struct io_uring_buf_ring* buf_ring_ = nullptr;
+    std::vector<std::unique_ptr<std::array<std::uint8_t, kBufSize>>> recv_buffers_;
+    struct msghdr recv_multishot_msg_{};
+
     std::array<SendContext, kSendContextsCount> send_contexts_;
     std::vector<int> free_send_indices_;
 

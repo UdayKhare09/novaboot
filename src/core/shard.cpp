@@ -105,6 +105,54 @@ void Shard::run() {
     event_loop_->start_packet_recv(socket_->fd(),
         [this](net::IncomingPacket&& pkt) { conn_mgr_->on_packet(pkt); });
 
+    // Start TCP Listener (same bind port)
+    auto tcp_res = net::TcpListener::create(config_.bind_address, true);
+    if (!tcp_res) {
+        spdlog::error("Shard {}: Failed to create TCP listener", config_.shard_id);
+        return;
+    }
+    tcp_listener_ = std::make_unique<net::TcpListener>(std::move(*tcp_res));
+
+    // Route TCP requests back to the middleware pipeline and router
+    auto tcp_req_handler = [this](http3::Request& req, http3::Response& res) {
+        auto result = router_.match(req.method(), req.path());
+        if (!result.handler) {
+            if (req.method() == "GET" || req.method() == "HEAD") {
+                if (serve_static_file(req.path(), res, req.method() == "HEAD")) {
+                    return;
+                }
+            }
+            res.status(404)
+               .header("content-type", "text/plain")
+               .body("Not Found");
+            return;
+        }
+
+        req.path_params() = std::move(result.params);
+
+        context::RequestContext ctx;
+        pipeline_.execute(req, res, ctx, *result.handler);
+    };
+
+    tcp_conn_mgr_ = std::make_unique<net::TcpConnectionManager>(std::move(tcp_req_handler));
+
+    event_loop_->add_fd(tcp_listener_->fd(), core::EventFlags::Readable, [this](uint32_t events) {
+        if (events & core::EventFlags::Readable) {
+            spdlog::info("Shard {}: TCP listener fd {} became readable", config_.shard_id, tcp_listener_->fd());
+            struct sockaddr_storage addr{};
+            socklen_t len = sizeof(addr);
+            int client_fd = ::accept4(tcp_listener_->fd(), reinterpret_cast<struct sockaddr*>(&addr), &len, SOCK_NONBLOCK | SOCK_CLOEXEC);
+            if (client_fd >= 0) {
+                spdlog::info("Shard {}: Accepted TCP connection on fd {}", config_.shard_id, client_fd);
+                tcp_conn_mgr_->on_accept(client_fd, *event_loop_, tls_ctx_.native_handle());
+            } else {
+                if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                    spdlog::warn("TCP accept failed: {}", std::strerror(errno));
+                }
+            }
+        }
+    });
+
     // Periodic cleanup of closed connections (every 5 seconds)
     cleanup_timer_ = event_loop_->add_timer(
         std::chrono::seconds(5),

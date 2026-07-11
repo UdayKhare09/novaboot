@@ -15,6 +15,9 @@ pkg_check_modules(NGTCP2_CRYPTO_OSSL REQUIRED IMPORTED_TARGET libngtcp2_crypto_o
 # nghttp3 (HTTP/3 framing)
 pkg_check_modules(NGHTTP3 REQUIRED IMPORTED_TARGET libnghttp3)
 
+# nghttp2 (HTTP/2 framing)
+pkg_check_modules(NGHTTP2 REQUIRED IMPORTED_TARGET libnghttp2)
+
 # liburing (io_uring event loop backend)
 pkg_check_modules(URING REQUIRED IMPORTED_TARGET liburing)
 
