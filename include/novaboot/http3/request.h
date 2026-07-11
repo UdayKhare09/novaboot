@@ -8,7 +8,9 @@
 #include "novaboot/http3/header_map.h"
 #include "novaboot/router/path_params.h"
 
-namespace novaboot::http3 {
+namespace novaboot::http {
+
+using HeaderMap = http3::HeaderMap;
 
 /// HTTP request representation.
 ///
@@ -102,8 +104,8 @@ private:
     bool body_complete_    = false;
 };
 
-} // namespace novaboot::http3
+} // namespace novaboot::http
 
-namespace novaboot {
-namespace http = http3;
+namespace novaboot::http3 {
+using Request = http::Request;
 }

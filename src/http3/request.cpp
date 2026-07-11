@@ -2,7 +2,7 @@
 
 #include <algorithm>
 
-namespace novaboot::http3 {
+namespace novaboot::http {
 
 std::optional<std::string_view>
 Request::query_param(std::string_view name) const {
@@ -40,4 +40,4 @@ std::string_view Request::query_string() const noexcept {
     return std::string_view(path_).substr(qpos + 1);
 }
 
-} // namespace novaboot::http3
+} // namespace novaboot::http

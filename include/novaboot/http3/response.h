@@ -7,7 +7,9 @@
 
 #include "novaboot/http3/header_map.h"
 
-namespace novaboot::http3 {
+namespace novaboot::http {
+
+using HeaderMap = http3::HeaderMap;
 
 /// HTTP response builder with fluent API.
 ///
@@ -113,8 +115,8 @@ private:
     std::size_t bytes_provided_ = 0;
 };
 
-} // namespace novaboot::http3
+} // namespace novaboot::http
 
-namespace novaboot {
-namespace http = http3;
+namespace novaboot::http3 {
+using Response = http::Response;
 }
