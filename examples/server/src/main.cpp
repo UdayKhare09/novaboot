@@ -5,6 +5,7 @@
 
 // ── Built-in library middleware ──────────────────────────────────────────────
 #include "novaboot/middleware/cors_middleware.h"
+#include "novaboot/middleware/jwt_middleware.h"
 #include "novaboot/middleware/request_logging_middleware.h"
 
 // ── Custom in-app middleware ─────────────────────────────────────────────────
@@ -61,7 +62,21 @@ int main() {
     // (b) Request-ID — stamps every request with a trace ID before the handler.
     auto request_id = std::make_shared<RequestIdMiddleware>();
 
-    // (c) Request logging — logs after the handler so the status code is known.
+    // (c) JWT auth — protects everything except explicitly public routes.
+    auto jwt = std::make_shared<novaboot::middleware::JwtMiddleware>(
+        novaboot::middleware::JwtMiddleware::Config{
+            .allowed_algorithms = {
+                novaboot::middleware::JwtMiddleware::Algorithm::HS256,
+            },
+            .hmac_secret = "sample-secret",
+            .rsa_public_key_pem = "",
+            .allowlist_paths = {"/", "/public/*"},
+            .required_issuer = "novaboot-sample",
+            .required_audiences = {"sample-api"},
+            .required_scopes = {"read"},
+        });
+
+    // (d) Request logging — logs after the handler so the status code is known.
     auto logger = std::make_shared<novaboot::middleware::RequestLoggingMiddleware>();
 
     // 3. Server Setup (pass di_root for automatic request-scoped DI resolution)
@@ -76,9 +91,10 @@ int main() {
         .tls(cfg.server().tls_cert, cfg.server().tls_key)
         .di_container(di_root)
         .static_resources(cfg.server().static_resources)
-        // ── middleware order: CORS → RequestId → Logging → handler ──
+        // ── middleware order: CORS → RequestId → JWT → Logging → handler ──
         .middleware(cors)
         .middleware(request_id)
+        .middleware(jwt)
         .middleware(logger)
         .build();
 

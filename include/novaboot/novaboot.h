@@ -33,6 +33,7 @@
 #include "novaboot/middleware/pipeline.h"
 #include "novaboot/middleware/cors_middleware.h"
 #include "novaboot/middleware/request_logging_middleware.h"
+#include "novaboot/middleware/jwt_middleware.h"
 
 // Context
 #include "novaboot/context/request_context.h"
@@ -61,4 +62,3 @@ void novaboot_web_register_all(novaboot::Server& app);
 namespace novaboot::http {
 using ClientResponse = http3::ClientResponse;
 }
-

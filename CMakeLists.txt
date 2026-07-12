@@ -100,6 +100,7 @@ add_library(novaboot STATIC
     src/middleware/pipeline.cpp
     src/middleware/cors_middleware.cpp
     src/middleware/request_logging_middleware.cpp
+    src/middleware/jwt_middleware.cpp
 
     # Context
     src/context/request_context.cpp
