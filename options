@@ -1,0 +1,21 @@
+A few strong next moves:
+
+2. **Request body streaming / early body limits**
+   Right now body-size middleware runs after the request body is already assembled. For production, oversized uploads should be rejected while reading, not after buffering.
+
+3. **Config-driven middleware setup**
+   Move sample secrets, body limits, CORS origins, security header policy, compression threshold, etc. into `config.toml`.
+
+4. **Graceful shutdown**
+   Handle SIGINT/SIGTERM cleanly: stop accepting, drain active connections, close shards, flush logs.
+
+5. **Observability**
+   Add metrics: request count, status codes, latency buckets, active connections, bytes in/out, QUIC packet errors. Even a `/metrics` endpoint would be very useful.
+
+6. **Better error responses**
+   Standardize JSON errors across 404, validation, auth, body limit, exceptions. Include `request_id`.
+
+7. **OpenAPI generation**
+   Since you already have annotated controllers, generating OpenAPI from route metadata would be a big framework-level feature.
+
+My vote: **config-driven middleware setup** next. It makes everything we just built feel real instead of hardcoded into `main.cpp`.

@@ -104,6 +104,7 @@ add_library(novaboot STATIC
     src/middleware/security_headers_middleware.cpp
     src/middleware/body_size_limit_middleware.cpp
     src/middleware/compression_middleware.cpp
+    src/middleware/authorization_middleware.cpp
 
     # Context
     src/context/request_context.cpp

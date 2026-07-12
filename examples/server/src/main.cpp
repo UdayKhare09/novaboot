@@ -5,6 +5,7 @@
 
 // ── Built-in library middleware ──────────────────────────────────────────────
 #include "novaboot/middleware/cors_middleware.h"
+#include "novaboot/middleware/authorization_middleware.h"
 #include "novaboot/middleware/body_size_limit_middleware.h"
 #include "novaboot/middleware/compression_middleware.h"
 #include "novaboot/middleware/jwt_middleware.h"
@@ -90,11 +91,21 @@ int main() {
             .required_scopes = {"read"},
         });
 
-    // (f) Compression — gzips eligible responses when the client asks for it.
+    // (f) Authorization — applies route-level permissions after JWT auth.
+    auto authorization =
+        std::make_shared<novaboot::middleware::AuthorizationMiddleware>(
+            novaboot::middleware::AuthorizationMiddleware::Config{
+                .policies = {{
+                    .path = "/api/users*",
+                    .required_scopes = {"write"},
+                }},
+            });
+
+    // (g) Compression — gzips eligible responses when the client asks for it.
     auto compression =
         std::make_shared<novaboot::middleware::CompressionMiddleware>();
 
-    // (g) Request logging — logs after the handler so the status code is known.
+    // (h) Request logging — logs after the handler so the status code is known.
     auto logger = std::make_shared<novaboot::middleware::RequestLoggingMiddleware>();
 
     // 3. Server Setup (pass di_root for automatic request-scoped DI resolution)
@@ -111,12 +122,13 @@ int main() {
         .static_resources(cfg.server().static_resources)
         // ── middleware order:
         //    CORS → RequestId → SecurityHeaders → BodyLimit → JWT
-        //    → Compression → Logging → handler
+        //    → Authorization → Compression → Logging → handler
         .middleware(cors)
         .middleware(request_id)
         .middleware(security_headers)
         .middleware(body_limit)
         .middleware(jwt)
+        .middleware(authorization)
         .middleware(compression)
         .middleware(logger)
         .build();

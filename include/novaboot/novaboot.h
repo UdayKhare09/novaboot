@@ -37,6 +37,7 @@
 #include "novaboot/middleware/security_headers_middleware.h"
 #include "novaboot/middleware/body_size_limit_middleware.h"
 #include "novaboot/middleware/compression_middleware.h"
+#include "novaboot/middleware/authorization_middleware.h"
 
 // Context
 #include "novaboot/context/request_context.h"

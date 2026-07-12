@@ -18,6 +18,7 @@ novaboot_test(test_middleware_pipeline unit/test_middleware_pipeline.cpp)
 novaboot_test(test_middleware          unit/test_middleware.cpp)
 novaboot_test(test_jwt_middleware      unit/test_jwt_middleware.cpp)
 novaboot_test(test_security_middleware unit/test_security_middleware.cpp)
+novaboot_test(test_authorization_middleware unit/test_authorization_middleware.cpp)
 
 novaboot_test(test_request_context   unit/test_request_context.cpp)
 novaboot_test(test_json_reflection   unit/test_json_reflection.cpp)
