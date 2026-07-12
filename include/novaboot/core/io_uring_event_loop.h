@@ -113,7 +113,6 @@ private:
     std::uint64_t next_timer_id_ = 1;
 
     // ─── Async Packet Contexts & Pools ───────────────────────────────
-    static constexpr std::size_t kRecvContextsCount = 32;
     static constexpr std::size_t kSendContextsCount = 128;
 
     struct RecvContext {
@@ -152,13 +151,19 @@ private:
 
     struct io_uring_buf_ring* buf_ring_ = nullptr;
     std::vector<std::unique_ptr<std::array<std::uint8_t, kBufSize>>> recv_buffers_;
-    struct msghdr recv_multishot_msg_{};
 
     std::array<SendContext, kSendContextsCount> send_contexts_;
     std::vector<int> free_send_indices_;
 
-    // Socket FD -> packet callback
-    std::unordered_map<int, std::move_only_function<void(net::IncomingPacket&&)>> packet_recv_cbs_;
+    // Per-fd state for multishot recvmsg
+    struct PacketRecvEntry {
+        std::move_only_function<void(net::IncomingPacket&&)> callback;
+        std::uint16_t local_port = 0;  // cached once at registration
+        struct msghdr msg{};
+        struct sockaddr_in6 remote_addr{};
+        alignas(struct cmsghdr) std::array<std::uint8_t, 512> cmsg_buf{};
+    };
+    std::unordered_map<int, PacketRecvEntry> packet_recv_cbs_;
 };
 
 } // namespace novaboot::core

@@ -88,55 +88,44 @@ std::expected<std::vector<uint8_t>, int> TcpConnection::on_recv(std::span<const 
     return response_data;
 }
 
-// Helper struct for socket buffering
-struct ConnectionBuffer {
-    std::vector<uint8_t> write_buffer;
+// ─── TcpConnectionManager::ConnectionBuffer ──────────────────────────────────
 
-    bool has_pending_writes() const noexcept {
-        return !write_buffer.empty();
-    }
-
-    int write_pending(int fd) {
-        while (!write_buffer.empty()) {
-            ssize_t n = ::send(fd, write_buffer.data(), write_buffer.size(), MSG_NOSIGNAL);
-            if (n > 0) {
-                write_buffer.erase(write_buffer.begin(), write_buffer.begin() + n);
-            } else if (n < 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                    return 0; // would block, try again later
-                }
-                return -1; // real error
-            } else {
-                return -1; // connection closed
-            }
+int TcpConnectionManager::ConnectionBuffer::write_pending(int fd) {
+    while (!write_buffer.empty()) {
+        ssize_t n = ::send(fd, write_buffer.data(), write_buffer.size(), MSG_NOSIGNAL);
+        if (n > 0) {
+            write_buffer.erase(write_buffer.begin(), write_buffer.begin() + n);
+        } else if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;
+            return -1;
+        } else {
+            return -1;
         }
-        return 1; // all written
     }
+    return 1;
+}
 
-    int send_data(int fd, std::span<const uint8_t> data) {
-        if (write_buffer.empty()) {
-            ssize_t n = ::send(fd, data.data(), data.size(), MSG_NOSIGNAL);
-            if (n > 0) {
-                if (static_cast<size_t>(n) < data.size()) {
-                    write_buffer.insert(write_buffer.end(), data.begin() + n, data.end());
-                }
-            } else if (n < 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                    write_buffer.insert(write_buffer.end(), data.begin(), data.end());
-                } else {
-                    return -1;
-                }
+int TcpConnectionManager::ConnectionBuffer::send_data(int fd, std::span<const uint8_t> data) {
+    if (write_buffer.empty()) {
+        ssize_t n = ::send(fd, data.data(), data.size(), MSG_NOSIGNAL);
+        if (n > 0) {
+            if (static_cast<size_t>(n) < data.size()) {
+                write_buffer.insert(write_buffer.end(), data.begin() + n, data.end());
+            }
+        } else if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                write_buffer.insert(write_buffer.end(), data.begin(), data.end());
             } else {
                 return -1;
             }
         } else {
-            write_buffer.insert(write_buffer.end(), data.begin(), data.end());
+            return -1;
         }
-        return 0;
+    } else {
+        write_buffer.insert(write_buffer.end(), data.begin(), data.end());
     }
-};
-
-static std::unordered_map<int, ConnectionBuffer> g_connection_buffers;
+    return 0;
+}
 
 // ─── TcpConnectionManager ────────────────────────────────────────────────────
 
@@ -157,7 +146,7 @@ void TcpConnectionManager::on_accept(int client_fd, core::EventLoop& loop, SSL_C
 
     auto handshake_opt = it->second.initiate_handshake();
     if (handshake_opt && !handshake_opt->empty()) {
-        auto& buf = g_connection_buffers[client_fd];
+        auto& buf = connection_buffers_[client_fd];
         if (buf.send_data(client_fd, *handshake_opt) < 0) {
             close_connection(client_fd, loop);
             return;
@@ -165,7 +154,7 @@ void TcpConnectionManager::on_accept(int client_fd, core::EventLoop& loop, SSL_C
     }
 
     uint32_t events = core::EventFlags::Readable;
-    if (g_connection_buffers[client_fd].has_pending_writes()) {
+    if (connection_buffers_[client_fd].has_pending_writes()) {
         events |= core::EventFlags::Writable;
     }
 
@@ -187,7 +176,7 @@ void TcpConnectionManager::on_accept(int client_fd, core::EventLoop& loop, SSL_C
         } else if (ev & core::EventFlags::Writable) {
             auto conn_it = connections_.find(client_fd);
             if (conn_it != connections_.end()) {
-                auto& buf = g_connection_buffers[client_fd];
+                auto& buf = connection_buffers_[client_fd];
                 int status = buf.write_pending(client_fd);
                 if (status < 0) {
                     close_connection(client_fd, loop);
@@ -218,14 +207,14 @@ void TcpConnectionManager::on_recv(int client_fd, std::span<const uint8_t> data,
     spdlog::debug("TCP client fd {} on_recv produced {} bytes of response data", client_fd, res_opt->size());
 
     if (!res_opt->empty()) {
-        auto& buf = g_connection_buffers[client_fd];
+        auto& buf = connection_buffers_[client_fd];
         if (buf.send_data(client_fd, *res_opt) < 0) {
             close_connection(client_fd, loop);
             return;
         }
     }
 
-    auto& buf = g_connection_buffers[client_fd];
+    auto& buf = connection_buffers_[client_fd];
     if (buf.has_pending_writes()) {
         loop.modify_fd(client_fd, core::EventFlags::Readable | core::EventFlags::Writable);
     }
@@ -238,7 +227,7 @@ void TcpConnectionManager::on_recv(int client_fd, std::span<const uint8_t> data,
 void TcpConnectionManager::close_connection(int client_fd, core::EventLoop& loop) {
     loop.remove_fd(client_fd);
     connections_.erase(client_fd);
-    g_connection_buffers.erase(client_fd);
+    connection_buffers_.erase(client_fd);
     ::close(client_fd);
 }
 

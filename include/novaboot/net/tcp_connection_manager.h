@@ -52,6 +52,15 @@ public:
 private:
     std::function<void(http3::Request&, http3::Response&)> handler_;
     std::unordered_map<int, TcpConnection> connections_;
+
+    // Per-instance write buffers (previously a global static — data race under multi-shard TCP load)
+    struct ConnectionBuffer {
+        std::vector<uint8_t> write_buffer;
+        bool has_pending_writes() const noexcept { return !write_buffer.empty(); }
+        int write_pending(int fd);
+        int send_data(int fd, std::span<const uint8_t> data);
+    };
+    std::unordered_map<int, ConnectionBuffer> connection_buffers_;
 };
 
 } // namespace novaboot::net
