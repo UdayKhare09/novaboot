@@ -5,6 +5,7 @@
 find_package(Threads REQUIRED)
 find_package(OpenSSL 3.5.0 REQUIRED)
 find_package(PkgConfig REQUIRED)
+find_package(ZLIB REQUIRED)
 
 # ngtcp2 (QUIC transport)
 pkg_check_modules(NGTCP2 REQUIRED IMPORTED_TARGET libngtcp2)

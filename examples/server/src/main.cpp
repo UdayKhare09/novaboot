@@ -5,8 +5,11 @@
 
 // ── Built-in library middleware ──────────────────────────────────────────────
 #include "novaboot/middleware/cors_middleware.h"
+#include "novaboot/middleware/body_size_limit_middleware.h"
+#include "novaboot/middleware/compression_middleware.h"
 #include "novaboot/middleware/jwt_middleware.h"
 #include "novaboot/middleware/request_logging_middleware.h"
+#include "novaboot/middleware/security_headers_middleware.h"
 
 // ── Custom in-app middleware ─────────────────────────────────────────────────
 #include "middleware/request_id_middleware.h"
@@ -26,7 +29,7 @@ using namespace novaboot::di;
 
 int main() {
     // Set logging level
-    spdlog::set_level(spdlog::level::info);
+    spdlog::set_level(spdlog::level::debug);
     spdlog::info("Starting Spring Boot-style C++ DI Sample App with TOML Config");
 
     // 0. Load TOML configuration
@@ -62,7 +65,18 @@ int main() {
     // (b) Request-ID — stamps every request with a trace ID before the handler.
     auto request_id = std::make_shared<RequestIdMiddleware>();
 
-    // (c) JWT auth — protects everything except explicitly public routes.
+    // (c) Security headers — added even when downstream middleware short-circuits.
+    auto security_headers =
+        std::make_shared<novaboot::middleware::SecurityHeadersMiddleware>();
+
+    // (d) Body-size limit — rejects oversized request bodies before auth/handlers.
+    auto body_limit = std::make_shared<novaboot::middleware::BodySizeLimitMiddleware>(
+        novaboot::middleware::BodySizeLimitMiddleware::Config{
+            .max_body_bytes = 64 * 1024,
+            .allowlist_paths = {},
+        });
+
+    // (e) JWT auth — protects everything except explicitly public routes.
     auto jwt = std::make_shared<novaboot::middleware::JwtMiddleware>(
         novaboot::middleware::JwtMiddleware::Config{
             .allowed_algorithms = {
@@ -76,7 +90,11 @@ int main() {
             .required_scopes = {"read"},
         });
 
-    // (d) Request logging — logs after the handler so the status code is known.
+    // (f) Compression — gzips eligible responses when the client asks for it.
+    auto compression =
+        std::make_shared<novaboot::middleware::CompressionMiddleware>();
+
+    // (g) Request logging — logs after the handler so the status code is known.
     auto logger = std::make_shared<novaboot::middleware::RequestLoggingMiddleware>();
 
     // 3. Server Setup (pass di_root for automatic request-scoped DI resolution)
@@ -91,10 +109,15 @@ int main() {
         .tls(cfg.server().tls_cert, cfg.server().tls_key)
         .di_container(di_root)
         .static_resources(cfg.server().static_resources)
-        // ── middleware order: CORS → RequestId → JWT → Logging → handler ──
+        // ── middleware order:
+        //    CORS → RequestId → SecurityHeaders → BodyLimit → JWT
+        //    → Compression → Logging → handler
         .middleware(cors)
         .middleware(request_id)
+        .middleware(security_headers)
+        .middleware(body_limit)
         .middleware(jwt)
+        .middleware(compression)
         .middleware(logger)
         .build();
 

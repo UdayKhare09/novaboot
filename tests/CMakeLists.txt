@@ -17,6 +17,7 @@ novaboot_test(test_header_map        unit/test_header_map.cpp)
 novaboot_test(test_middleware_pipeline unit/test_middleware_pipeline.cpp)
 novaboot_test(test_middleware          unit/test_middleware.cpp)
 novaboot_test(test_jwt_middleware      unit/test_jwt_middleware.cpp)
+novaboot_test(test_security_middleware unit/test_security_middleware.cpp)
 
 novaboot_test(test_request_context   unit/test_request_context.cpp)
 novaboot_test(test_json_reflection   unit/test_json_reflection.cpp)
@@ -53,4 +54,3 @@ odb_generate(test_pgsql_repository ${CMAKE_CURRENT_SOURCE_DIR}/unit/db_user.h)
 
 novaboot_test(test_redis_repository unit/test_redis_repository.cpp)
 novaboot_test(test_caching_crud unit/test_caching_crud.cpp)
-

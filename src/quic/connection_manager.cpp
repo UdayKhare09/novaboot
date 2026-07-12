@@ -15,6 +15,28 @@ ConnectionManager::ConnectionManager(const TlsContext& tls_ctx,
 }
 
 int ConnectionManager::on_packet(const net::IncomingPacket& packet) {
+    if (packet.gro_segment_size > 0 &&
+        packet.size > packet.gro_segment_size) {
+        int first_error = 0;
+
+        for (std::size_t offset = 0; offset < packet.size;
+             offset += packet.gro_segment_size) {
+            net::IncomingPacket segment = packet;
+            segment.data = packet.data + offset;
+            segment.size = std::min<std::size_t>(
+                packet.gro_segment_size,
+                packet.size - offset);
+            segment.gro_segment_size = 0;
+
+            const int rv = on_packet(segment);
+            if (rv != 0 && first_error == 0) {
+                first_error = rv;
+            }
+        }
+
+        return first_error;
+    }
+
     spdlog::debug("ConnectionManager: received packet of size {} from {}", packet.size, packet.remote.to_string());
     // Decode the version and connection IDs from the raw packet
     ngtcp2_version_cid vc;

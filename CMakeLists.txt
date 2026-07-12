@@ -101,6 +101,9 @@ add_library(novaboot STATIC
     src/middleware/cors_middleware.cpp
     src/middleware/request_logging_middleware.cpp
     src/middleware/jwt_middleware.cpp
+    src/middleware/security_headers_middleware.cpp
+    src/middleware/body_size_limit_middleware.cpp
+    src/middleware/compression_middleware.cpp
 
     # Context
     src/context/request_context.cpp
@@ -129,6 +132,7 @@ target_link_libraries(novaboot
         PkgConfig::URING
         OpenSSL::SSL
         OpenSSL::Crypto
+        ZLIB::ZLIB
         spdlog::spdlog
         simdjson::simdjson
         tomlplusplus::tomlplusplus
