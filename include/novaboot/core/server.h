@@ -75,6 +75,10 @@ std::optional<T> parse_value(std::string_view val) {
         return std::string(val);
     } else if constexpr (std::is_same_v<CleanT, std::string_view>) {
         return val;
+    } else if constexpr (std::is_same_v<CleanT, bool>) {
+        if (val == "true" || val == "1") return true;
+        if (val == "false" || val == "0") return false;
+        return std::nullopt;
     } else {
         CleanT result{};
         auto [ptr, ec] = std::from_chars(val.data(), val.data() + val.size(), result);

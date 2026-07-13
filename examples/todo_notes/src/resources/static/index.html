@@ -1,0 +1,1187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NovaBoot - Todo & Notes Dashboard</title>
+    <!-- Google Fonts: Outfit -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    
+    <style>
+        :root {
+            --bg-gradient: linear-gradient(135deg, #0f0c20 0%, #15102a 50%, #06040a 100%);
+            --glass-bg: rgba(255, 255, 255, 0.03);
+            --glass-border: rgba(255, 255, 255, 0.08);
+            --glass-border-focus: rgba(168, 85, 247, 0.4);
+            --text-primary: #f3f4f6;
+            --text-secondary: #9ca3af;
+            --accent-primary: #8b5cf6;
+            --accent-secondary: #ec4899;
+            --accent-gradient: linear-gradient(135deg, #8b5cf6 0%, #d946ef 50%, #ec4899 100%);
+            --accent-glow: 0 0 20px rgba(139, 92, 246, 0.3);
+            --success: #10b981;
+            --error: #ef4444;
+            --card-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.5);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Outfit', sans-serif;
+            background: var(--bg-gradient);
+            color: var(--text-primary);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            overflow-x: hidden;
+        }
+
+        /* Ambient Glow Blobs */
+        .blob {
+            position: absolute;
+            border-radius: 50%;
+            filter: blur(120px);
+            z-index: 0;
+            opacity: 0.3;
+            pointer-events: none;
+            animation: float 20s infinite ease-in-out;
+        }
+
+        .blob-1 {
+            width: 400px;
+            height: 400px;
+            background: #8b5cf6;
+            top: -10%;
+            left: 10%;
+        }
+
+        .blob-2 {
+            width: 500px;
+            height: 500px;
+            background: #ec4899;
+            bottom: -10%;
+            right: 10%;
+            animation-delay: -10s;
+        }
+
+        @keyframes float {
+            0%, 100% { transform: translateY(0) scale(1); }
+            50% { transform: translateY(-30px) scale(1.1); }
+        }
+
+        /* Glass Container base */
+        .glass-panel {
+            background: var(--glass-bg);
+            border: 1px solid var(--glass-border);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border-radius: 24px;
+            box-shadow: var(--card-shadow);
+            z-index: 10;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        /* Auth Screen */
+        .auth-container {
+            width: 100%;
+            max-width: 450px;
+            padding: 40px;
+            text-align: center;
+            display: flex;
+            flex-direction: column;
+            gap: 24px;
+        }
+
+        .logo-area {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .logo-icon {
+            width: 60px;
+            height: 60px;
+            background: var(--accent-gradient);
+            border-radius: 16px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: var(--accent-glow);
+            font-size: 28px;
+            font-weight: 800;
+        }
+
+        .logo-title {
+            font-size: 28px;
+            font-weight: 700;
+            background: var(--accent-gradient);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            letter-spacing: -0.5px;
+        }
+
+        .logo-tagline {
+            font-size: 14px;
+            color: var(--text-secondary);
+        }
+
+        .form-tabs {
+            display: flex;
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--glass-border);
+            border-radius: 12px;
+            padding: 4px;
+        }
+
+        .form-tab {
+            flex: 1;
+            padding: 10px 0;
+            border-radius: 8px;
+            background: transparent;
+            border: none;
+            color: var(--text-secondary);
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .form-tab.active {
+            background: var(--accent-gradient);
+            color: var(--text-primary);
+            box-shadow: 0 4px 12px rgba(139, 92, 246, 0.2);
+        }
+
+        .auth-form {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+            text-align: left;
+        }
+
+        .input-group {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .input-group label {
+            font-size: 13px;
+            font-weight: 500;
+            color: var(--text-secondary);
+            padding-left: 4px;
+        }
+
+        .input-group input, .input-group textarea {
+            width: 100%;
+            background: rgba(255, 255, 255, 0.02);
+            border: 1px solid var(--glass-border);
+            padding: 12px 16px;
+            border-radius: 12px;
+            color: var(--text-primary);
+            font-size: 15px;
+            font-family: inherit;
+            outline: none;
+            transition: all 0.2s ease;
+        }
+
+        .input-group input:focus, .input-group textarea:focus {
+            border-color: var(--glass-border-focus);
+            background: rgba(255, 255, 255, 0.05);
+            box-shadow: 0 0 15px rgba(139, 92, 246, 0.15);
+        }
+
+        .btn-submit {
+            background: var(--accent-gradient);
+            color: var(--text-primary);
+            border: none;
+            padding: 14px;
+            border-radius: 12px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            box-shadow: var(--accent-glow);
+            margin-top: 8px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .btn-submit:hover {
+            transform: translateY(-2px);
+            opacity: 0.95;
+            box-shadow: 0 0 25px rgba(139, 92, 246, 0.45);
+        }
+
+        .btn-submit:active {
+            transform: translateY(0);
+        }
+
+        /* Dashboard Screen */
+        .dashboard-container {
+            width: 92%;
+            max-width: 1100px;
+            padding: 30px;
+            display: flex;
+            flex-direction: column;
+            gap: 24px;
+            display: none; /* Shown dynamically */
+        }
+
+        .dash-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid var(--glass-border);
+            padding-bottom: 16px;
+        }
+
+        .user-profile {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .user-avatar {
+            width: 45px;
+            height: 45px;
+            background: var(--accent-gradient);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 600;
+            font-size: 18px;
+        }
+
+        .user-info h2 {
+            font-size: 18px;
+            font-weight: 600;
+        }
+
+        .user-info p {
+            font-size: 13px;
+            color: var(--text-secondary);
+        }
+
+        .btn-logout {
+            background: rgba(239, 68, 68, 0.1);
+            color: var(--error);
+            border: 1px solid rgba(239, 68, 68, 0.2);
+            padding: 8px 16px;
+            border-radius: 10px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .btn-logout:hover {
+            background: var(--error);
+            color: white;
+            box-shadow: 0 0 15px rgba(239, 68, 68, 0.3);
+        }
+
+        .dash-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 24px;
+        }
+
+        @media (max-width: 768px) {
+            .dash-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        /* Section Panels */
+        .section-panel {
+            padding: 24px;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+            min-height: 480px;
+        }
+
+        .section-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .section-title {
+            font-size: 20px;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .section-title span.accent {
+            background: var(--accent-gradient);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .btn-add {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--glass-border);
+            color: var(--text-primary);
+            padding: 6px 12px;
+            border-radius: 8px;
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .btn-add:hover {
+            border-color: var(--glass-border-focus);
+            background: rgba(255, 255, 255, 0.06);
+        }
+
+        /* Todo Form & Filters */
+        .todo-input-row {
+            display: flex;
+            gap: 10px;
+        }
+
+        .todo-input-row input {
+            flex: 1;
+            background: rgba(255, 255, 255, 0.02);
+            border: 1px solid var(--glass-border);
+            padding: 10px 14px;
+            border-radius: 10px;
+            color: var(--text-primary);
+            outline: none;
+            font-family: inherit;
+        }
+
+        .todo-input-row input:focus {
+            border-color: var(--glass-border-focus);
+        }
+
+        .todo-input-row button {
+            background: var(--accent-gradient);
+            border: none;
+            color: white;
+            padding: 0 16px;
+            border-radius: 10px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .todo-input-row button:hover {
+            opacity: 0.9;
+        }
+
+        .filter-tabs {
+            display: flex;
+            gap: 8px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+            padding-bottom: 8px;
+        }
+
+        .filter-tab {
+            background: transparent;
+            border: none;
+            color: var(--text-secondary);
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            padding: 4px 8px;
+            border-bottom: 2px solid transparent;
+            transition: all 0.2s ease;
+        }
+
+        .filter-tab.active {
+            color: var(--accent-primary);
+            border-bottom-color: var(--accent-primary);
+        }
+
+        /* Item lists */
+        .item-list {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            overflow-y: auto;
+            max-height: 380px;
+            padding-right: 4px;
+        }
+
+        /* Custom scrollbar for glass lists */
+        .item-list::-webkit-scrollbar {
+            width: 4px;
+        }
+        .item-list::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        .item-list::-webkit-scrollbar-thumb {
+            background: var(--glass-border);
+            border-radius: 4px;
+        }
+
+        /* Todo Item Box */
+        .todo-item {
+            background: rgba(255, 255, 255, 0.01);
+            border: 1px solid var(--glass-border);
+            padding: 12px 16px;
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            transition: all 0.2s ease;
+        }
+
+        .todo-item:hover {
+            background: rgba(255, 255, 255, 0.03);
+            border-color: rgba(255, 255, 255, 0.15);
+        }
+
+        .todo-left {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .checkbox-container {
+            position: relative;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .checkbox-container input {
+            display: none;
+        }
+
+        .checkmark {
+            width: 20px;
+            height: 20px;
+            border: 1px solid var(--text-secondary);
+            border-radius: 6px;
+            display: inline-block;
+            transition: all 0.2s ease;
+        }
+
+        .checkbox-container input:checked + .checkmark {
+            background: var(--success);
+            border-color: var(--success);
+        }
+
+        .checkbox-container input:checked + .checkmark::after {
+            content: "✓";
+            color: white;
+            font-size: 13px;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+        }
+
+        .todo-text {
+            font-size: 14px;
+            transition: all 0.2s ease;
+        }
+
+        .todo-item.completed .todo-text {
+            text-decoration: line-through;
+            color: var(--text-secondary);
+        }
+
+        .btn-delete-item {
+            background: transparent;
+            border: none;
+            color: rgba(239, 68, 68, 0.4);
+            cursor: pointer;
+            padding: 4px;
+            transition: all 0.2s ease;
+            font-size: 16px;
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .btn-delete-item:hover {
+            color: var(--error);
+            background: rgba(239, 68, 68, 0.1);
+        }
+
+        /* Notes grid */
+        .notes-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+            overflow-y: auto;
+            max-height: 380px;
+            padding-right: 4px;
+        }
+
+        .notes-grid::-webkit-scrollbar {
+            width: 4px;
+        }
+        .notes-grid::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        .notes-grid::-webkit-scrollbar-thumb {
+            background: var(--glass-border);
+            border-radius: 4px;
+        }
+
+        .note-card {
+            background: rgba(255, 255, 255, 0.01);
+            border: 1px solid var(--glass-border);
+            padding: 16px;
+            border-radius: 16px;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            gap: 12px;
+            min-height: 130px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .note-card:hover {
+            background: rgba(255, 255, 255, 0.03);
+            border-color: rgba(255, 255, 255, 0.15);
+            transform: translateY(-2px);
+        }
+
+        .note-card-title {
+            font-size: 15px;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .note-card-content {
+            font-size: 13px;
+            color: var(--text-secondary);
+            overflow: hidden;
+            display: -webkit-box;
+            -webkit-line-clamp: 3;
+            -webkit-box-orient: vertical;
+        }
+
+        .note-card-footer {
+            display: flex;
+            justify-content: flex-end;
+            margin-top: auto;
+        }
+
+        /* Modal Overlay */
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.6);
+            backdrop-filter: blur(8px);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 100;
+            opacity: 0;
+            pointer-events: none;
+            transition: all 0.3s ease;
+        }
+
+        .modal-overlay.active {
+            opacity: 1;
+            pointer-events: auto;
+        }
+
+        .modal-content {
+            width: 90%;
+            max-width: 500px;
+            padding: 30px;
+            display: flex;
+            flex-direction: column;
+            gap: 18px;
+            transform: scale(0.9);
+            transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+        }
+
+        .modal-overlay.active .modal-content {
+            transform: scale(1);
+        }
+
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid var(--glass-border);
+            padding-bottom: 10px;
+        }
+
+        .modal-header h3 {
+            font-size: 18px;
+            font-weight: 600;
+        }
+
+        .btn-modal-close {
+            background: transparent;
+            border: none;
+            color: var(--text-secondary);
+            font-size: 20px;
+            cursor: pointer;
+        }
+
+        /* Toast notification */
+        .toast {
+            position: fixed;
+            bottom: 24px;
+            right: 24px;
+            background: rgba(15, 10, 30, 0.85);
+            border: 1px solid var(--glass-border);
+            backdrop-filter: blur(10px);
+            padding: 12px 24px;
+            border-radius: 12px;
+            box-shadow: var(--card-shadow);
+            z-index: 1000;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            transform: translateY(150px);
+            transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+        }
+
+        .toast.active {
+            transform: translateY(0);
+        }
+
+        .toast-icon {
+            font-weight: 700;
+        }
+
+        .toast-success { border-left: 4px solid var(--success); }
+        .toast-error { border-left: 4px solid var(--error); }
+    </style>
+</head>
+<body>
+    
+    <div class="blob blob-1"></div>
+    <div class="blob blob-2"></div>
+
+    <!-- Auth Container -->
+    <div id="auth-panel" class="glass-panel auth-container">
+        <div class="logo-area">
+            <div class="logo-icon">🚀</div>
+            <h1 class="logo-title">NovaBoot</h1>
+            <p class="logo-tagline">Todo & Notes C++ Showcase App</p>
+        </div>
+
+        <div class="form-tabs">
+            <button id="tab-login" class="form-tab active" onclick="switchTab('login')">Sign In</button>
+            <button id="tab-register" class="form-tab" onclick="switchTab('register')">Sign Up</button>
+        </div>
+
+        <div id="login-form-wrapper">
+            <form class="auth-form" onsubmit="handleLogin(event)">
+                <div class="input-group">
+                    <label for="login-username">Username</label>
+                    <input type="text" id="login-username" required placeholder="Enter username">
+                </div>
+                <div class="input-group">
+                    <label for="login-password">Password</label>
+                    <input type="password" id="login-password" required placeholder="Enter password">
+                </div>
+                <button type="submit" class="btn-submit">
+                    <span>Sign In</span>
+                </button>
+            </form>
+        </div>
+
+        <div id="register-form-wrapper" style="display: none;">
+            <form class="auth-form" onsubmit="handleRegister(event)">
+                <div class="input-group">
+                    <label for="reg-username">Username</label>
+                    <input type="text" id="reg-username" required placeholder="Minimum 3 characters">
+                </div>
+                <div class="input-group">
+                    <label for="reg-email">Email Address</label>
+                    <input type="email" id="reg-email" required placeholder="Enter email">
+                </div>
+                <div class="input-group">
+                    <label for="reg-password">Password</label>
+                    <input type="password" id="reg-password" required placeholder="Minimum 6 characters">
+                </div>
+                <button type="submit" class="btn-submit">
+                    <span>Create Account</span>
+                </button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Dashboard Container -->
+    <div id="dashboard-panel" class="glass-panel dashboard-container">
+        <div class="dash-header">
+            <div class="user-profile">
+                <div id="user-avatar" class="user-avatar">U</div>
+                <div class="user-info">
+                    <h2 id="welcome-username">Welcome Back, User!</h2>
+                    <p id="user-role">Authenticated via JWT</p>
+                </div>
+            </div>
+            <button class="btn-logout" onclick="handleLogout()">Sign Out</button>
+        </div>
+
+        <div class="dash-grid">
+            <!-- Todos Panel -->
+            <div class="glass-panel section-panel">
+                <div class="section-header">
+                    <h3 class="section-title">📝 My <span class="accent">Todos</span></h3>
+                </div>
+                
+                <form class="todo-input-row" onsubmit="handleAddTodo(event)">
+                    <input type="text" id="todo-input" required placeholder="Add a new task...">
+                    <button type="submit">Add</button>
+                </form>
+
+                <div class="filter-tabs">
+                    <button id="filter-all" class="filter-tab active" onclick="setTodoFilter('all')">All</button>
+                    <button id="filter-active" class="filter-tab" onclick="setTodoFilter('active')">Active</button>
+                    <button id="filter-completed" class="filter-tab" onclick="setTodoFilter('completed')">Completed</button>
+                </div>
+
+                <div id="todo-list" class="item-list">
+                    <!-- Loaded dynamically -->
+                </div>
+            </div>
+
+            <!-- Notes Panel -->
+            <div class="glass-panel section-panel">
+                <div class="section-header">
+                    <h3 class="section-title">📓 My <span class="accent">Notes</span></h3>
+                    <button class="btn-add" onclick="openNoteModal(false)">
+                        <span>+ New Note</span>
+                    </button>
+                </div>
+
+                <div id="notes-grid" class="notes-grid">
+                    <!-- Loaded dynamically -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Note Add/Edit Modal -->
+    <div id="note-modal" class="modal-overlay">
+        <div class="glass-panel modal-content">
+            <div class="modal-header">
+                <h3 id="modal-title">Create Note</h3>
+                <button class="btn-modal-close" onclick="closeNoteModal()">&times;</button>
+            </div>
+            <div class="input-group">
+                <label for="note-title">Title</label>
+                <input type="text" id="note-title" placeholder="Enter note title">
+            </div>
+            <div class="input-group">
+                <label for="note-content">Content</label>
+                <textarea id="note-content" rows="6" placeholder="Write something ideas, plans..."></textarea>
+            </div>
+            <button class="btn-submit" onclick="handleSaveNote()">
+                <span id="btn-save-note-text">Save Note</span>
+            </button>
+            <button id="btn-delete-note" class="btn-logout" style="display: none; border-color: rgba(239, 68, 68, 0.4);" onclick="handleDeleteNote()">
+                Delete Note
+            </button>
+        </div>
+    </div>
+
+    <!-- Toast Notification -->
+    <div id="toast" class="toast">
+        <span id="toast-icon" class="toast-icon"></span>
+        <span id="toast-message">Notification message</span>
+    </div>
+
+    <script>
+        let currentToken = localStorage.getItem("jwt_token") || "";
+        let currentUsername = localStorage.getItem("username") || "";
+        let todos = [];
+        let notes = [];
+        let todoFilter = "all"; // 'all', 'active', 'completed'
+        let editingNoteId = null; // null if creating
+
+        // On Load checks
+        document.addEventListener("DOMContentLoaded", () => {
+            if (currentToken) {
+                showDashboard();
+            } else {
+                showAuth();
+            }
+        });
+
+        function showAuth() {
+            document.getElementById("auth-panel").style.display = "flex";
+            document.getElementById("dashboard-panel").style.display = "none";
+        }
+
+        function showDashboard() {
+            document.getElementById("auth-panel").style.display = "none";
+            document.getElementById("dashboard-panel").style.display = "flex";
+            
+            // Set profile name
+            document.getElementById("welcome-username").textContent = `Welcome, ${currentUsername}!`;
+            document.getElementById("user-avatar").textContent = currentUsername.substring(0,2).toUpperCase();
+
+            // Load data
+            loadTodos();
+            loadNotes();
+        }
+
+        // View Tabs switching (Login / Register)
+        function switchTab(tab) {
+            if (tab === 'login') {
+                document.getElementById("tab-login").classList.add("active");
+                document.getElementById("tab-register").classList.remove("active");
+                document.getElementById("login-form-wrapper").style.display = "block";
+                document.getElementById("register-form-wrapper").style.display = "none";
+            } else {
+                document.getElementById("tab-login").classList.remove("active");
+                document.getElementById("tab-register").classList.add("active");
+                document.getElementById("login-form-wrapper").style.display = "none";
+                document.getElementById("register-form-wrapper").style.display = "block";
+            }
+        }
+
+        // Toast Messages helper
+        function showToast(message, isError = false) {
+            const toast = document.getElementById("toast");
+            const toastMessage = document.getElementById("toast-message");
+            const toastIcon = document.getElementById("toast-icon");
+            
+            toastMessage.textContent = message;
+            toastIcon.textContent = isError ? "❌" : "✨";
+            
+            toast.className = `toast active ${isError ? 'toast-error' : 'toast-success'}`;
+            
+            setTimeout(() => {
+                toast.classList.remove("active");
+            }, 3000);
+        }
+
+        // API Request wrapper
+        async function apiRequest(endpoint, method = "GET", body = null) {
+            const headers = {
+                "Content-Type": "application/json"
+            };
+            if (currentToken) {
+                headers["Authorization"] = `Bearer ${currentToken}`;
+            }
+
+            const options = {
+                method,
+                headers
+            };
+            if (body) {
+                options.body = JSON.stringify(body);
+            }
+
+            try {
+                const response = await fetch(endpoint, options);
+                
+                // If token invalid, auto logout
+                if (response.status === 410 || response.status === 401) {
+                    handleLogout();
+                    showToast("Session expired. Please sign in again.", true);
+                    return null;
+                }
+
+                if (response.status === 204) {
+                    return true;
+                }
+
+                const data = await response.json();
+                
+                if (!response.ok) {
+                    throw new Error(data.message || data.error || "An error occurred");
+                }
+                return data;
+            } catch (err) {
+                showToast(err.message, true);
+                console.error("API Error: ", err);
+                throw err;
+            }
+        }
+
+        // Authentication Handlers
+        async function handleLogin(e) {
+            e.preventDefault();
+            const username = document.getElementById("login-username").value.trim();
+            const password = document.getElementById("login-password").value;
+
+            try {
+                const data = await apiRequest("/public/login", "POST", { username, password });
+                if (data && data.token) {
+                    currentToken = data.token;
+                    currentUsername = username;
+                    localStorage.setItem("jwt_token", currentToken);
+                    localStorage.setItem("username", currentUsername);
+                    showToast("Logged in successfully!");
+                    showDashboard();
+                }
+            } catch(err) {}
+        }
+
+        async function handleRegister(e) {
+            e.preventDefault();
+            const username = document.getElementById("reg-username").value.trim();
+            const email = document.getElementById("reg-email").value.trim();
+            const password = document.getElementById("reg-password").value;
+
+            try {
+                const data = await apiRequest("/public/register", "POST", { username, email, password });
+                if (data) {
+                    showToast("Registration successful! Please login.");
+                    switchTab('login');
+                    document.getElementById("login-username").value = username;
+                    document.getElementById("login-password").focus();
+                }
+            } catch(err) {}
+        }
+
+        function handleLogout() {
+            currentToken = "";
+            currentUsername = "";
+            localStorage.removeItem("jwt_token");
+            localStorage.removeItem("username");
+            showAuth();
+            showToast("Logged out successfully.");
+        }
+
+        // Todos Management
+        async function loadTodos() {
+            try {
+                const data = await apiRequest("/api/todos", "GET");
+                if (data) {
+                    todos = data;
+                    renderTodos();
+                }
+            } catch(err) {}
+        }
+
+        function setTodoFilter(filter) {
+            todoFilter = filter;
+            document.getElementById("filter-all").classList.toggle("active", filter === 'all');
+            document.getElementById("filter-active").classList.toggle("active", filter === 'active');
+            document.getElementById("filter-completed").classList.toggle("active", filter === 'completed');
+            renderTodos();
+        }
+
+        function renderTodos() {
+            const listContainer = document.getElementById("todo-list");
+            listContainer.innerHTML = "";
+
+            const filteredTodos = todos.filter(t => {
+                if (todoFilter === 'all') return true;
+                if (todoFilter === 'active') return !t.completed;
+                if (todoFilter === 'completed') return t.completed;
+            });
+
+            if (filteredTodos.length === 0) {
+                listContainer.innerHTML = `<div style="text-align: center; color: var(--text-secondary); padding: 20px; font-size: 14px;">No tasks found.</div>`;
+                return;
+            }
+
+            filteredTodos.forEach(t => {
+                const item = document.createElement("div");
+                item.className = `todo-item ${t.completed ? 'completed' : ''}`;
+                item.innerHTML = `
+                    <div class="todo-left">
+                        <label class="checkbox-container">
+                            <input type="checkbox" ${t.completed ? 'checked' : ''} onchange="toggleTodoComplete(${t.id}, this.checked)">
+                            <span class="checkmark"></span>
+                        </label>
+                        <span class="todo-text">${t.title}</span>
+                    </div>
+                    <button class="btn-delete-item" onclick="handleDeleteTodo(${t.id})" title="Delete Task">🗑️</button>
+                `;
+                listContainer.appendChild(item);
+            });
+        }
+
+        async function handleAddTodo(e) {
+            e.preventDefault();
+            const input = document.getElementById("todo-input");
+            const title = input.value.trim();
+            if (!title) return;
+
+            try {
+                const newTodo = await apiRequest("/api/todos", "POST", { title, description: "", completed: false });
+                if (newTodo) {
+                    todos.push(newTodo);
+                    input.value = "";
+                    renderTodos();
+                    showToast("Task added!");
+                }
+            } catch(err) {}
+        }
+
+        async function toggleTodoComplete(id, completed) {
+            const todo = todos.find(t => t.id === id);
+            if (!todo) return;
+
+            try {
+                const updated = await apiRequest(`/api/todos/${id}`, "PUT", {
+                    title: todo.title,
+                    description: todo.description,
+                    completed
+                });
+                if (updated) {
+                    todo.completed = completed;
+                    renderTodos();
+                }
+            } catch(err) {
+                // Revert checkmark if it failed
+                loadTodos();
+            }
+        }
+
+        async function handleDeleteTodo(id) {
+            try {
+                const success = await apiRequest(`/api/todos/${id}`, "DELETE");
+                if (success) {
+                    todos = todos.filter(t => t.id !== id);
+                    renderTodos();
+                    showToast("Task deleted.");
+                }
+            } catch(err) {}
+        }
+
+        // Notes Management
+        async function loadNotes() {
+            try {
+                const data = await apiRequest("/api/notes", "GET");
+                if (data) {
+                    notes = data;
+                    renderNotes();
+                }
+            } catch(err) {}
+        }
+
+        function renderNotes() {
+            const gridContainer = document.getElementById("notes-grid");
+            gridContainer.innerHTML = "";
+
+            if (notes.length === 0) {
+                gridContainer.innerHTML = `<div style="grid-column: span 2; text-align: center; color: var(--text-secondary); padding: 40px; font-size: 14px;">No notes created yet.</div>`;
+                return;
+            }
+
+            notes.forEach(n => {
+                const card = document.createElement("div");
+                card.className = "note-card";
+                card.onclick = () => openNoteModal(true, n.id);
+                card.innerHTML = `
+                    <div class="note-card-title">${n.title}</div>
+                    <div class="note-card-content">${n.content || ''}</div>
+                    <div class="note-card-footer">
+                        <span style="font-size: 10px; color: var(--text-secondary)">View / Edit</span>
+                    </div>
+                `;
+                gridContainer.appendChild(card);
+            });
+        }
+
+        // Note Modal Management
+        function openNoteModal(isEdit, id = null) {
+            const modal = document.getElementById("note-modal");
+            const modalTitle = document.getElementById("modal-title");
+            const noteTitleInput = document.getElementById("note-title");
+            const noteContentInput = document.getElementById("note-content");
+            const btnDelete = document.getElementById("btn-delete-note");
+            const btnSaveText = document.getElementById("btn-save-note-text");
+
+            editingNoteId = id;
+
+            if (isEdit && id !== null) {
+                const note = notes.find(n => n.id === id);
+                modalTitle.textContent = "Edit Note";
+                noteTitleInput.value = note.title;
+                noteContentInput.value = note.content || "";
+                btnDelete.style.display = "block";
+                btnSaveText.textContent = "Update Note";
+            } else {
+                modalTitle.textContent = "Create Note";
+                noteTitleInput.value = "";
+                noteContentInput.value = "";
+                btnDelete.style.display = "none";
+                btnSaveText.textContent = "Save Note";
+            }
+
+            modal.classList.add("active");
+        }
+
+        function closeNoteModal() {
+            document.getElementById("note-modal").classList.remove("active");
+            editingNoteId = null;
+        }
+
+        async function handleSaveNote() {
+            const title = document.getElementById("note-title").value.trim();
+            const content = document.getElementById("note-content").value.trim();
+            if (!title) {
+                showToast("Title is required", true);
+                return;
+            }
+
+            try {
+                if (editingNoteId !== null) {
+                    // Update
+                    const updated = await apiRequest(`/api/notes/${editingNoteId}`, "PUT", { title, content });
+                    if (updated) {
+                        const index = notes.findIndex(n => n.id === editingNoteId);
+                        notes[index] = updated;
+                        renderNotes();
+                        showToast("Note updated!");
+                        closeNoteModal();
+                    }
+                } else {
+                    // Create
+                    const newNote = await apiRequest("/api/notes", "POST", { title, content });
+                    if (newNote) {
+                        notes.push(newNote);
+                        renderNotes();
+                        showToast("Note created!");
+                        closeNoteModal();
+                    }
+                }
+            } catch(err) {}
+        }
+
+        async function handleDeleteNote() {
+            if (editingNoteId === null) return;
+            if (!confirm("Are you sure you want to delete this note?")) return;
+
+            try {
+                const success = await apiRequest(`/api/notes/${editingNoteId}`, "DELETE");
+                if (success) {
+                    notes = notes.filter(n => n.id !== editingNoteId);
+                    renderNotes();
+                    showToast("Note deleted.");
+                    closeNoteModal();
+                }
+            } catch(err) {}
+        }
+    </script>
+</body>
+</html>
