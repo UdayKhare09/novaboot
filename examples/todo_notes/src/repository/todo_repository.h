@@ -15,7 +15,7 @@ public:
     explicit TodoRepository(PgsqlDataSource& ds)
         : PgsqlRepositoryBase<Todo, int>(ds) {}
 
-    std::vector<Todo> find_by_user_id(int user_id) {
+    std::vector<Todo> find_by_user_id(const std::string& user_id) {
         return ds_.transact([&](auto& db) {
             std::vector<Todo> result;
             typedef odb::query<Todo> query;

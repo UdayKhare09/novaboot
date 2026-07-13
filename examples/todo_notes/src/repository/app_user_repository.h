@@ -10,10 +10,10 @@ using namespace novaboot;
 using namespace novaboot::data;
 using todo_notes::model::AppUser;
 
-struct AppUserRepository : public PgsqlRepositoryBase<AppUser, int> {
+struct AppUserRepository : public PgsqlRepositoryBase<AppUser, std::string> {
 public:
     explicit AppUserRepository(PgsqlDataSource& ds)
-        : PgsqlRepositoryBase<AppUser, int>(ds) {}
+        : PgsqlRepositoryBase<AppUser, std::string>(ds) {}
 
     std::optional<AppUser> find_by_username(const std::string& username) {
         return ds_.transact([&](auto& db) -> std::optional<AppUser> {

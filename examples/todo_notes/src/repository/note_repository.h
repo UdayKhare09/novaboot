@@ -15,7 +15,7 @@ public:
     explicit NoteRepository(PgsqlDataSource& ds)
         : PgsqlRepositoryBase<Note, int>(ds) {}
 
-    std::vector<Note> find_by_user_id(int user_id) {
+    std::vector<Note> find_by_user_id(const std::string& user_id) {
         return ds_.transact([&](auto& db) {
             std::vector<Note> result;
             typedef odb::query<Note> query;

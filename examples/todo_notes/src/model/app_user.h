@@ -15,8 +15,8 @@ using novaboot::validation::Schema;
 
 #pragma db object table("app_users")
 struct AppUser {
-#pragma db id auto
-    int id = 0;
+#pragma db id
+    std::string id;
 
     std::string username;
     std::string password_hash;

@@ -17,7 +17,7 @@ using novaboot::validation::Schema;
 struct Todo {
 #pragma db id auto
     int id = 0;
-    int user_id = 0;
+    std::string user_id;
     std::string title;
     std::string description;
     bool completed = false;

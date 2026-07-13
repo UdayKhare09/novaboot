@@ -14,11 +14,11 @@ struct NoteService {
 
     explicit NoteService(NoteRepository& repo) : note_repo(repo) {}
 
-    std::vector<Note> get_notes(int user_id) {
+    std::vector<Note> get_notes(const std::string& user_id) {
         return note_repo.find_by_user_id(user_id);
     }
 
-    Note create_note(int user_id, const NoteRequest& req) {
+    Note create_note(const std::string& user_id, const NoteRequest& req) {
         Note note;
         note.id = 0;
         note.user_id = user_id;
@@ -28,7 +28,7 @@ struct NoteService {
         return note_repo.save(note);
     }
 
-    Note update_note(int user_id, int id, const NoteRequest& req) {
+    Note update_note(const std::string& user_id, int id, const NoteRequest& req) {
         auto existing = note_repo.find_by_id(id);
         if (!existing || existing->user_id != user_id) {
             throw std::runtime_error("Note not found or access denied");
@@ -40,7 +40,7 @@ struct NoteService {
         return note_repo.save(*existing);
     }
 
-    void delete_note(int user_id, int id) {
+    void delete_note(const std::string& user_id, int id) {
         auto existing = note_repo.find_by_id(id);
         if (!existing || existing->user_id != user_id) {
             throw std::runtime_error("Note not found or access denied");

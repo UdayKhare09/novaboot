@@ -5,6 +5,9 @@
 #include <openssl/evp.h>
 #include <spdlog/spdlog.h>
 #include <stdexcept>
+#include <random>
+#include <sstream>
+#include <iomanip>
 
 namespace todo_notes::service {
 
@@ -19,6 +22,27 @@ struct AuthService {
     AppUserRepository& user_repo;
 
     explicit AuthService(AppUserRepository& repo) : user_repo(repo) {}
+
+    std::string generate_uuid() {
+        static std::random_device rd;
+        static std::mt19937 gen(rd());
+        static std::uniform_int_distribution<> dis(0, 15);
+        static std::uniform_int_distribution<> dis2(8, 11);
+
+        std::stringstream ss;
+        ss << std::hex;
+        for (int i = 0; i < 8; i++) ss << dis(gen);
+        ss << "-";
+        for (int i = 0; i < 4; i++) ss << dis(gen);
+        ss << "-4";
+        for (int i = 0; i < 3; i++) ss << dis(gen);
+        ss << "-";
+        ss << dis2(gen);
+        for (int i = 0; i < 3; i++) ss << dis(gen);
+        ss << "-";
+        for (int i = 0; i < 12; i++) ss << dis(gen);
+        return ss.str();
+    }
 
     std::string hash_password(const std::string& password, const std::string& salt) {
         std::string salted = password + ":" + salt;
@@ -54,10 +78,10 @@ struct AuthService {
         }
 
         AppUser user;
+        user.id = generate_uuid();
         user.username = req.username;
         user.email = req.email;
         user.password_hash = hash_password(req.password, req.username);
-        user.id = 0; // Trigger auto-increment in ODB/Postgres
 
         return user_repo.save(user);
     }
@@ -85,7 +109,7 @@ struct AuthService {
                .issuer("novaboot-sample")
                .audience("sample-api")
                .scopes({"read", "write"})
-               .claim("user_id", static_cast<std::int64_t>(user_opt->id))
+               .claim("user_id", user_opt->id)
                .issued_now();
 
         auto issued = issuer.issue(builder);

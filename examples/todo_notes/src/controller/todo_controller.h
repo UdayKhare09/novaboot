@@ -21,25 +21,25 @@ struct TodoController {
 
     explicit TodoController(TodoService& svc) : todo_service(svc) {}
 
-    int get_user_id(RequestContext& ctx) {
+    std::string get_user_id(RequestContext& ctx) {
         auto principal = ctx.get<JwtPrincipal>();
         if (!principal) {
             throw std::runtime_error("Unauthorized access");
         }
-        auto uid = principal->claims.integer("user_id");
+        auto uid = principal->claims.string("user_id");
         if (!uid) {
             throw std::runtime_error("User ID not found in JWT");
         }
-        return static_cast<int>(*uid);
+        return std::string(*uid);
     }
 
     ResponseEntity<std::vector<Todo>> list_todos(RequestContext& ctx) {
-        int uid = get_user_id(ctx);
+        std::string uid = get_user_id(ctx);
         return ResponseEntity<std::vector<Todo>>::ok(todo_service.get_todos(uid));
     }
 
     ResponseEntity<Todo> get_todo(int id, RequestContext& ctx) {
-        int uid = get_user_id(ctx);
+        std::string uid = get_user_id(ctx);
         auto items = todo_service.get_todos(uid);
         for (const auto& item : items) {
             if (item.id == id) {
@@ -50,19 +50,19 @@ struct TodoController {
     }
 
     ResponseEntity<Todo> create_todo(TodoRequest req, RequestContext& ctx) {
-        int uid = get_user_id(ctx);
+        std::string uid = get_user_id(ctx);
         auto saved = todo_service.create_todo(uid, req);
         return ResponseEntity<Todo>::status(201, saved);
     }
 
     ResponseEntity<Todo> update_todo(int id, TodoRequest req, RequestContext& ctx) {
-        int uid = get_user_id(ctx);
+        std::string uid = get_user_id(ctx);
         auto saved = todo_service.update_todo(uid, id, req);
         return ResponseEntity<Todo>::ok(saved);
     }
 
     ResponseEntity<void> delete_todo(int id, RequestContext& ctx) {
-        int uid = get_user_id(ctx);
+        std::string uid = get_user_id(ctx);
         todo_service.delete_todo(uid, id);
         return ResponseEntity<void>::noContent();
     }
