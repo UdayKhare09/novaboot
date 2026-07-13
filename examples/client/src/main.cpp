@@ -33,7 +33,7 @@ int main() {
     });
     di_root.singleton<GatewayUserController>([](auto& c) {
         return new GatewayUserController(c.template resolve<UserServiceClientProvider>());
-    });
+    }).depends_on<UserServiceClientProvider>();
 
     // Build container
     di_root.build();

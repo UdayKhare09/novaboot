@@ -47,10 +47,10 @@ int main() {
     // Explicitly register all components and database sources in the container
     di_root.singleton<novaboot::data::PgsqlDataSource>([](auto& c) {
         return new novaboot::data::PgsqlDataSource(c.template resolve<novaboot::config::AppConfig>().postgres());
-    });
+    }).depends_on<novaboot::config::AppConfig>();
     di_root.singleton<novaboot::data::RedisDataSource>([](auto& c) {
         return new novaboot::data::RedisDataSource(c.template resolve<novaboot::config::AppConfig>().redis());
-    });
+    }).depends_on<novaboot::config::AppConfig>();
 
     di_root.request<RequestLogger>([](auto&) {
         return new RequestLogger();
@@ -58,12 +58,12 @@ int main() {
 
     di_root.singleton<UserSqlRepository>([](auto& c) {
         return new UserSqlRepository(c.template resolve<novaboot::data::PgsqlDataSource>());
-    });
+    }).depends_on<novaboot::data::PgsqlDataSource>();
     di_root.bind<novaboot::data::CrudRepository<examples::model::User, int>>().to<UserSqlRepository>();
 
     di_root.singleton<UserCacheRepository>([](auto& c) {
         return new UserCacheRepository(c.template resolve<novaboot::data::RedisDataSource>());
-    });
+    }).depends_on<novaboot::data::RedisDataSource>();
     di_root.bind<novaboot::data::CacheRepository<examples::model::User, int>>().to<UserCacheRepository>();
 
     di_root.singleton<UserRepository>([](auto& c) {
@@ -71,17 +71,20 @@ int main() {
             c.template resolve<novaboot::data::CrudRepository<examples::model::User, int>>(),
             c.template resolve<novaboot::data::CacheRepository<examples::model::User, int>>()
         );
-    });
+    })
+    .depends_on<novaboot::data::CrudRepository<examples::model::User, int>>()
+    .depends_on<novaboot::data::CacheRepository<examples::model::User, int>>();
 
     di_root.singleton<UserService>([](auto& c) {
         return new UserService(c.template resolve<UserRepository>());
     })
     .on_start(&UserService::init)
-    .on_stop(&UserService::cleanup);
+    .on_stop(&UserService::cleanup)
+    .depends_on<UserRepository>();
 
     di_root.singleton<UserController>([](auto& c) {
         return new UserController(c.template resolve<UserService>());
-    });
+    }).depends_on<UserService>();
 
     // Build the container: builds dependency graph and instantiates singletons
     di_root.build();
