@@ -1,5 +1,6 @@
 #include "novaboot/net/tcp_listener.h"
 #include <sys/socket.h>
+#include <netinet/in.h>
 #include <unistd.h>
 #include <cstring>
 #include <cerrno>
@@ -34,6 +35,14 @@ std::expected<TcpListener, TcpListener::Error> TcpListener::create(const Address
     if (fd < 0) {
         spdlog::error("TcpListener socket() failed: {}", std::strerror(errno));
         return std::unexpected(Error::SocketCreate);
+    }
+
+    // IPv6-only or dual-stack
+    if (bind_addr.is_v6()) {
+        int v6only = 0; // Dual-stack
+        if (::setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only)) < 0) {
+            spdlog::warn("TcpListener IPV6_V6ONLY failed: {}", std::strerror(errno));
+        }
     }
 
     int optval = 1;
