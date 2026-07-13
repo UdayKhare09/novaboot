@@ -10,6 +10,8 @@
 namespace examples::model {
 
 #ifndef ODB_COMPILER
+using novaboot::validation::Schema;
+
 struct is_valid_role {
     char prefix[32] = {};
 
@@ -55,8 +57,8 @@ struct User {
     std::string role;
 
 #ifndef ODB_COMPILER
-    inline static const novaboot::validation::Schema<User> validator =
-        novaboot::validation::Schema<User>()
+    inline static const Schema<User> validator =
+        Schema<User>()
             .field<&User::id>("id").min(0)
             .field<&User::name>("name").not_empty().size(2, 20)
             .field<&User::email>("email").email()

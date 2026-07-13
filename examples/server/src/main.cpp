@@ -27,6 +27,11 @@
 
 using namespace novaboot;
 using namespace novaboot::di;
+using namespace novaboot::data;
+using namespace novaboot::config;
+using namespace novaboot::middleware;
+using examples::model::User;
+using examples::exception::UserNotFoundException;
 
 int main() {
     // Set logging level
@@ -34,56 +39,57 @@ int main() {
     spdlog::info("Starting Spring Boot-style C++ DI Sample App with TOML Config");
 
     // 0. Load TOML configuration
-    auto cfg = novaboot::config::AppConfig::load("examples/server/src/resources/config.toml");
+    auto cfg = AppConfig::load("examples/server/src/resources/config.toml");
 
     // 1. DI Container Setup
     RootContainer di_root;
 
     // Register pre-loaded AppConfig in the container so modules can resolve it
-    di_root.register_bean<novaboot::config::AppConfig>([cfg](ContainerBase&) {
-        return new novaboot::config::AppConfig(cfg);
+    di_root.register_bean<AppConfig>([cfg](ContainerBase&) {
+        return new AppConfig(cfg);
     });
 
     // Explicitly register all components and database sources in the container
-    di_root.singleton<novaboot::data::PgsqlDataSource>([](auto& c) {
-        return new novaboot::data::PgsqlDataSource(c.template resolve<novaboot::config::AppConfig>().postgres());
-    }).depends_on<novaboot::config::AppConfig>();
-    di_root.singleton<novaboot::data::RedisDataSource>([](auto& c) {
-        return new novaboot::data::RedisDataSource(c.template resolve<novaboot::config::AppConfig>().redis());
-    }).depends_on<novaboot::config::AppConfig>();
+    di_root.singleton<PgsqlDataSource>([](ContainerBase& c) {
+        return new PgsqlDataSource(c.resolve<AppConfig>().postgres());
+    }).depends_on<AppConfig>();
+    
+    di_root.singleton<RedisDataSource>([](ContainerBase& c) {
+        return new RedisDataSource(c.resolve<AppConfig>().redis());
+    }).depends_on<AppConfig>();
 
-    di_root.request<RequestLogger>([](auto&) {
+    di_root.request<RequestLogger>([](ContainerBase&) {
         return new RequestLogger();
     });
 
-    di_root.singleton<UserSqlRepository>([](auto& c) {
-        return new UserSqlRepository(c.template resolve<novaboot::data::PgsqlDataSource>());
-    }).depends_on<novaboot::data::PgsqlDataSource>();
-    di_root.bind<novaboot::data::CrudRepository<examples::model::User, int>>().to<UserSqlRepository>();
+    di_root.singleton<UserSqlRepository>([](ContainerBase& c) {
+        return new UserSqlRepository(c.resolve<PgsqlDataSource>());
+    }).depends_on<PgsqlDataSource>();
+    di_root.bind<CrudRepository<User, int>>().to<UserSqlRepository>();
 
-    di_root.singleton<UserCacheRepository>([](auto& c) {
-        return new UserCacheRepository(c.template resolve<novaboot::data::RedisDataSource>());
-    }).depends_on<novaboot::data::RedisDataSource>();
-    di_root.bind<novaboot::data::CacheRepository<examples::model::User, int>>().to<UserCacheRepository>();
+    di_root.singleton<UserCacheRepository>([](ContainerBase& c) {
+        return new UserCacheRepository(c.resolve<RedisDataSource>());
+    }).depends_on<RedisDataSource>();
+    di_root.bind<CacheRepository<User, int>>().to<UserCacheRepository>();
 
-    di_root.singleton<UserRepository>([](auto& c) {
+    di_root.singleton<UserRepository>([](ContainerBase& c) {
         return new UserRepository(
-            c.template resolve<novaboot::data::CrudRepository<examples::model::User, int>>(),
-            c.template resolve<novaboot::data::CacheRepository<examples::model::User, int>>()
+            c.resolve<CrudRepository<User, int>>(),
+            c.resolve<CacheRepository<User, int>>()
         );
     })
-    .depends_on<novaboot::data::CrudRepository<examples::model::User, int>>()
-    .depends_on<novaboot::data::CacheRepository<examples::model::User, int>>();
+    .depends_on<CrudRepository<User, int>>()
+    .depends_on<CacheRepository<User, int>>();
 
-    di_root.singleton<UserService>([](auto& c) {
-        return new UserService(c.template resolve<UserRepository>());
+    di_root.singleton<UserService>([](ContainerBase& c) {
+        return new UserService(c.resolve<UserRepository>());
     })
     .on_start(&UserService::init)
     .on_stop(&UserService::cleanup)
     .depends_on<UserRepository>();
 
-    di_root.singleton<UserController>([](auto& c) {
-        return new UserController(c.template resolve<UserService>());
+    di_root.singleton<UserController>([](ContainerBase& c) {
+        return new UserController(c.resolve<UserService>());
     }).depends_on<UserService>();
 
     // Build the container: builds dependency graph and instantiates singletons
@@ -93,8 +99,8 @@ int main() {
 
     // (a) CORS — must be first so preflight OPTIONS requests are handled before
     //     anything else touches the response.
-    auto cors = std::make_shared<novaboot::middleware::CorsMiddleware>(
-        novaboot::middleware::CorsMiddleware::Config{
+    auto cors = std::make_shared<CorsMiddleware>(
+        CorsMiddleware::Config{
             .allowed_origins   = {"*"},
             .allowed_methods   = {"GET","POST","PUT","DELETE","PATCH","OPTIONS"},
             .allowed_headers   = {"Content-Type","Authorization","X-Request-Id"},
@@ -107,20 +113,20 @@ int main() {
 
     // (c) Security headers — added even when downstream middleware short-circuits.
     auto security_headers =
-        std::make_shared<novaboot::middleware::SecurityHeadersMiddleware>();
+        std::make_shared<SecurityHeadersMiddleware>();
 
     // (d) Body-size limit — rejects oversized request bodies before auth/handlers.
-    auto body_limit = std::make_shared<novaboot::middleware::BodySizeLimitMiddleware>(
-        novaboot::middleware::BodySizeLimitMiddleware::Config{
+    auto body_limit = std::make_shared<BodySizeLimitMiddleware>(
+        BodySizeLimitMiddleware::Config{
             .max_body_bytes = 64 * 1024,
             .allowlist_paths = {},
         });
 
     // (e) JWT auth — protects everything except explicitly public routes.
-    auto jwt = std::make_shared<novaboot::middleware::JwtMiddleware>(
-        novaboot::middleware::JwtMiddleware::Config{
+    auto jwt = std::make_shared<JwtMiddleware>(
+        JwtMiddleware::Config{
             .allowed_algorithms = {
-                novaboot::middleware::JwtMiddleware::Algorithm::HS256,
+                JwtMiddleware::Algorithm::HS256,
             },
             .hmac_secret = "sample-secret",
             .rsa_public_key_pem = "",
@@ -132,8 +138,8 @@ int main() {
 
     // (f) Authorization — applies route-level permissions after JWT auth.
     auto authorization =
-        std::make_shared<novaboot::middleware::AuthorizationMiddleware>(
-            novaboot::middleware::AuthorizationMiddleware::Config{
+        std::make_shared<AuthorizationMiddleware>(
+            AuthorizationMiddleware::Config{
                 .policies = {
                     {
                         .path = "/api/users*",
@@ -150,10 +156,10 @@ int main() {
 
     // (g) Compression — gzips eligible responses when the client asks for it.
     auto compression =
-        std::make_shared<novaboot::middleware::CompressionMiddleware>();
+        std::make_shared<CompressionMiddleware>();
 
     // (h) Request logging — logs after the handler so the status code is known.
-    auto logger = std::make_shared<novaboot::middleware::RequestLoggingMiddleware>();
+    auto logger = std::make_shared<RequestLoggingMiddleware>();
 
     // 3. Server Setup (pass di_root for automatic request-scoped DI resolution)
     int worker_count = static_cast<int>(cfg.server().workers);
@@ -189,10 +195,10 @@ int main() {
         .del("/:id", di::handler<&UserController::delete_user>())
         .patch("/:id", di::handler<&UserController::patch_user>());
 
-    app->on_exception<examples::exception::UserNotFoundException>(
-        [](const examples::exception::UserNotFoundException& ex, novaboot::context::RequestContext&) {
+    app->on_exception<UserNotFoundException>(
+        [](const UserNotFoundException& ex, context::RequestContext&) {
             ErrorResponse err{"User Not Found", ex.what()};
-            return novaboot::ResponseEntity<ErrorResponse>::status(404, err);
+            return ResponseEntity<ErrorResponse>::status(404, err);
         }
     );
 
@@ -204,3 +210,4 @@ int main() {
     
     return 0;
 }
+

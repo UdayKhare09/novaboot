@@ -28,11 +28,13 @@ std::string RequestIdMiddleware::generate_id() {
         lo_var & 0x0000FFFFFFFFFFFFull);
 }
 
+using namespace novaboot;
+
 // ─── handle ──────────────────────────────────────────────────────────────────
 
-void RequestIdMiddleware::handle(novaboot::http3::Request&          req,
-                                  novaboot::http3::Response&         res,
-                                  novaboot::context::RequestContext& ctx,
+void RequestIdMiddleware::handle(http3::Request&          req,
+                                  http3::Response&         res,
+                                  context::RequestContext& ctx,
                                   Next                               next) {
     // Re-use caller's ID or mint a fresh one
     auto existing = req.header("x-request-id");
@@ -46,3 +48,4 @@ void RequestIdMiddleware::handle(novaboot::http3::Request&          req,
 
     next();
 }
+

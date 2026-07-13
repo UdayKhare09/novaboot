@@ -8,6 +8,9 @@
 #include <vector>
 #include <optional>
 
+using examples::model::User;
+using examples::exception::UserNotFoundException;
+
 /// Business logic implementation (Spring-style Service)
 struct UserService {
     UserRepository& user_repo;
@@ -15,15 +18,15 @@ struct UserService {
     // Constructor injection: DI container automatically resolves and injects UserRepository
     explicit UserService(UserRepository& repo) : user_repo(repo) {}
 
-    examples::model::User get_user(int id) {
+    User get_user(int id) {
         auto opt = user_repo.find_by_id(id);
         if (!opt) {
-            throw examples::exception::UserNotFoundException(id);
+            throw UserNotFoundException(id);
         }
         return *opt;
     }
 
-    std::vector<examples::model::User> get_all_users() {
+    std::vector<User> get_all_users() {
         return user_repo.find_all();
     }
 
@@ -35,3 +38,4 @@ struct UserService {
         spdlog::info("UserService shutting down.");
     }
 };
+

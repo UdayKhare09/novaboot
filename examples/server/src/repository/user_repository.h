@@ -7,27 +7,32 @@
 #include "user-odb.hxx"
 #include <chrono>
 
+using namespace novaboot;
+using namespace novaboot::data;
+using examples::model::User;
+
 /// Concrete Postgres DB repository for User, registered as a component.
 struct UserSqlRepository
-    : public novaboot::data::PgsqlRepositoryBase<examples::model::User, int> {
+    : public PgsqlRepositoryBase<User, int> {
 public:
-    explicit UserSqlRepository(novaboot::data::PgsqlDataSource& ds)
-        : novaboot::data::PgsqlRepositoryBase<examples::model::User, int>(ds) {}
+    explicit UserSqlRepository(PgsqlDataSource& ds)
+        : PgsqlRepositoryBase<User, int>(ds) {}
 };
 
 /// Concrete Redis Cache repository for User, registered as a component.
 struct UserCacheRepository
-    : public novaboot::data::RedisRepositoryBase<examples::model::User, int> {
+    : public RedisRepositoryBase<User, int> {
 public:
-    explicit UserCacheRepository(novaboot::data::RedisDataSource& ds)
-        : novaboot::data::RedisRepositoryBase<examples::model::User, int>(ds, "User", std::chrono::seconds(60)) {}
+    explicit UserCacheRepository(RedisDataSource& ds)
+        : RedisRepositoryBase<User, int>(ds, "User", std::chrono::seconds(60)) {}
 };
 
 /// Real database and Redis cache backed repository handling User entities via abstract interfaces.
 struct UserRepository
-    : public novaboot::data::CachingCrudRepository<examples::model::User, int> {
+    : public CachingCrudRepository<User, int> {
 public:
-    explicit UserRepository(novaboot::data::CrudRepository<examples::model::User, int>& sql_repo,
-                            novaboot::data::CacheRepository<examples::model::User, int>& cache_repo)
-        : novaboot::data::CachingCrudRepository<examples::model::User, int>(sql_repo, cache_repo, std::chrono::seconds(60)) {}
+    explicit UserRepository(CrudRepository<User, int>& sql_repo,
+                            CacheRepository<User, int>& cache_repo)
+        : CachingCrudRepository<User, int>(sql_repo, cache_repo, std::chrono::seconds(60)) {}
 };
+

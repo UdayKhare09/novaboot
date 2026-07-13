@@ -8,16 +8,19 @@
 /// - Stores the ID in the RequestContext (string key "request_id") so that
 ///   downstream handlers and services can log it for distributed tracing.
 /// - Echoes the ID back in the X-Request-Id response header.
-class RequestIdMiddleware : public novaboot::middleware::Middleware {
+using namespace novaboot;
+
+class RequestIdMiddleware : public middleware::Middleware {
 public:
     RequestIdMiddleware() = default;
 
-    void handle(novaboot::http3::Request&          req,
-                novaboot::http3::Response&         res,
-                novaboot::context::RequestContext& ctx,
-                Next                               next) override;
+    void handle(http3::Request&          req,
+                http3::Response&         res,
+                context::RequestContext& ctx,
+                Next                     next) override;
 
 private:
     /// Generate a simple pseudo-UUID v4 (no external deps needed).
     static std::string generate_id();
 };
+
