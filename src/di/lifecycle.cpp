@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <stdexcept>
+#include <spdlog/spdlog.h>
 
 namespace novaboot::di {
 
@@ -29,8 +30,10 @@ void LifecycleManager::invoke_pre_destroys() {
         if (it->on_pre_destroy) {
             try {
                 it->on_pre_destroy(it->instance);
+            } catch (const std::exception& ex) {
+                spdlog::warn("novaboot::di: Exception caught in pre_destroy hook: {}", ex.what());
             } catch (...) {
-                // Swallow exceptions in pre_destroy — still destroy remaining beans
+                spdlog::warn("novaboot::di: Unknown exception caught in pre_destroy hook");
             }
         }
     }

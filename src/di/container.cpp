@@ -33,33 +33,49 @@ void* ContainerBase::init_singleton(BeanRegistration& reg) {
 void RootContainer::detect_cycles() {
     enum class Color : std::uint8_t { White, Gray, Black };
     std::unordered_map<std::type_index, Color> color;
+    std::vector<std::type_index> path;
 
     for (auto& [tid, _] : registrations_) color[tid] = Color::White;
 
     std::function<void(std::type_index)> dfs = [&](std::type_index tid) {
         color[tid] = Color::Gray;
+        path.push_back(tid);
         auto it = registrations_.find(tid);
-        if (it == registrations_.end()) return;
+        if (it == registrations_.end()) {
+            path.pop_back();
+            return;
+        }
 
         for (auto dep_tid : it->second.dep_type_ids) {
             auto dep_color_it = color.find(dep_tid);
             if (dep_color_it == color.end()) continue;  // unregistered dep, skip
 
             if (dep_color_it->second == Color::Gray) {
-                // Cycle detected — find dep name safely
+                // Cycle detected — build descriptive path
+                std::string cycle_path;
+                auto start_it = std::find(path.begin(), path.end(), dep_tid);
+                if (start_it != path.end()) {
+                    for (auto p_it = start_it; p_it != path.end(); ++p_it) {
+                        auto reg_it = registrations_.find(*p_it);
+                        if (reg_it != registrations_.end()) {
+                            cycle_path += reg_it->second.name + " -> ";
+                        }
+                    }
+                }
                 auto dep_it = registrations_.find(dep_tid);
                 std::string dep_name = (dep_it != registrations_.end())
                                        ? dep_it->second.name : dep_tid.name();
+                cycle_path += dep_name;
+
                 throw DIError(
-                    "novaboot::di: Circular dependency detected: "
-                    + it->second.name + " \xe2\x86\x92 " + dep_name
-                    + " (which already depends on " + it->second.name + ")");
+                    "novaboot::di: Circular dependency detected: " + cycle_path);
             }
 
             if (dep_color_it->second == Color::White) {
                 dfs(dep_tid);
             }
         }
+        path.pop_back();
         color[tid] = Color::Black;
     };
 
@@ -213,6 +229,14 @@ RootContainer::~RootContainer() {
 // registrations_ when the instance is not yet cached. We override it in a
 // non-template helper for use from the template:
 void* RootContainer::resolve_lazy_singleton(std::type_index tid) {
+    std::lock_guard<std::recursive_mutex> lock(lazy_mutex_);
+
+    // Double-check check if it was initialized while we were waiting for the lock
+    auto inst_it = instances_.find(tid);
+    if (inst_it != instances_.end()) {
+        return inst_it->second;
+    }
+
     auto it = registrations_.find(tid);
     if (it == registrations_.end()) return nullptr;
     auto& reg = it->second;

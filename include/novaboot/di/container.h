@@ -22,6 +22,7 @@
 #endif
 
 #include <any>
+#include <mutex>
 #include <chrono>
 #include <functional>
 #include <future>
@@ -290,7 +291,7 @@ public:
 
 #ifdef __cpp_impl_reflection
     template<typename T>
-    BeanBuilder<T> autowire();
+    BeanBuilder<T> autowire(Scope scope = Scope::Singleton);
 #endif
 
     std::unordered_map<std::type_index, BeanRegistration>& get_registrations() {
@@ -379,6 +380,7 @@ public:
 
 private:
     bool built_ = false;
+    mutable std::recursive_mutex lazy_mutex_;
 
     /// Topological sort of registrations (dependency order).
     std::vector<std::type_index> topo_order_;
@@ -426,12 +428,14 @@ namespace detail {
         constexpr auto ctx = std::meta::access_context::current();
         std::meta::info target_ctor = std::meta::info{};
         bool found = false;
+        std::size_t max_params = 0;
 
         for (auto m : std::meta::members_of(^^T, ctx)) {
             if (std::meta::is_constructor(m)) {
                 auto params = std::meta::parameters_of(m);
-                if (params.size() > 0 || !found) {
+                if (!found || params.size() > max_params) {
                     target_ctor = m;
+                    max_params = params.size();
                     found = true;
                 }
             }
@@ -452,13 +456,13 @@ namespace detail {
 } // namespace detail
 
 template<typename T>
-BeanBuilder<T> RootContainer::autowire() {
+BeanBuilder<T> RootContainer::autowire(Scope scope) {
     constexpr auto type_info = detail::get_constructor_typelist<T>();
     using ExtractedTypeList = typename[: type_info :];
 
     register_bean<T>([](ContainerBase& c) {
         return ExtractedTypeList::template construct<T>(c);
-    }, Scope::Singleton);
+    }, scope);
 
     ExtractedTypeList::template add_dependencies<T>(*this);
 
