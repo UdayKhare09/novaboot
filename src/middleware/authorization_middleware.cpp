@@ -38,16 +38,12 @@ bool method_matches(const std::vector<std::string>& methods,
     });
 }
 
-const AuthorizationMiddleware::Policy*
-matching_policy(const AuthorizationMiddleware::Config& cfg,
-                http3::Request& req) {
-    for (const auto& policy : cfg.policies) {
-        if (path_matches(policy.path, req.path()) &&
-            method_matches(policy.methods, req.method())) {
-            return &policy;
-        }
-    }
-    return nullptr;
+bool policy_matches(const AuthorizationMiddleware::Policy& policy,
+                    http3::Request& req) {
+    return path_matches(policy.path, req.path()) &&
+           method_matches(
+               policy.method.empty() ? policy.methods : policy.method,
+               req.method());
 }
 
 std::vector<std::string> split_space_separated(std::string_view text) {
@@ -132,8 +128,19 @@ void AuthorizationMiddleware::handle(http3::Request& req,
                                      http3::Response& res,
                                      context::RequestContext& ctx,
                                      Next next) {
-    const auto* policy = matching_policy(cfg_, req);
-    if (policy == nullptr || !policy->require_authenticated) {
+    bool matched_policy = false;
+    bool requires_principal = false;
+
+    for (const auto& policy : cfg_.policies) {
+        if (!policy_matches(policy, req)) continue;
+        matched_policy = true;
+        if (policy.require_authenticated) {
+            requires_principal = true;
+            break;
+        }
+    }
+
+    if (!matched_policy || !requires_principal) {
         next();
         return;
     }
@@ -144,17 +151,24 @@ void AuthorizationMiddleware::handle(http3::Request& req,
         return;
     }
 
-    if (!satisfies(principal->scopes,
-                   policy->required_scopes,
-                   policy->scope_match)) {
-        reject_forbidden(res, cfg_);
-        return;
-    }
-
     const auto roles = roles_from_claim(*principal, cfg_.roles_claim);
-    if (!satisfies(roles, policy->required_roles, policy->role_match)) {
-        reject_forbidden(res, cfg_);
-        return;
+
+    for (const auto& policy : cfg_.policies) {
+        if (!policy_matches(policy, req) || !policy.require_authenticated) {
+            continue;
+        }
+
+        if (!satisfies(principal->scopes,
+                       policy.required_scopes,
+                       policy.scope_match)) {
+            reject_forbidden(res, cfg_);
+            return;
+        }
+
+        if (!satisfies(roles, policy.required_roles, policy.role_match)) {
+            reject_forbidden(res, cfg_);
+            return;
+        }
     }
 
     next();

@@ -206,7 +206,7 @@ TEST(AuthorizationMiddlewareTest, MethodSpecificPolicyOnlyAppliesToMethod) {
     AuthorizationMiddleware mw({
         .policies = {{
             .path = "/api/users",
-            .methods = {"POST"},
+            .method = {"POST"},
             .required_scopes = {"users:write"},
         }},
     });
@@ -216,6 +216,66 @@ TEST(AuthorizationMiddlewareTest, MethodSpecificPolicyOnlyAppliesToMethod) {
     context::RequestContext ctx;
     req.set_method("GET");
     req.set_path("/api/users");
+
+    bool called = false;
+    run_one(mw, req, res, ctx, ok_handler(called));
+
+    EXPECT_TRUE(called);
+    EXPECT_EQ(res.status_code(), 200);
+}
+
+TEST(AuthorizationMiddlewareTest, AllMatchingPoliciesAreEnforced) {
+    AuthorizationMiddleware mw({
+        .policies = {
+            {
+                .path = "/api/users*",
+                .method = {"POST"},
+                .required_scopes = {"write"},
+            },
+            {
+                .path = "/api/*",
+                .method = {"GET", "POST", "PUT", "DELETE"},
+                .required_scopes = {"read"},
+            },
+        },
+    });
+
+    http3::Request req;
+    http3::Response res;
+    context::RequestContext ctx;
+    req.set_method("POST");
+    req.set_path("/api/users");
+    ctx.set<JwtPrincipal>(principal({"write"}));
+
+    bool called = false;
+    run_one(mw, req, res, ctx, ok_handler(called));
+
+    EXPECT_FALSE(called);
+    EXPECT_EQ(res.status_code(), 403);
+}
+
+TEST(AuthorizationMiddlewareTest, StackedPoliciesAllowWhenAllRequirementsPass) {
+    AuthorizationMiddleware mw({
+        .policies = {
+            {
+                .path = "/api/users*",
+                .method = {"POST"},
+                .required_scopes = {"write"},
+            },
+            {
+                .path = "/api/*",
+                .method = {"GET", "POST", "PUT", "DELETE"},
+                .required_scopes = {"read"},
+            },
+        },
+    });
+
+    http3::Request req;
+    http3::Response res;
+    context::RequestContext ctx;
+    req.set_method("POST");
+    req.set_path("/api/users");
+    ctx.set<JwtPrincipal>(principal({"read", "write"}));
 
     bool called = false;
     run_one(mw, req, res, ctx, ok_handler(called));

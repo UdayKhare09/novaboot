@@ -22,7 +22,9 @@ public:
         /// Path pattern. Exact match by default; trailing '*' matches prefix.
         std::string path = "*";
 
-        /// Empty means all methods.
+        /// Empty means all methods. `method` is the preferred field; `methods`
+        /// is kept as a compatibility alias.
+        std::vector<std::string> method = {};
         std::vector<std::string> methods = {};
 
         /// If false, this policy explicitly allows matching requests.
@@ -36,7 +38,8 @@ public:
     };
 
     struct Config {
-        /// First matching policy wins. If no policy matches, request is allowed.
+        /// All matching policies are enforced. If no policy matches, request is
+        /// allowed.
         std::vector<Policy> policies = {};
 
         /// Claim used to read roles from JwtPrincipal::claims.

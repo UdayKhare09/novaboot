@@ -95,10 +95,18 @@ int main() {
     auto authorization =
         std::make_shared<novaboot::middleware::AuthorizationMiddleware>(
             novaboot::middleware::AuthorizationMiddleware::Config{
-                .policies = {{
-                    .path = "/api/users*",
-                    .required_scopes = {"write"},
-                }},
+                .policies = {
+                    {
+                        .path = "/api/users*",
+                        .method = {"POST"},
+                        .required_scopes = {"write"},
+                    },
+                    {
+                        .path = "/api/*",
+                        .method = {"GET", "POST", "PUT", "DELETE"},
+                        .required_scopes = {"read"},
+                    },
+                },
             });
 
     // (g) Compression — gzips eligible responses when the client asks for it.
