@@ -14,11 +14,11 @@ struct TodoService {
 
     explicit TodoService(TodoRepository& repo) : todo_repo(repo) {}
 
-    std::vector<Todo> get_todos(int user_id) {
+    std::vector<Todo> get_todos(const std::string& user_id) {
         return todo_repo.find_by_user_id(user_id);
     }
 
-    Todo create_todo(int user_id, const TodoRequest& req) {
+    Todo create_todo(const std::string& user_id, const TodoRequest& req) {
         Todo todo;
         todo.id = 0;
         todo.user_id = user_id;
@@ -29,7 +29,7 @@ struct TodoService {
         return todo_repo.save(todo);
     }
 
-    Todo update_todo(int user_id, int id, const TodoRequest& req) {
+    Todo update_todo(const std::string& user_id, int id, const TodoRequest& req) {
         auto existing = todo_repo.find_by_id(id);
         if (!existing || existing->user_id != user_id) {
             throw std::runtime_error("Todo not found or access denied");
@@ -42,7 +42,7 @@ struct TodoService {
         return todo_repo.save(*existing);
     }
 
-    void delete_todo(int user_id, int id) {
+    void delete_todo(const std::string& user_id, int id) {
         auto existing = todo_repo.find_by_id(id);
         if (!existing || existing->user_id != user_id) {
             throw std::runtime_error("Todo not found or access denied");

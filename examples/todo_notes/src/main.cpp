@@ -81,8 +81,13 @@ int main() {
         auto& ds = di_root.resolve<PgsqlDataSource>();
         try {
             ds.transact([](auto& db) {
+                // Clean up any legacy integer-based schemas so they are recreated as UUID strings
+                db.execute("DROP TABLE IF EXISTS todos;");
+                db.execute("DROP TABLE IF EXISTS notes;");
+                db.execute("DROP TABLE IF EXISTS app_users;");
+
                 db.execute("CREATE TABLE IF NOT EXISTS app_users ("
-                           "id SERIAL PRIMARY KEY, "
+                           "id TEXT PRIMARY KEY, "
                            "username TEXT NOT NULL UNIQUE, "
                            "password_hash TEXT NOT NULL, "
                            "email TEXT NOT NULL"
@@ -90,7 +95,7 @@ int main() {
 
                 db.execute("CREATE TABLE IF NOT EXISTS todos ("
                            "id SERIAL PRIMARY KEY, "
-                           "user_id INTEGER NOT NULL, "
+                           "user_id TEXT NOT NULL, "
                            "title TEXT NOT NULL, "
                            "description TEXT, "
                            "completed BOOLEAN NOT NULL DEFAULT FALSE"
@@ -98,7 +103,7 @@ int main() {
 
                 db.execute("CREATE TABLE IF NOT EXISTS notes ("
                            "id SERIAL PRIMARY KEY, "
-                           "user_id INTEGER NOT NULL, "
+                           "user_id TEXT NOT NULL, "
                            "title TEXT NOT NULL, "
                            "content TEXT"
                            ");");
