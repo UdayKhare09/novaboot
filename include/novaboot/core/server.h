@@ -8,6 +8,7 @@
 #include <string_view>
 #include <thread>
 #include <vector>
+#include <charconv>
 
 #include "novaboot/core/shard.h"
 #include "novaboot/middleware/middleware.h"
@@ -66,6 +67,44 @@ consteval auto get_parameters() {
     return result;
 }
 #endif
+
+template<typename T>
+std::optional<T> parse_value(std::string_view val) {
+    using CleanT = std::remove_cvref_t<T>;
+    if constexpr (std::is_same_v<CleanT, std::string>) {
+        return std::string(val);
+    } else if constexpr (std::is_same_v<CleanT, std::string_view>) {
+        return val;
+    } else {
+        CleanT result{};
+        auto [ptr, ec] = std::from_chars(val.data(), val.data() + val.size(), result);
+        if (ec != std::errc{}) return std::nullopt;
+        return result;
+    }
+}
+
+template<typename T>
+T deserialize_query(const http3::Request& req) {
+    T obj{};
+#ifdef __cpp_impl_reflection
+    static constexpr auto members = get_members<T>();
+    template for (constexpr auto m : members) {
+        if constexpr (std::meta::is_nonstatic_data_member(m)) {
+            constexpr auto name = std::meta::identifier_of(m);
+            auto q_val = req.query_param(name);
+            if (q_val) {
+                using MemberType = std::remove_cvref_t<decltype(obj.*&[:m:])>;
+                auto parsed = parse_value<MemberType>(*q_val);
+                if (parsed) {
+                    obj.*&[:m:] = *parsed;
+                }
+            }
+        }
+    }
+#endif
+    return obj;
+}
+
 #ifdef __cpp_impl_reflection
 template<typename Class, std::meta::info m, typename Ret, typename... Args>
 struct Invoker {
@@ -95,13 +134,23 @@ struct Invoker {
         } else {
             static constexpr auto params = get_parameters<m>();
             constexpr auto param_reflect = params[I];
-            constexpr bool is_body = std::is_class_v<CleanArg> && 
+            constexpr bool is_struct = std::is_class_v<CleanArg> && 
                                      !std::is_same_v<CleanArg, http3::Request> && 
                                      !std::is_same_v<CleanArg, http3::Response> && 
                                      !std::is_same_v<CleanArg, context::RequestContext> && 
                                      !std::is_same_v<CleanArg, std::string>;
-            if constexpr (is_body) {
-                auto body_obj = novaboot::json::deserialize<CleanArg>(req.body());
+            if constexpr (is_struct) {
+                CleanArg body_obj{};
+                if (req.method() == "GET" || req.method() == "DELETE") {
+                    body_obj = deserialize_query<CleanArg>(req);
+                } else {
+                    auto parser = std::make_shared<simdjson::dom::parser>();
+                    auto doc = parser->parse(req.body());
+                    if (doc.error() == simdjson::SUCCESS) {
+                        novaboot::json::deserialize_elem(doc.value(), body_obj);
+                    }
+                    ctx.set<std::shared_ptr<simdjson::dom::parser>>(parser);
+                }
                 std::vector<std::string> errors;
                 if (!novaboot::validation::validate(body_obj, errors)) {
                     throw novaboot::validation::ValidationException(std::move(errors));
@@ -109,10 +158,24 @@ struct Invoker {
                 return body_obj;
             } else {
                 constexpr auto param_name = std::meta::identifier_of(param_reflect);
-                auto val_opt = req.path_params().template get_as<CleanArg>(param_name);
-                if (val_opt) {
-                    return *val_opt;
+                
+                // 1. Resolve from path parameter
+                if (req.path_params().has(param_name)) {
+                    auto val_opt = req.path_params().template get_as<CleanArg>(param_name);
+                    if (val_opt) {
+                        return *val_opt;
+                    }
                 }
+                
+                // 2. Resolve from query parameter
+                auto q_val = req.query_param(param_name);
+                if (q_val) {
+                    auto parsed = parse_value<CleanArg>(*q_val);
+                    if (parsed) {
+                        return *parsed;
+                    }
+                }
+                
                 return CleanArg{};
             }
         }

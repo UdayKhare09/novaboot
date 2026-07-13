@@ -98,6 +98,11 @@ void deserialize_elem(simdjson::dom::element elem, T& obj) {
         if (elem.get(sv) == simdjson::SUCCESS) {
             obj = std::string(sv);
         }
+    } else if constexpr (std::is_same_v<T, std::string_view>) {
+        std::string_view sv;
+        if (elem.get(sv) == simdjson::SUCCESS) {
+            obj = sv;
+        }
     } else if constexpr (std::is_same_v<T, bool>) {
         bool val;
         if (elem.get(val) == simdjson::SUCCESS) {

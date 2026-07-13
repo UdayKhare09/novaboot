@@ -37,6 +37,7 @@ novaboot_test(test_di_handler_injection unit/test_di_handler_injection.cpp)
 novaboot_test(test_server_basic integration/test_server_basic.cpp)
 novaboot_test(test_exception_handler unit/test_exception_handler.cpp)
 novaboot_test(test_validation unit/test_validation.cpp)
+novaboot_test(test_query_validation unit/test_query_validation.cpp)
 
 # ─── Config unit tests ────────────────────────────────────────────────────────
 novaboot_test(test_app_config unit/test_app_config.cpp)
