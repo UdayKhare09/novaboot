@@ -2,6 +2,9 @@
 #include "novaboot/di/di.h"
 #include "novaboot/config/app_config.h"
 
+#include "service/user_service_client_provider.h"
+#include "controller/gateway_user_controller.h"
+
 #include <spdlog/spdlog.h>
 #include <memory>
 
@@ -24,8 +27,13 @@ int main() {
         return new novaboot::config::AppConfig(cfg);
     });
 
-    // Register all scanned components (UserServiceClientProvider, GatewayUserController)
-    novaboot_di_register_all(di_root);
+    // Manually register components
+    di_root.singleton<UserServiceClientProvider>([](auto&) {
+        return new UserServiceClientProvider();
+    });
+    di_root.singleton<GatewayUserController>([](auto& c) {
+        return new GatewayUserController(c.template resolve<UserServiceClientProvider>());
+    });
 
     // Build container
     di_root.build();
@@ -39,7 +47,12 @@ int main() {
         .build();
 
     // Register gateway routes
-    novaboot_web_register_all(*app);
+    app->router().group("/gateway/users")
+        .get("", di::handler<&GatewayUserController::get_all>())
+        .get("/:id", di::handler<&GatewayUserController::get_one>())
+        .post("", di::handler<&GatewayUserController::create>())
+        .put("/:id", di::handler<&GatewayUserController::update>())
+        .del("/:id", di::handler<&GatewayUserController::remove>());
 
     // 3. Run
     app->run();

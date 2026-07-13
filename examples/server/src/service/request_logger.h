@@ -5,10 +5,7 @@
 #include <string>
 #include <spdlog/spdlog.h>
 
-/// Request-scoped bean: a new instance is created for each HTTP request
-struct [[=novaboot::di::component{}]]
-       [[=novaboot::di::scoped{novaboot::di::Scope::Request}]]
-RequestLogger {
+struct RequestLogger {
     std::vector<std::string> logs;
 
     RequestLogger() {

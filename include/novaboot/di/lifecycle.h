@@ -3,8 +3,8 @@
 /// @file novaboot/di/lifecycle.h
 /// Lifecycle interfaces for NovaBoot DI beans.
 ///
-/// Beans can implement these interfaces OR use [[=post_construct{}]]/[[=pre_destroy{}]]
-/// attribute annotations. The container checks both.
+/// Beans can implement these interfaces or register lifecycle callbacks through
+/// the fluent DI builder.
 
 #include <functional>
 #include <vector>

@@ -4,7 +4,6 @@
 #include <gtest/gtest.h>
 #include "novaboot/di/container.h"
 #include "novaboot/di/lifecycle.h"
-#include "novaboot/di/attributes.h"
 
 using namespace novaboot::di;
 

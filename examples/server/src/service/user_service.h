@@ -9,7 +9,7 @@
 #include <optional>
 
 /// Business logic implementation (Spring-style Service)
-struct [[=novaboot::di::service{}]] UserService {
+struct UserService {
     UserRepository& user_repo;
 
     // Constructor injection: DI container automatically resolves and injects UserRepository
@@ -27,12 +27,10 @@ struct [[=novaboot::di::service{}]] UserService {
         return user_repo.find_all();
     }
 
-    [[=novaboot::di::post_construct{}]]
     void init() {
         spdlog::info("UserService initialized successfully with UserRepository auto-wired.");
     }
 
-    [[=novaboot::di::pre_destroy{}]]
     void cleanup() {
         spdlog::info("UserService shutting down.");
     }

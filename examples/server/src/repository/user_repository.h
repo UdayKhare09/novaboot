@@ -8,7 +8,7 @@
 #include <chrono>
 
 /// Concrete Postgres DB repository for User, registered as a component.
-struct [[=novaboot::di::repository{}]] UserSqlRepository 
+struct UserSqlRepository
     : public novaboot::data::PgsqlRepositoryBase<examples::model::User, int> {
 public:
     explicit UserSqlRepository(novaboot::data::PgsqlDataSource& ds)
@@ -16,7 +16,7 @@ public:
 };
 
 /// Concrete Redis Cache repository for User, registered as a component.
-struct [[=novaboot::di::repository{}]] UserCacheRepository 
+struct UserCacheRepository
     : public novaboot::data::RedisRepositoryBase<examples::model::User, int> {
 public:
     explicit UserCacheRepository(novaboot::data::RedisDataSource& ds)
@@ -24,7 +24,7 @@ public:
 };
 
 /// Real database and Redis cache backed repository handling User entities via abstract interfaces.
-struct [[=novaboot::di::repository{}]] UserRepository 
+struct UserRepository
     : public novaboot::data::CachingCrudRepository<examples::model::User, int> {
 public:
     explicit UserRepository(novaboot::data::CrudRepository<examples::model::User, int>& sql_repo,

@@ -11,8 +11,57 @@
 #include "novaboot/http3/response.h"
 #include "novaboot/router/path_params.h"
 #include "novaboot/router/route.h"
+#include "novaboot/router/json.h"
 
 namespace novaboot::router {
+
+class RouterGroup;
+
+class ExceptionHandler {
+public:
+    virtual bool handle(const std::exception& ex, http3::Response& res, context::RequestContext& ctx) = 0;
+    virtual ~ExceptionHandler() = default;
+};
+
+template<typename Ex, typename Handler>
+class FluentExceptionHandler : public ExceptionHandler {
+    Handler handler_;
+
+    template<typename R>
+    static void handle_result(const R& result, http3::Response& res) {
+        if constexpr (requires { result.status_code(); result.headers(); }) {
+            res.status(result.status_code());
+            for (const auto& h : result.headers()) {
+                res.header(h.first, h.second);
+            }
+            if constexpr (requires { result.body(); }) {
+                res.json(novaboot::json::serialize(result.body()));
+            }
+        } else {
+            res.status(200);
+            res.json(novaboot::json::serialize(result));
+        }
+    }
+
+public:
+    explicit FluentExceptionHandler(Handler&& h) : handler_(std::forward<Handler>(h)) {}
+
+    bool handle(const std::exception& ex, http3::Response& res, context::RequestContext& ctx) override {
+        if (auto* typed_ex = dynamic_cast<const Ex*>(&ex)) {
+            if constexpr (std::is_invocable_v<Handler, const Ex&, http3::Response&, context::RequestContext&>) {
+                handler_(*typed_ex, res, ctx);
+            } else if constexpr (std::is_invocable_v<Handler, const Ex&, context::RequestContext&>) {
+                auto result = handler_(*typed_ex, ctx);
+                handle_result(result, res);
+            } else if constexpr (std::is_invocable_v<Handler, const Ex&>) {
+                auto result = handler_(*typed_ex);
+                handle_result(result, res);
+            }
+            return true;
+        }
+        return false;
+    }
+};
 
 /// Radix-tree (compressed trie) URL router.
 ///
@@ -58,6 +107,9 @@ public:
     /// Start building a route for a path (fluent API)
     RouteBuilder route(std::string_view path);
 
+    /// Start a group of routes sharing a prefix
+    RouterGroup group(std::string prefix);
+
     /// Register a route directly
     void add_route(Method method, std::string_view pattern,
                    Handler handler);
@@ -65,6 +117,27 @@ public:
     /// Look up a route for a given method and path.
     /// Returns the handler and populates path_params if found.
     /// Returns nullptr if no matching route.
+    template<typename Ex, typename Handler>
+    Router& on_exception(Handler&& handler) {
+        exception_handlers_.push_back(
+            std::make_unique<FluentExceptionHandler<Ex, std::decay_t<Handler>>>(std::forward<Handler>(handler))
+        );
+        return *this;
+    }
+
+    void add_exception_handler(std::unique_ptr<ExceptionHandler> handler) {
+        exception_handlers_.push_back(std::move(handler));
+    }
+
+    bool handle_exception(const std::exception& ex, http3::Response& res, context::RequestContext& ctx) const {
+        for (const auto& handler : exception_handlers_) {
+            if (handler->handle(ex, res, ctx)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     struct MatchResult {
         Handler*    handler = nullptr;
         PathParams  params;
@@ -134,6 +207,79 @@ private:
     /// Flat storage for method resolution during lookup
     Method current_method_ = Method::GET;
     mutable Method lookup_method_ = Method::GET;
+
+    std::vector<std::unique_ptr<ExceptionHandler>> exception_handlers_;
 };
+
+class RouterGroup {
+private:
+    Router& router_;
+    std::string prefix_;
+public:
+    RouterGroup(Router& router, std::string prefix)
+        : router_(router), prefix_(std::move(prefix)) {}
+
+    RouterGroup group(std::string subprefix) {
+        return RouterGroup(router_, join_path(prefix_, subprefix));
+    }
+
+    RouterGroup& get(std::string_view path, Handler handler) {
+        router_.add_route(Method::GET, join_path(prefix_, path), std::move(handler));
+        return *this;
+    }
+
+    RouterGroup& post(std::string_view path, Handler handler) {
+        router_.add_route(Method::POST, join_path(prefix_, path), std::move(handler));
+        return *this;
+    }
+
+    RouterGroup& put(std::string_view path, Handler handler) {
+        router_.add_route(Method::PUT, join_path(prefix_, path), std::move(handler));
+        return *this;
+    }
+
+    RouterGroup& del(std::string_view path, Handler handler) {
+        router_.add_route(Method::DELETE_, join_path(prefix_, path), std::move(handler));
+        return *this;
+    }
+
+    RouterGroup& patch(std::string_view path, Handler handler) {
+        router_.add_route(Method::PATCH, join_path(prefix_, path), std::move(handler));
+        return *this;
+    }
+
+    RouterGroup& head(std::string_view path, Handler handler) {
+        router_.add_route(Method::HEAD, join_path(prefix_, path), std::move(handler));
+        return *this;
+    }
+
+    RouterGroup& options(std::string_view path, Handler handler) {
+        router_.add_route(Method::OPTIONS, join_path(prefix_, path), std::move(handler));
+        return *this;
+    }
+
+    RouterGroup& any(std::string_view path, Handler handler) {
+        router_.add_route(Method::ANY, join_path(prefix_, path), std::move(handler));
+        return *this;
+    }
+
+private:
+    static std::string join_path(const std::string& base, std::string_view rel) {
+        if (rel.empty()) return base;
+        if (base.empty()) return std::string(rel);
+        std::string res = base;
+        if (res.back() == '/' && rel.front() == '/') {
+            res.pop_back();
+        } else if (res.back() != '/' && rel.front() != '/') {
+            res.push_back('/');
+        }
+        res.append(rel);
+        return res;
+    }
+};
+
+inline RouterGroup Router::group(std::string prefix) {
+    return RouterGroup(*this, std::move(prefix));
+}
 
 } // namespace novaboot::router

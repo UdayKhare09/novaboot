@@ -1,10 +1,13 @@
 #pragma once
 
 #include <string>
-#include "novaboot/data/data_attributes.h"
+#ifdef ODB_COMPILER
+#include <odb/core.hxx>
+#endif
 
-struct [[=novaboot::data::entity{"db_users"}]] DbUser {
-    [[=novaboot::data::id{}]]
+#pragma db object table("db_users")
+struct DbUser {
+#pragma db id
     int id = 0;
 
     std::string name;

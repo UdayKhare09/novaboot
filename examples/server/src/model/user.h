@@ -1,14 +1,11 @@
 #pragma once
 #include <string>
-#include <utility>
-#include <functional>
 
 #ifndef ODB_COMPILER
 #include "novaboot/validation/validation.h"
-#include "novaboot/lombok/lombok.h"
+#else
+#include <odb/core.hxx>
 #endif
-
-#include "novaboot/data/data_attributes.h"
 
 namespace examples::model {
 
@@ -46,23 +43,24 @@ struct is_valid_role {
 };
 #endif
 
-struct [[=novaboot::data::entity{"users"}]] [[=lombok::data{}]] [[=lombok::builder{}]] User {
-    [[=novaboot::data::id{}]]
-    [[=novaboot::validation::min{0}]]
+#pragma db object table("users")
+struct User {
+#pragma db id
     int id;
 
-    [[=novaboot::validation::not_empty{}]]
-    [[=novaboot::validation::size{.min = 2, .max = 20}]]
     std::string name;
 
-    [[=novaboot::validation::email{}]]
     std::string email;
 
-    [[=examples::model::is_valid_role{}]]
     std::string role;
 
 #ifndef ODB_COMPILER
-    #include "user.lombok.h"
+    inline static const novaboot::validation::Schema<User> validator =
+        novaboot::validation::Schema<User>()
+            .field<&User::id>("id").min(0)
+            .field<&User::name>("name").not_empty().size(2, 20)
+            .field<&User::email>("email").email()
+            .field<&User::role>("role").custom(is_valid_role());
 #endif
 };
 

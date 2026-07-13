@@ -1,7 +1,7 @@
 # ─── ODB Compilation Macro ──────────────────────────────────────────────────
 #
 # Generates ODB object-relational mapping code for a given entity header.
-# Translates standard C++26 database attributes to ODB pragmas at build time.
+# Consumes native ODB #pragma db mappings from the entity header.
 #
 function(odb_generate TARGET ENTITY_HEADER)
   get_filename_component(STEM ${ENTITY_HEADER} NAME_WE)
@@ -9,19 +9,9 @@ function(odb_generate TARGET ENTITY_HEADER)
   set(ODB_OUT_CXX "${CMAKE_CURRENT_BINARY_DIR}/odb/${STEM}-odb.cxx")
   set(ODB_OUT_HXX "${CMAKE_CURRENT_BINARY_DIR}/odb/${STEM}-odb.hxx")
 
-  file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/odb_bridge")
   file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/odb")
 
-  # 1. Run the Python bridge script to translate C++26 annotations to ODB pragmas
-  add_custom_command(
-    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/odb_bridge/${STEM}.h
-    COMMAND python3 ${CMAKE_SOURCE_DIR}/cmake/odb_bridge.py ${ENTITY_HEADER} ${CMAKE_CURRENT_BINARY_DIR}/odb_bridge/${STEM}.h
-    DEPENDS ${ENTITY_HEADER} ${CMAKE_SOURCE_DIR}/cmake/odb_bridge.py
-    COMMENT "Translating C++26 annotations to ODB pragmas for ${ENTITY_HEADER}"
-    VERBATIM
-  )
-
-  # 2. Run the ODB compiler on the shadow header file
+  # ODB reads the original header directly; no source-rewriting bridge is used.
   add_custom_command(
     OUTPUT ${ODB_OUT_CXX} ${ODB_OUT_HXX}
     COMMAND odb
@@ -31,11 +21,10 @@ function(odb_generate TARGET ENTITY_HEADER)
         --generate-schema
         --schema-format sql
         --output-dir ${CMAKE_CURRENT_BINARY_DIR}/odb
-        -I.
         -I${CMAKE_SOURCE_DIR}/include
-        ${STEM}.h
-    DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/odb_bridge/${STEM}.h
-    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/odb_bridge
+        -I${DIR}
+        ${ENTITY_HEADER}
+    DEPENDS ${ENTITY_HEADER}
     COMMENT "Generating ODB mapping for ${STEM}.h"
     VERBATIM
   )

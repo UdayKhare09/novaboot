@@ -1,6 +1,7 @@
 #include "novaboot/core/shard.h"
 #include "novaboot/core/io_uring_event_loop.h"
 #include "novaboot/http3/http3_session.h"
+#include "novaboot/validation/validation.h"
 
 #include <format>
 #include <filesystem>
@@ -135,7 +136,27 @@ void Shard::run() {
                     return;
                 }
                 rq.path_params() = std::move(result.params);
-                (*result.handler)(rq, rs, ctx);
+                try {
+                    (*result.handler)(rq, rs, ctx);
+                } catch (const novaboot::validation::ValidationException& val_ex) {
+                    rs.status(400)
+                      .header("content-type", "application/json");
+                    std::string err_json = R"({"error":"Bad Request","message":"Validation failed","errors":[)";
+                    bool first = true;
+                    for (const auto& err : val_ex.errors()) {
+                        if (!first) err_json += ",";
+                        first = false;
+                        err_json += "\"" + err + "\"";
+                    }
+                    err_json += "]}";
+                    rs.body(err_json);
+                } catch (const std::exception& ex) {
+                    if (!router_.handle_exception(ex, rs, ctx)) {
+                        rs.status(500)
+                          .header("content-type", "application/json")
+                          .body(R"({"error":"Internal Server Error","message":")" + std::string(ex.what()) + R"("})");
+                    }
+                }
             };
 
         context::RequestContext ctx;
@@ -284,7 +305,27 @@ void Shard::on_request(http3::Http3Stream& stream) {
                 return;
             }
             rq.path_params() = std::move(result.params);
-            (*result.handler)(rq, rs, ctx);
+            try {
+                (*result.handler)(rq, rs, ctx);
+            } catch (const novaboot::validation::ValidationException& val_ex) {
+                rs.status(400)
+                  .header("content-type", "application/json");
+                std::string err_json = R"({"error":"Bad Request","message":"Validation failed","errors":[)";
+                bool first = true;
+                for (const auto& err : val_ex.errors()) {
+                    if (!first) err_json += ",";
+                    first = false;
+                    err_json += "\"" + err + "\"";
+                }
+                err_json += "]}";
+                rs.body(err_json);
+            } catch (const std::exception& ex) {
+                if (!router_.handle_exception(ex, rs, ctx)) {
+                    rs.status(500)
+                      .header("content-type", "application/json")
+                      .body(R"({"error":"Internal Server Error","message":")" + std::string(ex.what()) + R"("})");
+                }
+            }
         };
 
     context::RequestContext ctx;

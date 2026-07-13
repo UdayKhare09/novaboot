@@ -274,12 +274,7 @@ void Server::stop_signal_thread() {
 }
 
 bool Server::handle_exception(const std::exception& ex, http3::Response& res, context::RequestContext& ctx) {
-    for (auto& handler : exception_handlers_) {
-        if (handler->handle(ex, res, ctx)) {
-            return true;
-        }
-    }
-    return false;
+    return router_.handle_exception(ex, res, ctx);
 }
 
 } // namespace novaboot

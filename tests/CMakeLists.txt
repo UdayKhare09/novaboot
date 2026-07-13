@@ -37,9 +37,6 @@ novaboot_test(test_di_handler_injection unit/test_di_handler_injection.cpp)
 novaboot_test(test_server_basic integration/test_server_basic.cpp)
 novaboot_test(test_exception_handler unit/test_exception_handler.cpp)
 novaboot_test(test_validation unit/test_validation.cpp)
-novaboot_test(test_lombok unit/test_lombok.cpp)
-target_include_directories(test_lombok PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../examples/server/src)
-add_dependencies(test_lombok sample_app)
 
 # ─── Config unit tests ────────────────────────────────────────────────────────
 novaboot_test(test_app_config unit/test_app_config.cpp)

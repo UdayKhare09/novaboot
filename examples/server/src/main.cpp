@@ -44,8 +44,44 @@ int main() {
         return new novaboot::config::AppConfig(cfg);
     });
 
-    // Register all scanned components (UserRepository, UserService, RequestLogger, UserController, GlobalExceptionHandler)
-    novaboot_di_register_all(di_root);
+    // Explicitly register all components and database sources in the container
+    di_root.singleton<novaboot::data::PgsqlDataSource>([](auto& c) {
+        return new novaboot::data::PgsqlDataSource(c.template resolve<novaboot::config::AppConfig>().postgres());
+    });
+    di_root.singleton<novaboot::data::RedisDataSource>([](auto& c) {
+        return new novaboot::data::RedisDataSource(c.template resolve<novaboot::config::AppConfig>().redis());
+    });
+
+    di_root.request<RequestLogger>([](auto&) {
+        return new RequestLogger();
+    });
+
+    di_root.singleton<UserSqlRepository>([](auto& c) {
+        return new UserSqlRepository(c.template resolve<novaboot::data::PgsqlDataSource>());
+    });
+    di_root.bind<novaboot::data::CrudRepository<examples::model::User, int>>().to<UserSqlRepository>();
+
+    di_root.singleton<UserCacheRepository>([](auto& c) {
+        return new UserCacheRepository(c.template resolve<novaboot::data::RedisDataSource>());
+    });
+    di_root.bind<novaboot::data::CacheRepository<examples::model::User, int>>().to<UserCacheRepository>();
+
+    di_root.singleton<UserRepository>([](auto& c) {
+        return new UserRepository(
+            c.template resolve<novaboot::data::CrudRepository<examples::model::User, int>>(),
+            c.template resolve<novaboot::data::CacheRepository<examples::model::User, int>>()
+        );
+    });
+
+    di_root.singleton<UserService>([](auto& c) {
+        return new UserService(c.template resolve<UserRepository>());
+    })
+    .on_start(&UserService::init)
+    .on_stop(&UserService::cleanup);
+
+    di_root.singleton<UserController>([](auto& c) {
+        return new UserController(c.template resolve<UserService>());
+    });
 
     // Build the container: builds dependency graph and instantiates singletons
     di_root.build();
@@ -141,8 +177,21 @@ int main() {
         .middleware(logger)
         .build();
 
-    // 4. Web Routing Mapping (Fully automatic Component Scan routing mapping)
-    novaboot_web_register_all(*app);
+    // 4. Web Routing Mapping
+    app->router().group("/api/users")
+        .get("", di::handler<&UserController::list_users>())
+        .get("/:id", di::handler<&UserController::get_user>())
+        .post("", di::handler<&UserController::create_user>())
+        .put("/:id", di::handler<&UserController::update_user>())
+        .del("/:id", di::handler<&UserController::delete_user>())
+        .patch("/:id", di::handler<&UserController::patch_user>());
+
+    app->on_exception<examples::exception::UserNotFoundException>(
+        [](const examples::exception::UserNotFoundException& ex, novaboot::context::RequestContext&) {
+            ErrorResponse err{"User Not Found", ex.what()};
+            return novaboot::ResponseEntity<ErrorResponse>::status(404, err);
+        }
+    );
 
     // 5. Run the Server
     app->run();

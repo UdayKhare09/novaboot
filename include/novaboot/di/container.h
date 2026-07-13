@@ -15,7 +15,6 @@
 ///   - ShardContainer is thread-local (one per shard thread) → no locks.
 ///   - RequestContainer/ConnectionContainer are single-threaded (per-shard).
 
-#include "novaboot/di/attributes.h"
 #include "novaboot/di/lifecycle.h"
 #include "novaboot/di/scope.h"
 
@@ -201,91 +200,16 @@ protected:
 // ─────────────────────────────────────────────────────────────────────────────
 
 namespace detail {
-template<typename T, typename Ann>
-consteval auto get_lifecycle_methods() {
-    constexpr auto ctx = std::meta::access_context::current();
-    struct ArrayWrapper {
-        std::meta::info data[32] = {};
-        std::size_t     size = 0;
-
-        consteval const std::meta::info* begin() const noexcept { return data; }
-        consteval const std::meta::info* end() const noexcept { return data + size; }
-    };
-    ArrayWrapper result;
-
-    for (auto m : std::meta::members_of(^^T, ctx)) {
-        if (std::meta::is_function(m) && !std::meta::is_constructor(m) && !std::meta::is_destructor(m)) {
-            if (!std::meta::annotations_of_with_type(m, ^^Ann).empty()) {
-                if (result.size < 32) {
-                    result.data[result.size++] = m;
-                }
-            }
-        }
-    }
-    return result;
-}
-
-#ifdef __cpp_impl_reflection
-template<typename T>
-consteval auto get_ctor_params() {
-    constexpr auto ctor = novaboot::di::detail::find_inject_ctor(^^T);
-    
-    struct ParamArray {
-        std::meta::info data[32] = {};
-        std::size_t     size = 0;
-    };
-    ParamArray result;
-
-    for (auto p : std::meta::parameters_of(ctor)) {
-        if (result.size < 32) {
-            result.data[result.size++] = p;
-        }
-    }
-    return result;
-}
-
-template<typename T, auto Array, typename Indices>
-struct FactoryRegistrarImpl;
-
-struct BasesArray {
-    std::meta::info data[16] = {};
-    std::size_t     size = 0;
-
-    consteval const std::meta::info* begin() const noexcept { return data; }
-    consteval const std::meta::info* end() const noexcept { return data + size; }
-};
-
-consteval auto get_all_bases(std::meta::info type) {
-    constexpr auto ctx = std::meta::access_context::current();
-    BasesArray result;
-    
-    auto recurse = [&](auto& self, std::meta::info t) -> void {
-        if (!std::meta::is_complete_type(t) || !std::meta::is_class_type(t)) {
-            return;
-        }
-        auto bases = std::meta::bases_of(t, ctx);
-        for (auto base : bases) {
-            auto base_type = std::meta::type_of(base);
-            bool found = false;
-            for (std::size_t i = 0; i < result.size; ++i) {
-                if (result.data[i] == base_type) {
-                    found = true;
-                    break;
-                }
-            }
-            if (!found) {
-                if (result.size < 16) {
-                    result.data[result.size++] = base_type;
-                    self(self, base_type);
-                }
-            }
-        }
-    };
-    recurse(recurse, type);
-    return result;
-}
-#endif
 } // namespace detail
+
+class RootContainer;
+
+template<typename T>
+class BeanBuilder;
+
+template<typename Interface>
+class BindBuilder;
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // RootContainer — owns all Singleton beans
@@ -333,94 +257,36 @@ public:
                 static_cast<Initializable*>(static_cast<T*>(p))->post_construct();
             };
         }
-#ifdef __cpp_impl_reflection
-        else if constexpr (std::is_class_v<T>) {
-            static constexpr auto info = detail::get_lifecycle_methods<T, novaboot::di::post_construct>();
-            if constexpr (info.size > 0) {
-                reg.post_construct_fn = [](void* p) {
-                    auto* obj = static_cast<T*>(p);
-                    template for (constexpr auto m : info) {
-                        (obj->* &[:m:])();
-                    }
-                };
-            }
-        }
-#endif
 
         if constexpr (std::is_base_of_v<Destroyable, T>) {
             reg.pre_destroy_fn = [](void* p) {
                 static_cast<Destroyable*>(static_cast<T*>(p))->pre_destroy();
             };
         }
-#ifdef __cpp_impl_reflection
-        else if constexpr (std::is_class_v<T>) {
-            static constexpr auto info = detail::get_lifecycle_methods<T, novaboot::di::pre_destroy>();
-            if constexpr (info.size > 0) {
-                reg.pre_destroy_fn = [](void* p) {
-                    auto* obj = static_cast<T*>(p);
-                    template for (constexpr auto m : info) {
-                        (obj->* &[:m:])();
-                    }
-                };
-            }
-        }
-#endif
 
         registrations_[reg.type_id] = std::move(reg);
         return *this;
     }
 
-    /// Register a component class using compile-time reflection.
-    /// The constructor dependencies are auto-wired automatically.
     template<typename T>
-    RootContainer& register_component() {
-#ifdef __cpp_impl_reflection
-        constexpr auto cls = ^^T;
-        constexpr auto scope = novaboot::di::detail::get_scope(cls);
-        constexpr bool is_lazy = novaboot::di::detail::is_lazy_bean(cls);
-        constexpr bool is_prim = novaboot::di::detail::is_primary_bean(cls);
-        constexpr const char* q = novaboot::di::detail::get_named_qualifier(cls);
-
-        constexpr auto params = detail::get_ctor_params<T>();
-        detail::FactoryRegistrarImpl<T, params, std::make_index_sequence<params.size>>::register_in(
-            *this, scope, q, is_prim, is_lazy
-        );
-
-        // Auto-register base classes!
-        static constexpr auto bases = detail::get_all_bases(cls);
-        template for (constexpr auto base : bases) {
-            using BaseType = typename [: base :];
-            auto base_tid = std::type_index(typeid(BaseType));
-            auto it = this->registrations_.find(base_tid);
-            bool should_register = (it == this->registrations_.end()) || (is_prim && !it->second.is_primary);
-            if (should_register) {
-                this->register_bean<BaseType>([](ContainerBase& c) -> BaseType* {
-                    return &c.resolve<T>();
-                }, scope, q, is_prim, is_lazy);
-                
-                // Add dependency from BaseType to concrete type T
-                this->add_dependency(base_tid, std::type_index(typeid(T)));
-                
-                // Override lifecycle handlers to prevent duplicate lifecycle actions or double deletion
-                auto& base_reg = this->registrations_[base_tid];
-                base_reg.destructor_fn = nullptr;
-                base_reg.post_construct_fn = nullptr;
-                base_reg.pre_destroy_fn = nullptr;
-                base_reg.is_lazy = true;
-            }
-        }
-#else
-        // Fallback without reflection
-        static_assert(sizeof(T) == 0, "novaboot::di: register_component requires C++26 static reflection.");
-#endif
-        return *this;
+    BeanBuilder<T> singleton(std::function<T*(ContainerBase&)> factory) {
+        register_bean<T>(std::move(factory), Scope::Singleton);
+        return BeanBuilder<T>(*this, std::type_index(typeid(T)));
     }
 
-    /// Register multiple component classes at once using compile-time reflection.
-    template<typename... Ts>
-    RootContainer& register_components() {
-        (register_component<Ts>(), ...);
-        return *this;
+    template<typename T>
+    BeanBuilder<T> request(std::function<T*(ContainerBase&)> factory) {
+        register_bean<T>(std::move(factory), Scope::Request);
+        return BeanBuilder<T>(*this, std::type_index(typeid(T)));
+    }
+
+    template<typename Interface>
+    BindBuilder<Interface> bind() {
+        return BindBuilder<Interface>(*this);
+    }
+
+    std::unordered_map<std::type_index, BeanRegistration>& get_registrations() {
+        return registrations_;
     }
 
     /// Register an async bean (factory returns std::future<T*>).
@@ -531,40 +397,115 @@ private:
     std::vector<std::pair<void*, std::function<void(void*)>>> owned_instances_;
 };
 
-namespace detail {
-#ifdef __cpp_impl_reflection
-template<typename T, auto Array, std::size_t... Is>
-struct FactoryRegistrarImpl<T, Array, std::index_sequence<Is...>> {
-    static void register_in(RootContainer& root, Scope scope, const char* q, bool is_prim, bool is_lazy) {
-        root.register_bean<T>(
-            [](ContainerBase& c) -> T* {
-                return new T{ c.resolve<
-                    typename[: 
-                        std::meta::remove_const(
-                            std::meta::is_reference_type(std::meta::type_of(Array.data[Is])) 
-                            ? std::meta::remove_reference(std::meta::type_of(Array.data[Is]))
-                            : std::meta::type_of(Array.data[Is])
-                        )
-                    :]>()
-                ... };
-            },
-            scope, q, is_prim, is_lazy
-        );
+template<typename T>
+class BeanBuilder {
+private:
+    RootContainer& container_;
+    std::type_index type_id_;
+public:
+    BeanBuilder(RootContainer& container, std::type_index type_id)
+        : container_(container), type_id_(type_id) {}
 
-        // Populate dep_type_ids for cycle detection and topological sorting
-        (root.add_dependency(std::type_index(typeid(T)), std::type_index(typeid(
-            typename[: 
-                std::meta::remove_const(
-                    std::meta::is_reference_type(std::meta::type_of(Array.data[Is])) 
-                    ? std::meta::remove_reference(std::meta::type_of(Array.data[Is]))
-                    : std::meta::type_of(Array.data[Is])
-                )
-            :]
-        ))), ...);
+    BeanBuilder& on_start(std::function<void(T&)> fn) {
+        container_.with_post_construct<T>(std::move(fn));
+        return *this;
+    }
+
+    BeanBuilder& on_start(void (T::*member_fn)()) {
+        container_.with_post_construct<T>([member_fn](T& obj) {
+            (obj.*member_fn)();
+        });
+        return *this;
+    }
+
+    BeanBuilder& on_stop(std::function<void(T&)> fn) {
+        container_.with_pre_destroy<T>(std::move(fn));
+        return *this;
+    }
+
+    BeanBuilder& on_stop(void (T::*member_fn)()) {
+        container_.with_pre_destroy<T>([member_fn](T& obj) {
+            (obj.*member_fn)();
+        });
+        return *this;
+    }
+
+    BeanBuilder& qualifier(const std::string& name) {
+        auto& registrations = container_.get_registrations();
+        auto it = registrations.find(type_id_);
+        if (it != registrations.end()) {
+            it->second.qualifier = name;
+        }
+        return *this;
+    }
+
+    BeanBuilder& primary() {
+        auto& registrations = container_.get_registrations();
+        auto it = registrations.find(type_id_);
+        if (it != registrations.end()) {
+            it->second.is_primary = true;
+        }
+        return *this;
+    }
+
+    BeanBuilder& lazy() {
+        auto& registrations = container_.get_registrations();
+        auto it = registrations.find(type_id_);
+        if (it != registrations.end()) {
+            it->second.is_lazy = true;
+        }
+        return *this;
+    }
+
+    template<typename Dep>
+    BeanBuilder& depends_on() {
+        container_.add_dependency(type_id_, std::type_index(typeid(Dep)));
+        return *this;
     }
 };
-#endif
-} // namespace detail
+
+template<typename Interface>
+class BindBuilder {
+private:
+    RootContainer& container_;
+public:
+    explicit BindBuilder(RootContainer& container) : container_(container) {}
+
+    template<typename Implementation>
+    void to() {
+        auto interface_tid = std::type_index(typeid(Interface));
+        auto impl_tid = std::type_index(typeid(Implementation));
+
+        Scope scope = Scope::Singleton;
+        const char* q = "";
+        bool is_prim = false;
+        bool is_lazy = false;
+
+        auto& registrations = container_.get_registrations();
+        auto it = registrations.find(impl_tid);
+        if (it != registrations.end()) {
+            scope = it->second.scope;
+            q = it->second.qualifier.c_str();
+            is_prim = it->second.is_primary;
+            is_lazy = it->second.is_lazy;
+        }
+
+        container_.register_bean<Interface>([](ContainerBase& c) -> Interface* {
+            return &c.resolve<Implementation>();
+        }, scope, q, is_prim, is_lazy);
+
+        container_.add_dependency(interface_tid, impl_tid);
+
+        // Override lifecycle handlers to prevent duplicate lifecycle actions or double deletion
+        auto base_it = registrations.find(interface_tid);
+        if (base_it != registrations.end()) {
+            base_it->second.destructor_fn = nullptr;
+            base_it->second.post_construct_fn = nullptr;
+            base_it->second.pre_destroy_fn = nullptr;
+            base_it->second.is_lazy = true;
+        }
+    }
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ShardContainer — per-CPU-core, borrows singletons, owns Shard-scoped beans

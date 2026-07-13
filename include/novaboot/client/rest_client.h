@@ -61,6 +61,31 @@ public:
         Protocol     protocol = Protocol::HTTP3; ///< HTTP protocol option
     };
 
+    class Builder {
+    private:
+        Config cfg_;
+    public:
+        Builder() = default;
+
+        Builder& host(std::string host) { cfg_.host = std::move(host); return *this; }
+        Builder& ip(std::string ip) { cfg_.ip = std::move(ip); return *this; }
+        Builder& port(uint16_t port) { cfg_.port = port; return *this; }
+        Builder& verify_ssl(bool verify) { cfg_.verify_ssl = verify; return *this; }
+        Builder& ca_file(std::string ca_file) { cfg_.ca_file = std::move(ca_file); return *this; }
+        Builder& connect_timeout_ms(int ms) { cfg_.connect_timeout_ms = ms; return *this; }
+        Builder& request_timeout_ms(int ms) { cfg_.request_timeout_ms = ms; return *this; }
+        Builder& max_reconnect_attempts(int attempts) { cfg_.max_reconnect_attempts = attempts; return *this; }
+        Builder& protocol(Protocol proto) { cfg_.protocol = proto; return *this; }
+
+        std::unique_ptr<RestClient> build(core::EventLoop& event_loop) {
+            return RestClient::create(cfg_, event_loop);
+        }
+    };
+
+    static Builder builder() {
+        return Builder();
+    }
+
     ~RestClient();
 
     RestClient(const RestClient&) = delete;
@@ -86,9 +111,6 @@ public:
     http3::ClientResponse patch(std::string_view path,
                                 std::string_view body,
                                 const http3::HeaderMap& headers = {});
-
-    // ─── Typed convenience (defined in rest_client_typed.h, include json.h first)
-    // template<typename T> T get_as(...)  — see rest_client_factory.h
 
     // ─── Async / coroutine API ───────────────────────────────────────────
     /// Returns a Task<ClientResponse> that can be co_await-ed.

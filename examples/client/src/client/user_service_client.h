@@ -1,48 +1,55 @@
 #pragma once
 
-/// Example: Declarative HTTP REST client using NovaBoot annotations.
-///
-/// This mirrors the Spring Boot @FeignClient pattern exactly.
-/// The [[=novaboot::web::rest_client{...}]] annotation marks this as a
-/// remote HTTP client interface. The novaboot-scanner tool reads this file
-/// at build time and generates "user_service_client.client.h" containing the
-/// concrete UserServiceClientImpl that makes the actual HTTP calls.
-///
-/// Usage:
-///   #include "client/user_service_client.h"
-///   auto handle = novaboot::client::RestClientFactory::make<UserServiceClient>(event_loop);
-///   auto resp = handle->get_user(42);
-///   std::cout << resp.body().name << "\n";
-
 #include "model/user.h"
 #include "novaboot/router/response_entity.h"
-#include "novaboot/router/web_attributes.h"
+#include "novaboot/client/rest_client.h"
+#include "novaboot/router/json.h"
 
 #include <vector>
+#include <memory>
 
-class [[=novaboot::web::rest_client{"https://localhost:4433","http2"}]] UserServiceClient {
+class UserServiceClient {
+private:
+    std::unique_ptr<novaboot::client::RestClient> client_;
+
 public:
-    virtual ~UserServiceClient() = default;
+    explicit UserServiceClient(novaboot::core::EventLoop& event_loop) {
+        client_ = novaboot::client::RestClient::builder()
+            .host("localhost")
+            .port(4433)
+            .verify_ssl(false) // For testing localhost cert
+            .protocol(novaboot::client::Protocol::HTTP2)
+            .build(event_loop);
+    }
 
-    /// GET /api/users  → list of all users
-    [[=novaboot::web::get{"/api/users"}]]
-    virtual novaboot::ResponseEntity<std::vector<examples::model::User>> get_all_users() = 0;
+    novaboot::ResponseEntity<std::vector<examples::model::User>> get_all_users() {
+        auto resp = client_->get("/api/users");
+        auto users = novaboot::json::deserialize<std::vector<examples::model::User>>(resp.body);
+        return novaboot::ResponseEntity<std::vector<examples::model::User>>::status(resp.status_code, users);
+    }
 
-    /// GET /api/users/{id}  → single user
-    [[=novaboot::web::get{"/api/users/{id}"}]]
-    virtual novaboot::ResponseEntity<examples::model::User> get_user(int id) = 0;
+    novaboot::ResponseEntity<examples::model::User> get_user(int id) {
+        auto resp = client_->get("/api/users/" + std::to_string(id));
+        auto user = novaboot::json::deserialize<examples::model::User>(resp.body);
+        return novaboot::ResponseEntity<examples::model::User>::status(resp.status_code, user);
+    }
 
-    /// POST /api/users  → create user (body = User JSON)
-    [[=novaboot::web::post{"/api/users"}]]
-    virtual novaboot::ResponseEntity<examples::model::User> create_user(
-        examples::model::User user) = 0;
+    novaboot::ResponseEntity<examples::model::User> create_user(examples::model::User user) {
+        auto body = novaboot::json::serialize(user);
+        auto resp = client_->post("/api/users", body);
+        auto saved = novaboot::json::deserialize<examples::model::User>(resp.body);
+        return novaboot::ResponseEntity<examples::model::User>::status(resp.status_code, saved);
+    }
 
-    /// PUT /api/users/{id}  → replace user
-    [[=novaboot::web::put{"/api/users/{id}"}]]
-    virtual novaboot::ResponseEntity<examples::model::User> update_user(
-        int id, examples::model::User user) = 0;
+    novaboot::ResponseEntity<examples::model::User> update_user(int id, examples::model::User user) {
+        auto body = novaboot::json::serialize(user);
+        auto resp = client_->put("/api/users/" + std::to_string(id), body);
+        auto saved = novaboot::json::deserialize<examples::model::User>(resp.body);
+        return novaboot::ResponseEntity<examples::model::User>::status(resp.status_code, saved);
+    }
 
-    /// DELETE /api/users/{id}  → remove user
-    [[=novaboot::web::del{"/api/users/{id}"}]]
-    virtual novaboot::ResponseEntity<void> delete_user(int id) = 0;
+    novaboot::ResponseEntity<void> delete_user(int id) {
+        auto resp = client_->del("/api/users/" + std::to_string(id));
+        return novaboot::ResponseEntity<void>::status(resp.status_code);
+    }
 };

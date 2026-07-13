@@ -31,8 +31,6 @@
 ///       }));
 
 #include "novaboot/di/container.h"
-#include "novaboot/di/attributes.h"
-
 #include "novaboot/context/request_context.h"
 #include "novaboot/http3/request.h"
 #include "novaboot/http3/response.h"

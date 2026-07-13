@@ -14,7 +14,6 @@
 #include "novaboot/middleware/pipeline.h"
 #include "novaboot/quic/tls_context.h"
 #include "novaboot/router/router.h"
-#include "novaboot/router/web_attributes.h"
 #include "novaboot/router/response_entity.h"
 #include "novaboot/router/json.h"
 #include "novaboot/validation/validation.h"
@@ -28,19 +27,6 @@ namespace novaboot {
 
 namespace detail {
 
-inline std::string join_paths(std::string_view prefix, std::string_view path) {
-    if (prefix.empty()) return std::string(path);
-    if (path.empty()) return std::string(prefix);
-    
-    std::string result(prefix);
-    if (result.back() == '/' && path.front() == '/') {
-        result.pop_back();
-    } else if (result.back() != '/' && path.front() != '/') {
-        result += "/";
-    }
-    result += path;
-    return result;
-}
 #ifdef __cpp_impl_reflection
 template<typename T>
 consteval auto get_members() {
@@ -149,55 +135,48 @@ struct Invoker {
     }
 };
 
-struct ExceptionHandler {
-    virtual bool handle(const std::exception& ex, http3::Response& res, context::RequestContext& ctx) = 0;
-    virtual ~ExceptionHandler() = default;
-};
+#endif
 
-template<typename AdviceClass, typename Ex, typename Ret, typename... Args>
-class ExceptionHandlerImpl : public ExceptionHandler {
+template<typename Ex, typename Handler>
+class FluentExceptionHandler : public novaboot::router::ExceptionHandler {
+    Handler handler_;
+
+    template<typename R>
+    static void handle_result(const R& result, http3::Response& res) {
+        if constexpr (requires { result.status_code(); result.headers(); }) {
+            res.status(result.status_code());
+            for (const auto& h : result.headers()) {
+                res.header(h.first, h.second);
+            }
+            if constexpr (requires { result.body(); }) {
+                res.json(novaboot::json::serialize(result.body()));
+            }
+        } else {
+            res.status(200);
+            res.json(novaboot::json::serialize(result));
+        }
+    }
+
 public:
-    using MemberFn = Ret (AdviceClass::*)(Args...);
-
-    explicit ExceptionHandlerImpl(MemberFn method) : method_(method) {}
+    explicit FluentExceptionHandler(Handler&& h) : handler_(std::forward<Handler>(h)) {}
 
     bool handle(const std::exception& ex, http3::Response& res, context::RequestContext& ctx) override {
         if (auto* typed_ex = dynamic_cast<const Ex*>(&ex)) {
-            auto& advice = ctx.inject<AdviceClass>();
-            invoke_with_args(advice, typed_ex, res, ctx, std::make_index_sequence<sizeof...(Args)>{});
+            if constexpr (std::is_invocable_v<Handler, const Ex&, http3::Response&, context::RequestContext&>) {
+                handler_(*typed_ex, res, ctx);
+            } else if constexpr (std::is_invocable_v<Handler, const Ex&, context::RequestContext&>) {
+                auto result = handler_(*typed_ex, ctx);
+                handle_result(result, res);
+            } else if constexpr (std::is_invocable_v<Handler, const Ex&>) {
+                auto result = handler_(*typed_ex);
+                handle_result(result, res);
+            }
             return true;
         }
         return false;
     }
-
-private:
-    template<std::size_t... Is>
-    void invoke_with_args(AdviceClass& advice, const Ex* ex, http3::Response& res, context::RequestContext& ctx, std::index_sequence<Is...>) {
-        if constexpr (std::is_void_v<Ret>) {
-            (advice.*method_)(resolve_arg<Is, Args>(ex, res, ctx)...);
-        } else {
-            auto result = (advice.*method_)(resolve_arg<Is, Args>(ex, res, ctx)...);
-            Invoker<AdviceClass, std::meta::info{}, Ret, Args...>::handle_result(result, res);
-        }
-    }
-
-    template<std::size_t I, typename Arg>
-    Arg resolve_arg(const Ex* ex, http3::Response& res, context::RequestContext& ctx) {
-        using CleanArg = std::remove_cvref_t<Arg>;
-        if constexpr (std::is_same_v<CleanArg, Ex>) {
-            return *ex;
-        } else if constexpr (std::is_same_v<CleanArg, http3::Response>) {
-            return res;
-        } else if constexpr (std::is_same_v<CleanArg, context::RequestContext>) {
-            return ctx;
-        } else {
-            return CleanArg{};
-        }
-    }
-
-    MemberFn method_;
 };
-#endif
+
 } // namespace detail
 
 /// Server builder for fluent configuration.
@@ -270,153 +249,13 @@ public:
     /// Register a route (fluent API)
     router::Router::RouteBuilder route(std::string_view path);
 
-    /// Register a controller's annotated web routes.
-    template<typename T>
-    Server& register_controller() {
-#ifdef __cpp_impl_reflection
-        constexpr auto cls = ^^T;
-        static constexpr auto get_prefix = []() -> std::string_view {
-            if constexpr (!std::meta::annotations_of_with_type(cls, ^^novaboot::web::rest_controller).empty()) {
-                constexpr auto ann = std::meta::annotations_of_with_type(cls, ^^novaboot::web::rest_controller)[0];
-                static constexpr auto annot = std::meta::extract<novaboot::web::rest_controller>(ann);
-                return std::string_view(annot.path);
-            } else if constexpr (!std::meta::annotations_of_with_type(cls, ^^novaboot::web::controller).empty()) {
-                constexpr auto ann = std::meta::annotations_of_with_type(cls, ^^novaboot::web::controller)[0];
-                static constexpr auto annot = std::meta::extract<novaboot::web::controller>(ann);
-                return std::string_view(annot.path);
-            }
-            return "";
-        };
-        static constexpr std::string_view prefix = get_prefix();
-
-        static constexpr auto members = detail::get_members<T>();
-        template for (constexpr auto m : members) {
-            if constexpr (std::meta::is_function(m) && !std::meta::is_constructor(m) && !std::meta::is_destructor(m)) {
-                // GET
-                if constexpr (!std::meta::annotations_of_with_type(m, ^^novaboot::web::get).empty()) {
-                    constexpr auto ann = std::meta::annotations_of_with_type(m, ^^novaboot::web::get)[0];
-                    constexpr auto route_annot = std::meta::extract<novaboot::web::get>(ann);
-                    this->deduce_and_bind<T, m>(detail::join_paths(prefix, route_annot.path), router::Method::GET, &[:m:]);
-                }
-                // POST
-                else if constexpr (!std::meta::annotations_of_with_type(m, ^^novaboot::web::post).empty()) {
-                    constexpr auto ann = std::meta::annotations_of_with_type(m, ^^novaboot::web::post)[0];
-                    constexpr auto route_annot = std::meta::extract<novaboot::web::post>(ann);
-                    this->deduce_and_bind<T, m>(detail::join_paths(prefix, route_annot.path), router::Method::POST, &[:m:]);
-                }
-                // PUT
-                else if constexpr (!std::meta::annotations_of_with_type(m, ^^novaboot::web::put).empty()) {
-                    constexpr auto ann = std::meta::annotations_of_with_type(m, ^^novaboot::web::put)[0];
-                    constexpr auto route_annot = std::meta::extract<novaboot::web::put>(ann);
-                    this->deduce_and_bind<T, m>(detail::join_paths(prefix, route_annot.path), router::Method::PUT, &[:m:]);
-                }
-                // DELETE
-                else if constexpr (!std::meta::annotations_of_with_type(m, ^^novaboot::web::del).empty()) {
-                    constexpr auto ann = std::meta::annotations_of_with_type(m, ^^novaboot::web::del)[0];
-                    constexpr auto route_annot = std::meta::extract<novaboot::web::del>(ann);
-                    this->deduce_and_bind<T, m>(detail::join_paths(prefix, route_annot.path), router::Method::DELETE_, &[:m:]);
-                }
-                // PATCH
-                else if constexpr (!std::meta::annotations_of_with_type(m, ^^novaboot::web::patch).empty()) {
-                    constexpr auto ann = std::meta::annotations_of_with_type(m, ^^novaboot::web::patch)[0];
-                    constexpr auto route_annot = std::meta::extract<novaboot::web::patch>(ann);
-                    this->deduce_and_bind<T, m>(detail::join_paths(prefix, route_annot.path), router::Method::PATCH, &[:m:]);
-                }
-                // HEAD
-                else if constexpr (!std::meta::annotations_of_with_type(m, ^^novaboot::web::head).empty()) {
-                    constexpr auto ann = std::meta::annotations_of_with_type(m, ^^novaboot::web::head)[0];
-                    constexpr auto route_annot = std::meta::extract<novaboot::web::head>(ann);
-                    this->deduce_and_bind<T, m>(detail::join_paths(prefix, route_annot.path), router::Method::HEAD, &[:m:]);
-                }
-                // OPTIONS
-                else if constexpr (!std::meta::annotations_of_with_type(m, ^^novaboot::web::options).empty()) {
-                    constexpr auto ann = std::meta::annotations_of_with_type(m, ^^novaboot::web::options)[0];
-                    constexpr auto route_annot = std::meta::extract<novaboot::web::options>(ann);
-                    this->deduce_and_bind<T, m>(detail::join_paths(prefix, route_annot.path), router::Method::OPTIONS, &[:m:]);
-                }
-                // ANY
-                else if constexpr (!std::meta::annotations_of_with_type(m, ^^novaboot::web::any).empty()) {
-                    constexpr auto ann = std::meta::annotations_of_with_type(m, ^^novaboot::web::any)[0];
-                    constexpr auto route_annot = std::meta::extract<novaboot::web::any>(ann);
-                    this->deduce_and_bind<T, m>(detail::join_paths(prefix, route_annot.path), router::Method::ANY, &[:m:]);
-                }
-            }
-        }
-#endif
+    template<typename Ex, typename Handler>
+    Server& on_exception(Handler&& handler) {
+        router_.on_exception<Ex>(std::forward<Handler>(handler));
         return *this;
     }
 
-    /// Deduce and bind helper that registers type-safe controller methods to the router
-    template<typename Class, std::meta::info method_meta, typename Ret, typename... Args>
-    void deduce_and_bind(std::string_view path, router::Method http_method, Ret (Class::*method)(Args...)) {
-        this->router_.add_route(http_method, path, [this, method](http3::Request& req, http3::Response& res, context::RequestContext& ctx) {
-            auto& controller = ctx.inject<Class>();
-            try {
-                detail::Invoker<Class, method_meta, Ret, Args...>::invoke(controller, method, req, res, ctx);
-            } catch (const novaboot::validation::ValidationException& val_ex) {
-                res.status(400);
-                res.header("Content-Type", "application/json");
-                std::string err_json = R"({"error":"Bad Request","message":"Validation failed","errors":[)";
-                bool first = true;
-                for (const auto& err : val_ex.errors()) {
-                    if (!first) err_json += ",";
-                    first = false;
-                    err_json += "\"" + err + "\"";
-                }
-                err_json += "]}";
-                res.json(err_json);
-            } catch (const std::exception& ex) {
-                if (!this->handle_exception(ex, res, ctx)) {
-                    res.status(500);
-                    res.header("Content-Type", "application/json");
-                    res.json(R"({"error":"Internal Server Error","message":")" + std::string(ex.what()) + R"("})");
-                }
-            }
-        });
-    }
-
-    /// Register multiple controllers' annotated web routes.
-    template<typename... Ts>
-    Server& register_controllers() {
-        (register_controller<Ts>(), ...);
-        return *this;
-    }
-
-    /// Register a ControllerAdvice global exception handler advice class.
-    template<typename T>
-    Server& register_advice() {
-#ifdef __cpp_impl_reflection
-        static constexpr auto members = detail::get_members<T>();
-        template for (constexpr auto m : members) {
-            if constexpr (std::meta::is_function(m) && !std::meta::is_constructor(m) && !std::meta::is_destructor(m)) {
-                if constexpr (!std::meta::annotations_of_with_type(m, ^^novaboot::web::exception_handler).empty()) {
-                    constexpr auto ann = std::meta::annotations_of_with_type(m, ^^novaboot::web::exception_handler)[0];
-                    constexpr auto handler_meta = std::meta::extract<novaboot::web::exception_handler>(ann);
-                    this->deduce_and_register_exception_handler<T, handler_meta.exception_type>(&[:m:]);
-                }
-            }
-        }
-#endif
-        return *this;
-    }
-
-    /// Register multiple ControllerAdvice exception handler advice classes.
-    template<typename... Ts>
-    Server& register_advices() {
-        (register_advice<Ts>(), ...);
-        return *this;
-    }
-
-    /// Deduce exception type and register the custom exception handler
-    template<typename AdviceClass, std::meta::info exception_type, typename Ret, typename... Args>
-    void deduce_and_register_exception_handler(Ret (AdviceClass::*method)(Args...)) {
-        using ExType = typename[: exception_type :];
-        exception_handlers_.push_back(
-            std::make_unique<detail::ExceptionHandlerImpl<AdviceClass, ExType, Ret, Args...>>(method)
-        );
-    }
-
-    /// Match and process thrown exception against registered ControllerAdvice handlers
+    /// Match and process a thrown exception against fluent handlers.
     bool handle_exception(const std::exception& ex, http3::Response& res, context::RequestContext& ctx);
 
     /// Run the server (blocks until signaled to stop)
@@ -443,7 +282,6 @@ private:
     void stop_signal_thread();
 
     router::Router                 router_;
-    std::vector<std::unique_ptr<detail::ExceptionHandler>> exception_handlers_;
     middleware::Pipeline           pipeline_;
     std::unique_ptr<quic::TlsContext> tls_ctx_;
     std::vector<std::unique_ptr<core::Shard>> shards_;
@@ -461,5 +299,73 @@ private:
     /// Static reference for compatibility with legacy signal handling.
     static Server* instance_;
 };
+
+namespace di {
+
+namespace detail {
+template<auto MethodPtr>
+struct method_traits;
+
+template<typename Class, typename Ret, typename... Args, Ret (Class::*MethodPtr)(Args...)>
+struct method_traits<MethodPtr> {
+    using class_type = Class;
+    using return_type = Ret;
+
+    template<std::meta::info m>
+    using invoker_type = novaboot::detail::Invoker<Class, m, Ret, Args...>;
+};
+
+#ifdef __cpp_impl_reflection
+template<std::meta::info m, auto MethodPtr>
+consteval bool is_matching_method() {
+    if constexpr (std::meta::is_function(m) && !std::meta::is_constructor(m) && !std::meta::is_destructor(m)) {
+        if constexpr (std::meta::has_identifier(m)) {
+            constexpr std::string_view name = std::meta::identifier_of(m);
+            if constexpr (name.starts_with("operator")) {
+                return false;
+            } else {
+                if constexpr (std::is_same_v<decltype(&[:m:]), decltype(MethodPtr)>) {
+                    return &[:m:] == MethodPtr;
+                } else {
+                    return false;
+                }
+            }
+        } else {
+            return false;
+        }
+    } else {
+        return false;
+    }
+}
+
+template<typename T, auto MethodPtr>
+consteval std::meta::info find_method_meta() {
+    static constexpr auto members = novaboot::detail::get_members<T>();
+    template for (constexpr auto m : members) {
+        if constexpr (is_matching_method<m, MethodPtr>()) {
+            return m;
+        }
+    }
+    return {};
+}
+#endif
+} // namespace detail
+
+#ifdef __cpp_impl_reflection
+template<auto MethodPtr>
+auto handler() {
+    return [](http3::Request& req, http3::Response& res, context::RequestContext& ctx) {
+        using Traits = detail::method_traits<MethodPtr>;
+        using Class = typename Traits::class_type;
+        constexpr auto m_meta = detail::find_method_meta<Class, MethodPtr>();
+        using InvokerType = typename Traits::template invoker_type<m_meta>;
+
+        auto& controller = ctx.inject<Class>();
+        InvokerType::invoke(controller, MethodPtr, req, res, ctx);
+    };
+}
+#endif
+
+} // namespace di
 
 } // namespace novaboot

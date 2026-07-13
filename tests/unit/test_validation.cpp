@@ -4,15 +4,17 @@
 #include <string>
 
 struct ValidatedDto {
-    [[=novaboot::validation::min{10}]]
     int id;
 
-    [[=novaboot::validation::not_empty{}]]
-    [[=novaboot::validation::size{.min = 3, .max = 8}]]
     std::string code;
 
-    [[=novaboot::validation::email{}]]
     std::string email;
+
+    inline static const novaboot::validation::Schema<ValidatedDto> validator =
+        novaboot::validation::Schema<ValidatedDto>()
+            .field<&ValidatedDto::id>("id").min(10)
+            .field<&ValidatedDto::code>("code").not_empty().size(3, 8)
+            .field<&ValidatedDto::email>("email").email();
 };
 
 TEST(ValidationTest, ValidPayloadPasses) {
@@ -93,11 +95,14 @@ struct is_valid_role {
 };
 
 struct CustomValidatedDto {
-    [[=is_valid_role{}]]
     std::string role;
 
-    [[=is_valid_role{"APP_"}]]
     std::string app_code;
+
+    inline static const novaboot::validation::Schema<CustomValidatedDto> validator =
+        novaboot::validation::Schema<CustomValidatedDto>()
+            .field<&CustomValidatedDto::role>("role").custom(is_valid_role())
+            .field<&CustomValidatedDto::app_code>("app_code").custom(is_valid_role("APP_"));
 };
 
 TEST(ValidationTest, CustomValidatorPassesAndFails) {

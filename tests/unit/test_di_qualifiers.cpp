@@ -72,7 +72,7 @@ TEST(DIQualifiers, PrimaryBeanRegisteredAsDefault) {
     RootContainer root;
 
     // Register a "primary" bean with qualifier="primary" explicitly
-    // In the codegen path, [[=primary{}]] sets is_primary=true and the
+    // The fluent builder sets is_primary=true and the
     // container registration omits the qualifier so it becomes the default.
     root.register_bean<PrimaryBean>(
         [](ContainerBase&) { return new PrimaryBean{42}; },
@@ -128,7 +128,8 @@ TEST(DIQualifiers, OptionalPresentAndAbsent) {
 
 TEST(DIQualifiers, BaseClassInterfaceResolution) {
     RootContainer root;
-    root.register_component<RedisCache>();
+    root.singleton<RedisCache>([](auto&) { return new RedisCache(); });
+    root.bind<Cache>().to<RedisCache>();
     root.build();
 
     // Resolve as base class interface Cache
