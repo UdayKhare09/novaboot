@@ -62,35 +62,20 @@ int main() {
         return new RequestLogger();
     });
 
-    di_root.singleton<UserSqlRepository>([](ContainerBase& c) {
-        return new UserSqlRepository(c.resolve<PgsqlDataSource>());
-    }).depends_on<PgsqlDataSource>();
+    di_root.autowire<UserSqlRepository>();
     di_root.bind<CrudRepository<User, int>>().to<UserSqlRepository>();
 
-    di_root.singleton<UserCacheRepository>([](ContainerBase& c) {
-        return new UserCacheRepository(c.resolve<RedisDataSource>());
-    }).depends_on<RedisDataSource>();
+    di_root.autowire<UserCacheRepository>();
     di_root.bind<CacheRepository<User, int>>().to<UserCacheRepository>();
 
-    di_root.singleton<UserRepository>([](ContainerBase& c) {
-        return new UserRepository(
-            c.resolve<CrudRepository<User, int>>(),
-            c.resolve<CacheRepository<User, int>>()
-        );
-    })
-    .depends_on<CrudRepository<User, int>>()
-    .depends_on<CacheRepository<User, int>>();
+    di_root.autowire<UserRepository>();
 
-    di_root.singleton<UserService>([](ContainerBase& c) {
-        return new UserService(c.resolve<UserRepository>());
-    })
-    .on_start(&UserService::init)
-    .on_stop(&UserService::cleanup)
-    .depends_on<UserRepository>();
+    di_root.autowire<UserService>()
+        .on_start(&UserService::init)
+        .on_stop(&UserService::cleanup);
 
-    di_root.singleton<UserController>([](ContainerBase& c) {
-        return new UserController(c.resolve<UserService>());
-    }).depends_on<UserService>();
+    di_root.autowire<UserController>();
+
 
     // Build the container: builds dependency graph and instantiates singletons
     di_root.build();

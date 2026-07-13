@@ -17,6 +17,9 @@
 
 #include "novaboot/di/lifecycle.h"
 #include "novaboot/di/scope.h"
+#ifdef __cpp_impl_reflection
+#include <meta>
+#endif
 
 #include <any>
 #include <chrono>
@@ -285,6 +288,11 @@ public:
         return BindBuilder<Interface>(*this);
     }
 
+#ifdef __cpp_impl_reflection
+    template<typename T>
+    BeanBuilder<T> autowire();
+#endif
+
     std::unordered_map<std::type_index, BeanRegistration>& get_registrations() {
         return registrations_;
     }
@@ -396,6 +404,67 @@ private:
     /// Storage for owned bean instances (for destruction)
     std::vector<std::pair<void*, std::function<void(void*)>>> owned_instances_;
 };
+
+template<typename... Args>
+struct TypeList {
+    template<typename T>
+    static T* construct(ContainerBase& c) {
+        return new T(c.resolve<std::remove_cvref_t<Args>>()...);
+    }
+
+    template<typename T>
+    static void add_dependencies(RootContainer& container) {
+        auto parent_tid = std::type_index(typeid(T));
+        (container.add_dependency(parent_tid, std::type_index(typeid(std::remove_cvref_t<Args>))), ...);
+    }
+};
+
+#ifdef __cpp_impl_reflection
+namespace detail {
+    template<typename T>
+    consteval std::meta::info get_constructor_typelist() {
+        constexpr auto ctx = std::meta::access_context::current();
+        std::meta::info target_ctor = std::meta::info{};
+        bool found = false;
+
+        for (auto m : std::meta::members_of(^^T, ctx)) {
+            if (std::meta::is_constructor(m)) {
+                auto params = std::meta::parameters_of(m);
+                if (params.size() > 0 || !found) {
+                    target_ctor = m;
+                    found = true;
+                }
+            }
+        }
+
+        if (!found) {
+            return ^^TypeList<>;
+        }
+
+        auto params = std::meta::parameters_of(target_ctor);
+        std::vector<std::meta::info> param_types;
+        for (auto p : params) {
+            param_types.push_back(std::meta::type_of(p));
+        }
+
+        return std::meta::substitute(std::meta::template_of(^^TypeList<T>), param_types);
+    }
+} // namespace detail
+
+template<typename T>
+BeanBuilder<T> RootContainer::autowire() {
+    constexpr auto type_info = detail::get_constructor_typelist<T>();
+    using ExtractedTypeList = typename[: type_info :];
+
+    register_bean<T>([](ContainerBase& c) {
+        return ExtractedTypeList::template construct<T>(c);
+    }, Scope::Singleton);
+
+    ExtractedTypeList::template add_dependencies<T>(*this);
+
+    return BeanBuilder<T>(*this, std::type_index(typeid(T)));
+}
+#endif
 
 template<typename T>
 class BeanBuilder {
