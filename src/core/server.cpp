@@ -2,6 +2,7 @@
 
 #include <csignal>
 #include <format>
+#include <pthread.h>
 #include <stdexcept>
 #include <thread>
 
@@ -145,6 +146,7 @@ std::unique_ptr<Server> Server::Builder::build() {
 
 Server::~Server() {
     stop();
+    stop_signal_thread();
     if (instance_ == this) {
         instance_ = nullptr;
     }
@@ -155,11 +157,13 @@ router::Router::RouteBuilder Server::route(std::string_view path) {
 }
 
 void Server::run() {
-    if (running_) return;
-    running_ = true;
+    bool expected = false;
+    if (!running_.compare_exchange_strong(expected, true)) return;
+    stopping_ = false;
 
     // Initialize ngtcp2 crypto library
     if (ngtcp2_crypto_ossl_init() != 0) {
+        running_ = false;
         throw std::runtime_error("ngtcp2_crypto_ossl_init failed");
     }
 
@@ -194,12 +198,20 @@ void Server::run() {
     }
 
     running_ = false;
+    stopping_ = false;
+    stop_signal_thread();
     ngtcp2_crypto_ossl_free();
     spdlog::info("NovaBoot server stopped.");
+    spdlog::apply_all([](const std::shared_ptr<spdlog::logger>& logger) {
+        logger->flush();
+    });
 }
 
 void Server::stop() {
     if (!running_) return;
+
+    bool expected = false;
+    if (!stopping_.compare_exchange_strong(expected, true)) return;
 
     spdlog::info("Shutting down NovaBoot server...");
 
@@ -208,25 +220,57 @@ void Server::stop() {
     }
 
     running_ = false;
+
+    if (signal_thread_.joinable() &&
+        signal_thread_.get_id() != std::this_thread::get_id()) {
+        pthread_kill(signal_thread_.native_handle(), SIGTERM);
+    }
 }
 
 void Server::install_signal_handlers() {
     instance_ = this;
 
-    struct sigaction sa{};
-    sa.sa_handler = [](int /*sig*/) {
-        if (Server::instance_) {
-            Server::instance_->stop();
-        }
-    };
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
+    sigemptyset(&shutdown_signal_set_);
+    sigaddset(&shutdown_signal_set_, SIGINT);
+    sigaddset(&shutdown_signal_set_, SIGTERM);
 
-    sigaction(SIGINT, &sa, nullptr);
-    sigaction(SIGTERM, &sa, nullptr);
+    const int mask_result =
+        pthread_sigmask(SIG_BLOCK, &shutdown_signal_set_, nullptr);
+    if (mask_result != 0) {
+        spdlog::warn("Failed to block shutdown signals: {}", mask_result);
+    }
 
     // Ignore SIGPIPE (common with network code)
     signal(SIGPIPE, SIG_IGN);
+
+    if (signal_thread_.joinable()) return;
+
+    signal_thread_ = std::thread([this]() {
+        for (;;) {
+            int signal_number = 0;
+            const int wait_result =
+                sigwait(&shutdown_signal_set_, &signal_number);
+            if (wait_result != 0) {
+                continue;
+            }
+
+            if (!running_) {
+                break;
+            }
+
+            spdlog::info("Received shutdown signal {}", signal_number);
+            stop();
+            break;
+        }
+    });
+}
+
+void Server::stop_signal_thread() {
+    if (!signal_thread_.joinable()) return;
+    if (signal_thread_.get_id() == std::this_thread::get_id()) return;
+
+    pthread_kill(signal_thread_.native_handle(), SIGTERM);
+    signal_thread_.join();
 }
 
 bool Server::handle_exception(const std::exception& ex, http3::Response& res, context::RequestContext& ctx) {

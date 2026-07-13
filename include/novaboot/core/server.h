@@ -1,9 +1,12 @@
 #pragma once
 
 #include <cstdint>
+#include <atomic>
+#include <csignal>
 #include <memory>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include "novaboot/core/shard.h"
@@ -436,6 +439,9 @@ private:
     /// Install signal handlers for graceful shutdown
     void install_signal_handlers();
 
+    /// Wake and join the signal waiter thread.
+    void stop_signal_thread();
+
     router::Router                 router_;
     std::vector<std::unique_ptr<detail::ExceptionHandler>> exception_handlers_;
     middleware::Pipeline           pipeline_;
@@ -444,11 +450,15 @@ private:
 
     net::Address bind_address_;
     int          worker_count_ = 0;
-    bool         running_      = false;
+    std::atomic_bool running_  = false;
+    std::atomic_bool stopping_ = false;
     core::EventLoopBackend backend_ = core::EventLoopBackend::IoUring;
     std::string  static_resources_dir_;
 
-    /// Static reference for signal handler
+    sigset_t     shutdown_signal_set_{};
+    std::thread  signal_thread_;
+
+    /// Static reference for compatibility with legacy signal handling.
     static Server* instance_;
 };
 
