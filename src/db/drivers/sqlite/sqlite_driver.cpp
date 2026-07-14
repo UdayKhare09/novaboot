@@ -2,6 +2,24 @@
 #include <stdexcept>
 #include <format>
 #include <iostream>
+#include <sstream>
+#include <iomanip>
+
+namespace {
+std::string time_to_string(std::chrono::system_clock::time_point tp) {
+    auto time = std::chrono::system_clock::to_time_t(tp);
+    std::stringstream ss;
+    ss << std::put_time(std::gmtime(&time), "%Y-%m-%dT%H:%M:%SZ");
+    return ss.str();
+}
+
+std::chrono::system_clock::time_point string_to_time(const std::string& s) {
+    std::tm tm = {};
+    std::stringstream ss(s);
+    ss >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
+    return std::chrono::system_clock::from_time_t(timegm(&tm));
+}
+}
 
 namespace novaboot::db::sqlite {
 
@@ -50,6 +68,14 @@ bool SqliteResultSet::get_bool(int col_index) {
     return sqlite3_column_int(stmt_, col_index) != 0;
 }
 
+Uuid SqliteResultSet::get_uuid(int col_index) {
+    return Uuid::from_string(get_string(col_index));
+}
+
+std::chrono::system_clock::time_point SqliteResultSet::get_time(int col_index) {
+    return string_to_time(get_string(col_index));
+}
+
 int SqliteResultSet::column_count() const {
     return sqlite3_column_count(stmt_);
 }
@@ -87,12 +113,19 @@ void SqliteConnection::bind_params(sqlite3_stmt* stmt, const std::vector<Paramet
                 sqlite3_bind_blob(stmt, idx, val.data(), static_cast<int>(val.size()), SQLITE_TRANSIENT);
             } else if constexpr (std::is_same_v<T, bool>) {
                 sqlite3_bind_int(stmt, idx, val ? 1 : 0);
+            } else if constexpr (std::is_same_v<T, Uuid>) {
+                std::string s = val.to_string();
+                sqlite3_bind_text(stmt, idx, s.c_str(), -1, SQLITE_TRANSIENT);
+            } else if constexpr (std::is_same_v<T, std::chrono::system_clock::time_point>) {
+                std::string s = time_to_string(val);
+                sqlite3_bind_text(stmt, idx, s.c_str(), -1, SQLITE_TRANSIENT);
             }
         }, params[i]);
     }
 }
 
 void SqliteConnection::execute(std::string_view sql, const std::vector<Parameter>& params) {
+    log_query(sql, params);
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(db_, sql.data(), -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
@@ -110,6 +143,7 @@ void SqliteConnection::execute(std::string_view sql, const std::vector<Parameter
 }
 
 std::unique_ptr<ResultSet> SqliteConnection::query(std::string_view sql, const std::vector<Parameter>& params) {
+    log_query(sql, params);
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(db_, sql.data(), -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
@@ -188,6 +222,10 @@ std::shared_ptr<Connection> SqliteDataSource::get_connection() {
     };
 
     return std::shared_ptr<Connection>(new SqliteConnection(db), deleter);
+}
+
+std::shared_ptr<SqlDialect> SqliteDataSource::dialect() {
+    return dialect_;
 }
 
 void SqliteDataSource::close() {

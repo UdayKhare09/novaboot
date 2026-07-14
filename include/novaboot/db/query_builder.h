@@ -32,7 +32,8 @@ private:
     std::vector<Parameter> params_;
     
     std::string sql_order_;
-    std::string sql_limit_;
+    int limit_val_ = -1;
+    int offset_val_ = -1;
     
     std::string get_op_symbol(Op op) {
         switch (op) {
@@ -93,23 +94,23 @@ public:
     }
 
     QueryBuilder& limit(int count) {
-        if (count >= 0) {
-            sql_limit_ = " LIMIT " + std::to_string(count);
-        }
+        limit_val_ = count;
         return *this;
     }
 
     QueryBuilder& offset(int count) {
-        if (count >= 0 && !sql_limit_.empty()) {
-            sql_limit_ += " OFFSET " + std::to_string(count);
-        }
+        offset_val_ = count;
         return *this;
     }
 
     std::vector<Entity> list() {
-        std::string sql = "SELECT * FROM " + table_name_ + sql_where_ + sql_order_ + sql_limit_;
+        auto dialect = datasource_->dialect();
+        std::string sql = "SELECT * FROM " + table_name_ + sql_where_ + sql_order_;
+        sql += dialect->compile_pagination(limit_val_, offset_val_);
+        std::string final_sql = dialect->convert_placeholders(sql);
+        
         auto conn = datasource_->get_connection();
-        auto rs = conn->query(sql, params_);
+        auto rs = conn->query(final_sql, params_);
         
         std::vector<Entity> results;
         while (rs->next()) {

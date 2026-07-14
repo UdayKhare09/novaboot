@@ -10,10 +10,10 @@
 using namespace novaboot::annotations;
 using todo_notes::model::Todo;
 
-struct [[= Repository() ]] TodoRepository : public novaboot::db::CrudRepository<Todo, int> {
+struct [[= Repository() ]] TodoRepository : public novaboot::db::CrudRepository<Todo, std::string> {
 public:
     explicit TodoRepository(std::shared_ptr<novaboot::db::DataSource> ds)
-        : novaboot::db::CrudRepository<Todo, int>(ds) {}
+        : novaboot::db::CrudRepository<Todo, std::string>(ds) {}
 
     std::vector<Todo> find_by_user_id(const std::string& user_id) {
         return query()

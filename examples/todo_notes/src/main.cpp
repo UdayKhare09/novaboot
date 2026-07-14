@@ -75,7 +75,7 @@ int main() {
         
         conn->execute(R"(
             CREATE TABLE IF NOT EXISTS todos (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id TEXT PRIMARY KEY,
                 user_id TEXT NOT NULL,
                 title TEXT NOT NULL,
                 description TEXT,
@@ -85,7 +85,7 @@ int main() {
         
         conn->execute(R"(
             CREATE TABLE IF NOT EXISTS notes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id TEXT PRIMARY KEY,
                 user_id TEXT NOT NULL,
                 title TEXT NOT NULL,
                 content TEXT

@@ -8,3 +8,6 @@ static_resources = "examples/todo_notes/src/resources/static"
 
 [jwt]
 secret = "sample-secret"
+
+[database]
+show-sql = true

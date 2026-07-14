@@ -42,7 +42,7 @@ struct [[= RestController("/api/notes") ]] NoteController {
     }
 
     [[= GetMapping("/:id") ]]
-    ResponseEntity<Note> get_note(int id, RequestContext& ctx) {
+    ResponseEntity<Note> get_note(std::string id, RequestContext& ctx) {
         std::string uid = get_user_id(ctx);
         auto items = note_service.get_notes(uid);
         for (const auto& item : items) {
@@ -61,14 +61,14 @@ struct [[= RestController("/api/notes") ]] NoteController {
     }
 
     [[= PutMapping("/:id") ]]
-    ResponseEntity<Note> update_note(int id, NoteRequest req, RequestContext& ctx) {
+    ResponseEntity<Note> update_note(std::string id, NoteRequest req, RequestContext& ctx) {
         std::string uid = get_user_id(ctx);
         auto saved = note_service.update_note(uid, id, req);
         return ResponseEntity<Note>::ok(saved);
     }
 
     [[= DeleteMapping("/:id") ]]
-    ResponseEntity<void> delete_note(int id, RequestContext& ctx) {
+    ResponseEntity<void> delete_note(std::string id, RequestContext& ctx) {
         std::string uid = get_user_id(ctx);
         note_service.delete_note(uid, id);
         return ResponseEntity<void>::noContent();

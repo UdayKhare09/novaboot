@@ -2,11 +2,12 @@
 #include "novaboot/db/db_client.h"
 #include "novaboot/db/query_builder.h"
 #include "novaboot/db/orm_reflection.h"
-#include "novaboot/di/container.h"
+#include "novaboot/db/uuid.h"
 #include <memory>
 #include <vector>
 #include <optional>
 #include <string>
+#include <typeindex>
 
 namespace novaboot::db {
 
@@ -54,8 +55,9 @@ public:
     /// Primary Key Lookup
     std::optional<Entity> find_by_id(const ID& id) {
         std::string sql = "SELECT * FROM " + table_name_ + " WHERE " + pk_col_name_ + " = ?";
+        auto dialect = datasource_->dialect();
         auto conn = datasource_->get_connection();
-        auto rs = conn->query(sql, { Parameter(id) });
+        auto rs = conn->query(dialect->convert_placeholders(sql), { Parameter(id) });
         if (rs->next()) {
             return detail::map_row_to_entity<Entity>(rs.get());
         }
@@ -65,8 +67,9 @@ public:
     /// Exists verification
     bool exists_by_id(const ID& id) {
         std::string sql = "SELECT COUNT(1) FROM " + table_name_ + " WHERE " + pk_col_name_ + " = ?";
+        auto dialect = datasource_->dialect();
         auto conn = datasource_->get_connection();
-        auto rs = conn->query(sql, { Parameter(id) });
+        auto rs = conn->query(dialect->convert_placeholders(sql), { Parameter(id) });
         if (rs->next()) {
             return rs->get_int(0) > 0;
         }
@@ -81,15 +84,17 @@ public:
     /// Delete by id
     void delete_by_id(const ID& id) {
         std::string sql = "DELETE FROM " + table_name_ + " WHERE " + pk_col_name_ + " = ?";
+        auto dialect = datasource_->dialect();
         auto conn = datasource_->get_connection();
-        conn->execute(sql, { Parameter(id) });
+        conn->execute(dialect->convert_placeholders(sql), { Parameter(id) });
     }
 
     /// Delete all
     void delete_all() {
         std::string sql = "DELETE FROM " + table_name_;
+        auto dialect = datasource_->dialect();
         auto conn = datasource_->get_connection();
-        conn->execute(sql);
+        conn->execute(dialect->convert_placeholders(sql));
     }
 
     /// Save entity (Insert or Update depending on ID)
@@ -97,7 +102,6 @@ public:
         auto conn = datasource_->get_connection();
         static constexpr auto members = detail::get_members<Entity>();
         
-        // Find PK and check if entity is new (id == 0 or default)
         bool is_new = true;
         ID entity_id{};
         
@@ -107,18 +111,54 @@ public:
                     entity_id = static_cast<ID>(entity.[:m:]);
                     constexpr bool is_gen = novaboot::di::detail::has_annotation<novaboot::annotations::GeneratedValue>(m);
                     if constexpr (is_gen) {
-                        if (entity_id != 0) {
-                            is_new = false;
-                        }
-                    } else {
-                        if constexpr (std::is_integral_v<ID> || std::is_floating_point_v<ID>) {
-                            if (entity_id != 0 && exists_by_id(entity_id)) {
-                                is_new = false;
+                        constexpr auto gen_anno = novaboot::di::detail::get_annotation<novaboot::annotations::GeneratedValue>(m);
+                        if constexpr (gen_anno.strategy == novaboot::annotations::GenerationType::UUID) {
+                            using FieldType = decltype(entity.[:m:]);
+                            bool is_empty = false;
+                            if constexpr (std::is_same_v<FieldType, Uuid>) {
+                                is_empty = entity.[:m:].is_nil();
+                            } else if constexpr (std::is_same_v<FieldType, std::string>) {
+                                is_empty = entity.[:m:].empty();
+                            }
+                            
+                            if (is_empty) {
+                                if constexpr (std::is_same_v<FieldType, Uuid>) {
+                                    entity.[:m:] = Uuid::generate();
+                                    entity_id = static_cast<ID>(entity.[:m:]);
+                                } else if constexpr (std::is_same_v<FieldType, std::string>) {
+                                    entity.[:m:] = Uuid::generate().to_string();
+                                    entity_id = static_cast<ID>(entity.[:m:]);
+                                }
+                                is_new = true;
+                            } else {
+                                bool already_exists = false;
+                                if constexpr (std::is_integral_v<ID> || std::is_floating_point_v<ID>) {
+                                    already_exists = (entity_id != 0) && exists_by_id(entity_id);
+                                } else if constexpr (std::is_same_v<ID, Uuid>) {
+                                    already_exists = !entity_id.is_nil() && exists_by_id(entity_id);
+                                } else {
+                                    already_exists = !entity_id.empty() && exists_by_id(entity_id);
+                                }
+                                if (already_exists) {
+                                    is_new = false;
+                                }
                             }
                         } else {
-                            if (!entity_id.empty() && exists_by_id(entity_id)) {
+                            if (entity_id != 0) {
                                 is_new = false;
                             }
+                        }
+                    } else {
+                        bool already_exists = false;
+                        if constexpr (std::is_integral_v<ID> || std::is_floating_point_v<ID>) {
+                            already_exists = (entity_id != 0) && exists_by_id(entity_id);
+                        } else if constexpr (std::is_same_v<ID, Uuid>) {
+                            already_exists = !entity_id.is_nil() && exists_by_id(entity_id);
+                        } else {
+                            already_exists = !entity_id.empty() && exists_by_id(entity_id);
+                        }
+                        if (already_exists) {
+                            is_new = false;
                         }
                     }
                 }
@@ -126,18 +166,16 @@ public:
         }
 
         if (is_new) {
-            // INSERT INTO table (col1, col2) VALUES (?, ?)
             std::string cols;
             std::string placeholders;
             std::vector<Parameter> params;
             
             template for (constexpr auto m : members) {
                 if constexpr (std::meta::is_nonstatic_data_member(m)) {
-                    // Skip auto-increment ID field
                     constexpr bool is_id = novaboot::di::detail::has_annotation<novaboot::annotations::Id>(m);
                     constexpr bool is_gen = novaboot::di::detail::has_annotation<novaboot::annotations::GeneratedValue>(m);
                     
-                    if constexpr (!is_id || !is_gen) {
+                    if constexpr (!is_id || !is_gen || (is_gen && novaboot::di::detail::get_annotation<novaboot::annotations::GeneratedValue>(m).strategy == novaboot::annotations::GenerationType::UUID)) {
                         if (!cols.empty()) {
                             cols += ", ";
                             placeholders += ", ";
@@ -150,20 +188,42 @@ public:
             }
             
             std::string sql = "INSERT INTO " + table_name_ + " (" + cols + ") VALUES (" + placeholders + ")";
-            conn->execute(sql, params);
+            auto dialect = datasource_->dialect();
+            conn->execute(dialect->convert_placeholders(sql), params);
             
-            auto last_id = conn->last_insert_id();
-            template for (constexpr auto m : members) {
-                if constexpr (std::meta::is_nonstatic_data_member(m)) {
-                    if constexpr (novaboot::di::detail::has_annotation<novaboot::annotations::Id>(m) &&
-                                  novaboot::di::detail::has_annotation<novaboot::annotations::GeneratedValue>(m)) {
-                        entity.[:m:] = static_cast<decltype(entity.[:m:])>(last_id);
+            constexpr bool has_auto_inc = []() {
+                bool found = false;
+                template for (constexpr auto m : members) {
+                    if constexpr (std::meta::is_nonstatic_data_member(m)) {
+                        if constexpr (novaboot::di::detail::has_annotation<novaboot::annotations::Id>(m) &&
+                                      novaboot::di::detail::has_annotation<novaboot::annotations::GeneratedValue>(m)) {
+                            constexpr auto gen_anno = novaboot::di::detail::get_annotation<novaboot::annotations::GeneratedValue>(m);
+                            if constexpr (gen_anno.strategy == novaboot::annotations::GenerationType::AutoIncrement) {
+                                found = true;
+                            }
+                        }
+                    }
+                }
+                return found;
+            }();
+
+            if constexpr (has_auto_inc) {
+                auto last_id = conn->last_insert_id();
+                template for (constexpr auto m : members) {
+                    if constexpr (std::meta::is_nonstatic_data_member(m)) {
+                        constexpr bool is_id = novaboot::di::detail::has_annotation<novaboot::annotations::Id>(m);
+                        constexpr bool is_gen = novaboot::di::detail::has_annotation<novaboot::annotations::GeneratedValue>(m);
+                        if constexpr (is_id && is_gen) {
+                            constexpr auto gen_anno = novaboot::di::detail::get_annotation<novaboot::annotations::GeneratedValue>(m);
+                            if constexpr (gen_anno.strategy == novaboot::annotations::GenerationType::AutoIncrement) {
+                                entity.[:m:] = static_cast<decltype(entity.[:m:])>(last_id);
+                            }
+                        }
                     }
                 }
             }
             return entity;
         } else {
-            // UPDATE table SET col1 = ?, col2 = ? WHERE pk = ?
             std::string updates;
             std::vector<Parameter> params;
             
@@ -180,7 +240,8 @@ public:
             
             std::string sql = "UPDATE " + table_name_ + " SET " + updates + " WHERE " + pk_col_name_ + " = ?";
             params.push_back(Parameter(entity_id));
-            conn->execute(sql, params);
+            auto dialect = datasource_->dialect();
+            conn->execute(dialect->convert_placeholders(sql), params);
             return entity;
         }
     }

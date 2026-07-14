@@ -3,6 +3,34 @@
 #include <format>
 #include <iostream>
 #include <cstdlib>
+#include <sstream>
+#include <iomanip>
+
+namespace {
+std::string time_to_string(std::chrono::system_clock::time_point tp) {
+    auto time = std::chrono::system_clock::to_time_t(tp);
+    std::stringstream ss;
+    ss << std::put_time(std::gmtime(&time), "%Y-%m-%d %H:%M:%S");
+    return ss.str();
+}
+
+std::string escape_bytea(const std::vector<std::uint8_t>& bytes) {
+    std::stringstream ss;
+    ss << "\\x";
+    ss << std::hex << std::setfill('0');
+    for (auto b : bytes) {
+        ss << std::setw(2) << static_cast<int>(b);
+    }
+    return ss.str();
+}
+
+std::chrono::system_clock::time_point string_to_time(const std::string& s) {
+    std::tm tm = {};
+    std::stringstream ss(s);
+    ss >> std::get_time(&tm, "%Y-%m-%d %H:%M:%S");
+    return std::chrono::system_clock::from_time_t(timegm(&tm));
+}
+}
 
 namespace novaboot::db::postgres {
 
@@ -70,6 +98,14 @@ bool PostgresResultSet::get_bool(int col_index) {
     return val == "t" || val == "true" || val == "1";
 }
 
+Uuid PostgresResultSet::get_uuid(int col_index) {
+    return Uuid::from_string(get_string(col_index));
+}
+
+std::chrono::system_clock::time_point PostgresResultSet::get_time(int col_index) {
+    return string_to_time(get_string(col_index));
+}
+
 int PostgresResultSet::column_count() const {
     return res_ ? PQnfields(res_) : 0;
 }
@@ -121,9 +157,13 @@ std::vector<std::string> PostgresConnection::serialize_params(const std::vector<
                 serialized.push_back(val);
             } else if constexpr (std::is_same_v<T, std::vector<std::uint8_t>>) {
                 // Escape bytea blob for PostgreSQL
-                serialized.push_back(std::string(val.begin(), val.end()));
+                serialized.push_back(escape_bytea(val));
             } else if constexpr (std::is_same_v<T, bool>) {
                 serialized.push_back(val ? "true" : "false");
+            } else if constexpr (std::is_same_v<T, Uuid>) {
+                serialized.push_back(val.to_string());
+            } else if constexpr (std::is_same_v<T, std::chrono::system_clock::time_point>) {
+                serialized.push_back(time_to_string(val));
             }
         }, param);
     }
@@ -131,6 +171,7 @@ std::vector<std::string> PostgresConnection::serialize_params(const std::vector<
 }
 
 void PostgresConnection::execute(std::string_view sql, const std::vector<Parameter>& params) {
+    log_query(sql, params);
     std::string converted_sql = convert_placeholders(sql);
     std::vector<std::string> str_params = serialize_params(params);
     std::vector<const char*> param_values;
@@ -168,6 +209,7 @@ void PostgresConnection::execute(std::string_view sql, const std::vector<Paramet
 }
 
 std::unique_ptr<ResultSet> PostgresConnection::query(std::string_view sql, const std::vector<Parameter>& params) {
+    log_query(sql, params);
     std::string converted_sql = convert_placeholders(sql);
     std::vector<std::string> str_params = serialize_params(params);
     std::vector<const char*> param_values;
@@ -283,6 +325,10 @@ std::shared_ptr<Connection> PostgresDataSource::get_connection() {
     };
 
     return std::shared_ptr<Connection>(new PostgresConnection(conn, false), cleanup);
+}
+
+std::shared_ptr<SqlDialect> PostgresDataSource::dialect() {
+    return dialect_;
 }
 
 void PostgresDataSource::close() {

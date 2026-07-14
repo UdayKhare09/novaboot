@@ -27,6 +27,8 @@ public:
     std::string get_string(int col_index) override;
     std::vector<std::uint8_t> get_blob(int col_index) override;
     bool get_bool(int col_index) override;
+    Uuid get_uuid(int col_index) override;
+    std::chrono::system_clock::time_point get_time(int col_index) override;
     int column_count() const override;
     std::string_view column_name(int col_index) const override;
 };
@@ -62,6 +64,7 @@ private:
     std::mutex mutex_;
     std::condition_variable cv_;
     bool closed_ = false;
+    std::shared_ptr<SqlDialect> dialect_ = std::make_shared<PostgresDialect>();
 
     PGconn* create_connection();
 
@@ -70,6 +73,7 @@ public:
     ~PostgresDataSource() override;
 
     std::shared_ptr<Connection> get_connection() override;
+    std::shared_ptr<SqlDialect> dialect() override;
     void close() override;
 };
 

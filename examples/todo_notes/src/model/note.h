@@ -10,8 +10,8 @@ using namespace novaboot::annotations;
 
 struct [[= Entity("notes") ]] Note {
     [[= Id() ]]
-    [[= GeneratedValue() ]]
-    int id = 0;
+    [[= GeneratedValue(GenerationType::UUID) ]]
+    std::string id;
     
     std::string user_id;
     std::string title;

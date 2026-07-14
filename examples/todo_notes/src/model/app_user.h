@@ -10,6 +10,7 @@ using namespace novaboot::annotations;
 
 struct [[= Entity("users") ]] AppUser {
     [[= Id() ]]
+    [[= GeneratedValue(GenerationType::UUID) ]]
     std::string id;
     
     std::string username;

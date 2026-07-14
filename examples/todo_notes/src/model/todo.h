@@ -10,8 +10,8 @@ using namespace novaboot::annotations;
 
 struct [[= Entity("todos") ]] Todo {
     [[= Id() ]]
-    [[= GeneratedValue() ]]
-    int id = 0;
+    [[= GeneratedValue(GenerationType::UUID) ]]
+    std::string id;
     
     std::string user_id;
     std::string title;

@@ -1008,12 +1008,12 @@
                 item.innerHTML = `
                     <div class="todo-left">
                         <label class="checkbox-container">
-                            <input type="checkbox" ${t.completed ? 'checked' : ''} onchange="toggleTodoComplete(${t.id}, this.checked)">
+                            <input type="checkbox" ${t.completed ? 'checked' : ''} onchange="toggleTodoComplete('${t.id}', this.checked)">
                             <span class="checkmark"></span>
                         </label>
                         <span class="todo-text">${t.title}</span>
                     </div>
-                    <button class="btn-delete-item" onclick="handleDeleteTodo(${t.id})" title="Delete Task">🗑️</button>
+                    <button class="btn-delete-item" onclick="handleDeleteTodo('${t.id}')" title="Delete Task">🗑️</button>
                 `;
                 listContainer.appendChild(item);
             });

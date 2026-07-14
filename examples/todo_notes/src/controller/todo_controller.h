@@ -42,7 +42,7 @@ struct [[= RestController("/api/todos") ]] TodoController {
     }
 
     [[= GetMapping("/:id") ]]
-    ResponseEntity<Todo> get_todo(int id, RequestContext& ctx) {
+    ResponseEntity<Todo> get_todo(std::string id, RequestContext& ctx) {
         std::string uid = get_user_id(ctx);
         auto items = todo_service.get_todos(uid);
         for (const auto& item : items) {
@@ -61,14 +61,14 @@ struct [[= RestController("/api/todos") ]] TodoController {
     }
 
     [[= PutMapping("/:id") ]]
-    ResponseEntity<Todo> update_todo(int id, TodoRequest req, RequestContext& ctx) {
+    ResponseEntity<Todo> update_todo(std::string id, TodoRequest req, RequestContext& ctx) {
         std::string uid = get_user_id(ctx);
         auto saved = todo_service.update_todo(uid, id, req);
         return ResponseEntity<Todo>::ok(saved);
     }
 
     [[= DeleteMapping("/:id") ]]
-    ResponseEntity<void> delete_todo(int id, RequestContext& ctx) {
+    ResponseEntity<void> delete_todo(std::string id, RequestContext& ctx) {
         std::string uid = get_user_id(ctx);
         todo_service.delete_todo(uid, id);
         return ResponseEntity<void>::noContent();

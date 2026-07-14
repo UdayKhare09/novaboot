@@ -86,9 +86,16 @@ struct Id {
     consteval Id() = default;
 };
 
+enum class GenerationType {
+    AutoIncrement,
+    UUID
+};
+
 /// Mark field for auto-increment identity column
 struct GeneratedValue {
+    GenerationType strategy = GenerationType::AutoIncrement;
     consteval GeneratedValue() = default;
+    consteval GeneratedValue(GenerationType s) : strategy(s) {}
 };
 
 /// Field-level column customization
@@ -106,6 +113,11 @@ struct Column {
         }
         name[i] = '\0';
     }
+};
+
+/// Mark string field to store formatted JSON objects
+struct Json {
+    consteval Json() = default;
 };
 
 } // namespace novaboot::annotations

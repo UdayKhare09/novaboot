@@ -7,6 +7,8 @@
 #include "novaboot/annotations/stereotypes.h"
 #include "novaboot/di/container.h"
 #include "novaboot/db/db_client.h"
+#include "novaboot/db/uuid.h"
+#include <chrono>
 
 namespace novaboot::db::detail {
 
@@ -125,6 +127,10 @@ T map_row_to_entity(ResultSet* rs) {
                     entity.[:m:] = rs->get_bool(col_idx);
                 } else if constexpr (std::is_same_v<FieldType, std::vector<std::uint8_t>>) {
                     entity.[:m:] = rs->get_blob(col_idx);
+                } else if constexpr (std::is_same_v<FieldType, Uuid>) {
+                    entity.[:m:] = rs->get_uuid(col_idx);
+                } else if constexpr (std::is_same_v<FieldType, std::chrono::system_clock::time_point>) {
+                    entity.[:m:] = rs->get_time(col_idx);
                 }
             }
             col_idx++;

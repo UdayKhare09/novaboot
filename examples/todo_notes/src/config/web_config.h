@@ -13,7 +13,7 @@ using namespace novaboot::di;
 using namespace novaboot::annotations;
 using namespace novaboot::middleware;
 
-#include "novaboot/db/drivers/sqlite/sqlite_driver.h"
+#include "novaboot/db/drivers/postgres/postgres_driver.h"
 
 namespace todo_notes::config {
 
@@ -21,10 +21,15 @@ struct [[= Configuration() ]] WebConfig {
     [[= Value("jwt.secret") ]]
     std::string jwt_secret = "default-secret";
 
+    [[= Value("database.show-sql") ]]
+    bool show_sql = false;
+
     [[= Bean() ]]
     std::shared_ptr<novaboot::db::DataSource> datasource() {
-        return std::make_shared<novaboot::db::sqlite::SqliteDataSource>(
-            "todo_notes.db", 4 /* connection pool size */
+        novaboot::db::show_sql = show_sql;
+        std::string conn_info = "host=localhost dbname=postgres user=postgres password=postgres connect_timeout=5";
+        return std::make_shared<novaboot::db::postgres::PostgresDataSource>(
+            conn_info, 4 /* connection pool size */
         );
     }
 

@@ -23,7 +23,7 @@ struct [[= Service() ]] TodoService {
 
     Todo create_todo(const std::string& user_id, const TodoRequest& req) {
         Todo todo;
-        todo.id = 0;
+        todo.id = "";
         todo.user_id = user_id;
         todo.title = req.title;
         todo.description = req.description;
@@ -32,7 +32,7 @@ struct [[= Service() ]] TodoService {
         return todo_repo.save(todo);
     }
 
-    Todo update_todo(const std::string& user_id, int id, const TodoRequest& req) {
+    Todo update_todo(const std::string& user_id, const std::string& id, const TodoRequest& req) {
         auto existing = todo_repo.find_by_id(id);
         if (!existing || existing->user_id != user_id) {
             throw std::runtime_error("Todo not found or access denied");
@@ -45,7 +45,7 @@ struct [[= Service() ]] TodoService {
         return todo_repo.save(*existing);
     }
 
-    void delete_todo(const std::string& user_id, int id) {
+    void delete_todo(const std::string& user_id, const std::string& id) {
         auto existing = todo_repo.find_by_id(id);
         if (!existing || existing->user_id != user_id) {
             throw std::runtime_error("Todo not found or access denied");

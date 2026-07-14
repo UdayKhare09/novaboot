@@ -23,7 +23,7 @@ struct [[= Service() ]] NoteService {
 
     Note create_note(const std::string& user_id, const NoteRequest& req) {
         Note note;
-        note.id = 0;
+        note.id = "";
         note.user_id = user_id;
         note.title = req.title;
         note.content = req.content;
@@ -31,7 +31,7 @@ struct [[= Service() ]] NoteService {
         return note_repo.save(note);
     }
 
-    Note update_note(const std::string& user_id, int id, const NoteRequest& req) {
+    Note update_note(const std::string& user_id, const std::string& id, const NoteRequest& req) {
         auto existing = note_repo.find_by_id(id);
         if (!existing || existing->user_id != user_id) {
             throw std::runtime_error("Note not found or access denied");
@@ -43,7 +43,7 @@ struct [[= Service() ]] NoteService {
         return note_repo.save(*existing);
     }
 
-    void delete_note(const std::string& user_id, int id) {
+    void delete_note(const std::string& user_id, const std::string& id) {
         auto existing = note_repo.find_by_id(id);
         if (!existing || existing->user_id != user_id) {
             throw std::runtime_error("Note not found or access denied");

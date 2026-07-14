@@ -1,4 +1,6 @@
 #pragma once
+#include "novaboot/db/uuid.h"
+#include "novaboot/db/dialect.h"
 #include <string>
 #include <string_view>
 #include <vector>
@@ -6,6 +8,10 @@
 #include <memory>
 #include <optional>
 #include <cstdint>
+#include <chrono>
+#include <spdlog/spdlog.h>
+#include <sstream>
+#include <iomanip>
 
 namespace novaboot::db {
 
@@ -16,8 +22,77 @@ using Parameter = std::variant<
     double,
     std::string,
     std::vector<std::uint8_t>,
-    bool
+    bool,
+    Uuid,
+    std::chrono::system_clock::time_point
 >;
+
+inline bool show_sql = false;
+
+inline std::string format_parameter(const Parameter& param) {
+    return std::visit([](auto&& val) -> std::string {
+        using T = std::decay_t<decltype(val)>;
+        if constexpr (std::is_same_v<T, std::nullptr_t>) {
+            return "NULL";
+        } else if constexpr (std::is_same_v<T, std::int64_t>) {
+            return std::to_string(val);
+        } else if constexpr (std::is_same_v<T, double>) {
+            return std::to_string(val);
+        } else if constexpr (std::is_same_v<T, std::string>) {
+            return "'" + val + "'";
+        } else if constexpr (std::is_same_v<T, std::vector<std::uint8_t>>) {
+            return "<blob of " + std::to_string(val.size()) + " bytes>";
+        } else if constexpr (std::is_same_v<T, bool>) {
+            return val ? "true" : "false";
+        } else if constexpr (std::is_same_v<T, Uuid>) {
+            return "'" + val.to_string() + "'";
+        } else if constexpr (std::is_same_v<T, std::chrono::system_clock::time_point>) {
+            auto time = std::chrono::system_clock::to_time_t(val);
+            std::stringstream ss;
+            ss << std::put_time(std::gmtime(&time), "%Y-%m-%dT%H:%M:%SZ");
+            return "'" + ss.str() + "'";
+        }
+    }, param);
+}
+
+inline void log_query(std::string_view sql, const std::vector<Parameter>& params) {
+    if (!show_sql) return;
+    std::string sql_str(sql);
+    for (auto& c : sql_str) {
+        if (c == '\n' || c == '\r' || c == '\t') c = ' ';
+    }
+    std::string clean_sql;
+    bool last_was_space = false;
+    for (char c : sql_str) {
+        if (std::isspace(c)) {
+            if (!last_was_space) {
+                clean_sql += ' ';
+                last_was_space = true;
+            }
+        } else {
+            clean_sql += c;
+            last_was_space = false;
+        }
+    }
+    // Trim leading/trailing spaces
+    if (!clean_sql.empty() && clean_sql.front() == ' ') {
+        clean_sql.erase(clean_sql.begin());
+    }
+    if (!clean_sql.empty() && clean_sql.back() == ' ') {
+        clean_sql.pop_back();
+    }
+
+    if (params.empty()) {
+        spdlog::info("NovaBoot SQL: {}", clean_sql);
+    } else {
+        std::string params_str;
+        for (size_t i = 0; i < params.size(); ++i) {
+            if (i > 0) params_str += ", ";
+            params_str += format_parameter(params[i]);
+        }
+        spdlog::info("NovaBoot SQL: {} [Params: {}]", clean_sql, params_str);
+    }
+}
 
 /// Abstract Row Result Set
 class ResultSet {
@@ -36,6 +111,8 @@ public:
     virtual std::string get_string(int col_index) = 0;
     virtual std::vector<std::uint8_t> get_blob(int col_index) = 0;
     virtual bool get_bool(int col_index) = 0;
+    virtual Uuid get_uuid(int col_index) = 0;
+    virtual std::chrono::system_clock::time_point get_time(int col_index) = 0;
 
     /// Get metadata info
     virtual int column_count() const = 0;
@@ -69,6 +146,9 @@ public:
 
     /// Retrieve an active connection from the pool
     virtual std::shared_ptr<Connection> get_connection() = 0;
+
+    /// Get the database dialect
+    virtual std::shared_ptr<SqlDialect> dialect() = 0;
 
     /// Graceful shutdown
     virtual void close() = 0;

@@ -38,11 +38,17 @@ public:
         auto val = get(name);
         if (!val) return std::nullopt;
 
-        T result;
-        auto [ptr, ec] = std::from_chars(
-            val->data(), val->data() + val->size(), result);
-        if (ec != std::errc{}) return std::nullopt;
-        return result;
+        if constexpr (std::is_same_v<T, std::string>) {
+            return std::string(*val);
+        } else if constexpr (std::is_same_v<T, std::string_view>) {
+            return *val;
+        } else {
+            T result;
+            auto [ptr, ec] = std::from_chars(
+                val->data(), val->data() + val->size(), result);
+            if (ec != std::errc{}) return std::nullopt;
+            return result;
+        }
     }
 
     /// Check if a parameter exists
