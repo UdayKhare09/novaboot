@@ -11,6 +11,12 @@
 
 namespace novaboot::annotations {
 
+template<typename... T>
+void register_routes(router::Router& router);
+
+template<typename... T>
+void register_advice(router::Router& router);
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Consteval Reflection Helper Structures
 // ─────────────────────────────────────────────────────────────────────────────
@@ -164,6 +170,40 @@ void wire_lifecycle(Builder& builder) {
 // Scanner APIs
 // ─────────────────────────────────────────────────────────────────────────────
 
+template<typename PMF>
+struct bean_method_traits;
+
+#define REGISTER_BEAN_TRAITS(PMF_TYPE, B_TYPE, RET_TYPE, INVOKE_EXPR) \
+template<typename Class, typename T, typename... Args> \
+struct bean_method_traits<PMF_TYPE> { \
+    using class_type = Class; \
+    using bean_type = B_TYPE; \
+    using arg_types = di::TypeList<Args...>; \
+    static RET_TYPE invoke(Class& config, auto pmf, di::ContainerBase& c) { \
+        return INVOKE_EXPR; \
+    } \
+};
+
+// Raw Pointer T*
+REGISTER_BEAN_TRAITS(T* (Class::*)(Args...), T, T*, (config.*pmf)(c.resolve<std::remove_cvref_t<Args>>()...))
+REGISTER_BEAN_TRAITS(T* (Class::*)(Args...) const, T, T*, (config.*pmf)(c.resolve<std::remove_cvref_t<Args>>()...))
+REGISTER_BEAN_TRAITS(T* (Class::* const)(Args...), T, T*, (config.*pmf)(c.resolve<std::remove_cvref_t<Args>>()...))
+REGISTER_BEAN_TRAITS(T* (Class::* const)(Args...) const, T, T*, (config.*pmf)(c.resolve<std::remove_cvref_t<Args>>()...))
+
+// unique_ptr<T>
+REGISTER_BEAN_TRAITS(std::unique_ptr<T> (Class::*)(Args...), T, T*, (config.*pmf)(c.resolve<std::remove_cvref_t<Args>>()...).release())
+REGISTER_BEAN_TRAITS(std::unique_ptr<T> (Class::*)(Args...) const, T, T*, (config.*pmf)(c.resolve<std::remove_cvref_t<Args>>()...).release())
+REGISTER_BEAN_TRAITS(std::unique_ptr<T> (Class::* const)(Args...), T, T*, (config.*pmf)(c.resolve<std::remove_cvref_t<Args>>()...).release())
+REGISTER_BEAN_TRAITS(std::unique_ptr<T> (Class::* const)(Args...) const, T, T*, (config.*pmf)(c.resolve<std::remove_cvref_t<Args>>()...).release())
+
+// shared_ptr<T>
+REGISTER_BEAN_TRAITS(std::shared_ptr<T> (Class::*)(Args...), std::shared_ptr<T>, std::shared_ptr<T>*, new std::shared_ptr<T>((config.*pmf)(c.resolve<std::remove_cvref_t<Args>>()...)))
+REGISTER_BEAN_TRAITS(std::shared_ptr<T> (Class::*)(Args...) const, std::shared_ptr<T>, std::shared_ptr<T>*, new std::shared_ptr<T>((config.*pmf)(c.resolve<std::remove_cvref_t<Args>>()...)))
+REGISTER_BEAN_TRAITS(std::shared_ptr<T> (Class::* const)(Args...), std::shared_ptr<T>, std::shared_ptr<T>*, new std::shared_ptr<T>((config.*pmf)(c.resolve<std::remove_cvref_t<Args>>()...)))
+REGISTER_BEAN_TRAITS(std::shared_ptr<T> (Class::* const)(Args...) const, std::shared_ptr<T>, std::shared_ptr<T>*, new std::shared_ptr<T>((config.*pmf)(c.resolve<std::remove_cvref_t<Args>>()...)))
+
+#undef REGISTER_BEAN_TRAITS
+
 /// Scans each type in the pack and registers it to the DI container if stereotyped.
 template<typename... T>
 void register_beans(di::RootContainer& container) {
@@ -184,9 +224,53 @@ void register_beans(di::RootContainer& container) {
         } else if constexpr (has_annotation<RestController>(^^Type)) {
             auto builder = container.template autowire<Type>(di::Scope::Singleton);
             wire_lifecycle<Type>(builder);
+            container.add_route_registrar([](router::Router& r) {
+                novaboot::annotations::register_routes<Type>(r);
+            });
         } else if constexpr (has_annotation<ControllerAdvice>(^^Type)) {
             auto builder = container.template autowire<Type>(di::Scope::Singleton);
             wire_lifecycle<Type>(builder);
+            container.add_route_registrar([](router::Router& r) {
+                novaboot::annotations::register_advice<Type>(r);
+            });
+        } else if constexpr (has_annotation<Configuration>(^^Type)) {
+            auto builder = container.template autowire<Type>(di::Scope::Singleton);
+            wire_lifecycle<Type>(builder);
+
+            static constexpr auto members = get_members<Type>();
+            template for (constexpr auto m : members) {
+                constexpr bool has_id = std::meta::has_identifier(m);
+                if constexpr (has_id) {
+                    constexpr bool is_func = std::meta::is_function(m);
+                    constexpr bool is_ctor = std::meta::is_constructor(m);
+                    constexpr bool is_dtor = std::meta::is_destructor(m);
+                    if constexpr (is_func && !is_ctor && !is_dtor) {
+                        if constexpr (has_annotation<Bean>(m)) {
+                            constexpr auto pmf = get_member_ptr<m>();
+                            constexpr auto scope = get_annotation<Bean>(m).scope;
+
+                            using Traits = bean_method_traits<decltype(pmf)>;
+                            using BType = typename Traits::bean_type;
+                            using ArgsList = typename Traits::arg_types;
+
+                            container.register_bean<BType>(
+                                [pmf](di::ContainerBase& c) -> BType* {
+                                    auto& config = c.resolve<Type>();
+                                    return Traits::invoke(config, pmf, c);
+                                },
+                                scope
+                            );
+
+                            container.add_dependency(std::type_index(typeid(BType)), std::type_index(typeid(Type)));
+
+                            auto b_builder = di::BeanBuilder<BType>(container, std::type_index(typeid(BType)));
+                            wire_lifecycle<BType>(b_builder);
+
+                            ArgsList::template add_dependencies<BType>(container);
+                        }
+                    }
+                }
+            }
         }
     }(), ...);
 }

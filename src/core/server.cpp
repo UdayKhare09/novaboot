@@ -121,6 +121,7 @@ std::unique_ptr<Server> Server::Builder::build() {
     // Add middleware (inject DIMiddleware first if DI container is registered)
     if (di_root_) {
         server->pipeline_.add(std::make_shared<DIMiddleware>(*di_root_));
+        di_root_->register_routes_and_advice(server->router());
     }
     for (auto& mw : middlewares_) {
         server->pipeline_.add(std::move(mw));

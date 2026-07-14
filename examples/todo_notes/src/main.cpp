@@ -14,6 +14,7 @@
 #include "controller/todo_controller.h"
 #include "controller/note_controller.h"
 #include "controller/global_exception_handler.h"
+#include "config/web_config.h"
 
 #include <spdlog/spdlog.h>
 #include <thread>
@@ -45,12 +46,13 @@ int main() {
 
 
 
-    // Automatically scan and register repositories, services, and controllers
+    // Automatically scan and register repositories, services, controllers, and configurations
     novaboot::annotations::register_beans<
         AppUserRepository, TodoRepository, NoteRepository,
         AuthService, TodoService, NoteService,
         AuthController, TodoController, NoteController,
-        GlobalExceptionHandler
+        GlobalExceptionHandler,
+        todo_notes::config::WebConfig
     >(di_root);
 
     // Build DI Container
@@ -58,29 +60,11 @@ int main() {
 
 
 
-    // 3. Middleware setup
-    auto cors = std::make_shared<CorsMiddleware>(
-        CorsMiddleware::Config{
-            .allowed_origins   = {"*"},
-            .allowed_methods   = {"GET","POST","PUT","DELETE","PATCH","OPTIONS"},
-            .allowed_headers   = {"Content-Type","Authorization"},
-            .allow_credentials = false,
-            .max_age_seconds   = 86400,
-        });
-
-    auto security_headers = std::make_shared<SecurityHeadersMiddleware>();
-
-    auto jwt = std::make_shared<JwtMiddleware>(
-        JwtMiddleware::Config{
-            .allowed_algorithms = { JwtMiddleware::Algorithm::HS256 },
-            .hmac_secret = "sample-secret",
-            .allowlist_paths = {"/", "/index.html", "/public/*"},
-            .required_issuer = "novaboot-sample",
-            .required_audiences = {"sample-api"},
-            .required_scopes = {"read"},
-        });
-
-    auto logger = std::make_shared<RequestLoggingMiddleware>();
+    // 3. Middleware setup (resolved from DI container)
+    auto cors = di_root.resolve<std::shared_ptr<CorsMiddleware>>();
+    auto security_headers = di_root.resolve<std::shared_ptr<SecurityHeadersMiddleware>>();
+    auto jwt = di_root.resolve<std::shared_ptr<JwtMiddleware>>();
+    auto logger = di_root.resolve<std::shared_ptr<RequestLoggingMiddleware>>();
 
     // 4. Server setup
     int worker_count = static_cast<int>(cfg.server().workers);
@@ -99,10 +83,6 @@ int main() {
         .middleware(jwt)
         .middleware(logger)
         .build();
-
-    // 5. Routing Mapping
-    novaboot::annotations::register_routes<AuthController, TodoController, NoteController>(app->router());
-    novaboot::annotations::register_advice<GlobalExceptionHandler>(app->router());
 
     // 7. Run the Server
     app->run();

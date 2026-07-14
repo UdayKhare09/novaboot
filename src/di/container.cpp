@@ -1,4 +1,5 @@
 #include "novaboot/di/container.h"
+#include "novaboot/router/router.h"
 
 #include <algorithm>
 #include <cassert>
@@ -319,6 +320,12 @@ ConnectionContainer::~ConnectionContainer() {
     lifecycle_.invoke_pre_destroys();
     for (auto it = owned_instances_.rbegin(); it != owned_instances_.rend(); ++it)
         if (it->second && it->first) it->second(it->first);
+}
+
+void RootContainer::register_routes_and_advice(router::Router& router) {
+    for (auto& registrar : route_registrars_) {
+        registrar(router);
+    }
 }
 
 } // namespace novaboot::di

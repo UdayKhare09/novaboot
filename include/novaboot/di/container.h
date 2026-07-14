@@ -36,6 +36,7 @@
 #include <vector>
 
 namespace novaboot::memory { class ArenaAllocator; }  // forward decl
+namespace novaboot::router { class Router; }
 
 namespace novaboot::di {
 
@@ -236,8 +237,16 @@ class BindBuilder;
 
 class RootContainer : public ContainerBase {
 public:
+    using RouteRegistrar = std::function<void(router::Router&)>;
+
     RootContainer() = default;
     ~RootContainer() override;
+
+    void add_route_registrar(RouteRegistrar registrar) {
+        route_registrars_.push_back(std::move(registrar));
+    }
+
+    void register_routes_and_advice(router::Router& router);
 
     // Non-copyable, non-movable after build()
     RootContainer(const RootContainer&) = delete;
@@ -420,6 +429,8 @@ private:
 
     /// Storage for owned bean instances (for destruction)
     std::vector<std::pair<void*, std::function<void(void*)>>> owned_instances_;
+
+    std::vector<RouteRegistrar> route_registrars_;
 };
 
 template<typename... Args>
@@ -551,6 +562,23 @@ BeanBuilder<T> RootContainer::autowire(Scope scope) {
     }, scope);
 
     ExtractedTypeList::template add_dependencies<T>(*this);
+
+    // Auto-detect @Value dependencies and register AppConfig as a dependency
+    static constexpr auto members = detail::get_members<T>();
+    constexpr bool has_value = []() {
+        bool found = false;
+        template for (constexpr auto m : members) {
+            if constexpr (std::meta::is_nonstatic_data_member(m)) {
+                if constexpr (detail::has_annotation<Value>(m)) {
+                    found = true;
+                }
+            }
+        }
+        return found;
+    }();
+    if constexpr (has_value) {
+        this->add_dependency(std::type_index(typeid(T)), std::type_index(typeid(config::AppConfig)));
+    }
 
     return BeanBuilder<T>(*this, std::type_index(typeid(T)));
 }

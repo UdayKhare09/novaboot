@@ -48,4 +48,16 @@ struct ExceptionHandler {
     consteval ExceptionHandler() = default;
 };
 
+/// Mark a class/struct as a configuration class containing factory methods.
+struct Configuration {
+    consteval Configuration() = default;
+};
+
+/// Mark a configuration class method as a bean factory method.
+struct Bean {
+    di::Scope scope = di::Scope::Singleton;
+    consteval Bean() = default;
+    consteval explicit Bean(di::Scope s) : scope(s) {}
+};
+
 } // namespace novaboot::annotations
