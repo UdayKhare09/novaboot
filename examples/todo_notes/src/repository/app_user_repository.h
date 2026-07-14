@@ -1,41 +1,50 @@
 #pragma once
 
-#include "novaboot/data/pgsql/pgsql_repository_base.h"
 #include "model/app_user.h"
-#include <odb/query.hxx>
-#include "app_user-odb.hxx"
+#include <vector>
 #include <optional>
+#include <mutex>
+#include <algorithm>
 
-using namespace novaboot;
-using namespace novaboot::data;
 using todo_notes::model::AppUser;
 
-struct AppUserRepository : public PgsqlRepositoryBase<AppUser, std::string> {
+struct AppUserRepository {
+private:
+    std::vector<AppUser> users_;
+    std::mutex mutex_;
+
 public:
-    explicit AppUserRepository(PgsqlDataSource& ds)
-        : PgsqlRepositoryBase<AppUser, std::string>(ds) {}
+    AppUserRepository() = default;
 
     std::optional<AppUser> find_by_username(const std::string& username) {
-        return ds_.transact([&](auto& db) -> std::optional<AppUser> {
-            typedef odb::query<AppUser> query;
-            auto result = db.template query<AppUser>(query::username == username);
-            auto it = result.begin();
-            if (it != result.end()) {
-                return *it;
-            }
-            return std::nullopt;
-        });
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = std::find_if(users_.begin(), users_.end(), [&](const AppUser& u) { return u.username == username; });
+        if (it != users_.end()) return *it;
+        return std::nullopt;
     }
 
     std::optional<AppUser> find_by_email(const std::string& email) {
-        return ds_.transact([&](auto& db) -> std::optional<AppUser> {
-            typedef odb::query<AppUser> query;
-            auto result = db.template query<AppUser>(query::email == email);
-            auto it = result.begin();
-            if (it != result.end()) {
-                return *it;
-            }
-            return std::nullopt;
-        });
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = std::find_if(users_.begin(), users_.end(), [&](const AppUser& u) { return u.email == email; });
+        if (it != users_.end()) return *it;
+        return std::nullopt;
+    }
+
+    std::optional<AppUser> find_by_id(const std::string& id) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = std::find_if(users_.begin(), users_.end(), [&](const AppUser& u) { return u.id == id; });
+        if (it != users_.end()) return *it;
+        return std::nullopt;
+    }
+
+    AppUser save(const AppUser& user) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = std::find_if(users_.begin(), users_.end(), [&](const AppUser& u) { return u.id == user.id; });
+        if (it != users_.end()) {
+            *it = user;
+        } else {
+            users_.push_back(user);
+        }
+        return user;
     }
 };

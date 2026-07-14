@@ -1,29 +1,63 @@
 #pragma once
 
-#include "novaboot/data/pgsql/pgsql_repository_base.h"
 #include "model/note.h"
-#include <odb/query.hxx>
-#include "note-odb.hxx"
 #include <vector>
+#include <optional>
+#include <mutex>
+#include <algorithm>
 
-using namespace novaboot;
-using namespace novaboot::data;
 using todo_notes::model::Note;
 
-struct NoteRepository : public PgsqlRepositoryBase<Note, int> {
+struct NoteRepository {
+private:
+    std::vector<Note> notes_;
+    std::mutex mutex_;
+    int next_id_ = 1;
+
 public:
-    explicit NoteRepository(PgsqlDataSource& ds)
-        : PgsqlRepositoryBase<Note, int>(ds) {}
+    NoteRepository() = default;
 
     std::vector<Note> find_by_user_id(const std::string& user_id) {
-        return ds_.transact([&](auto& db) {
-            std::vector<Note> result;
-            typedef odb::query<Note> query;
-            auto r = db.template query<Note>(query::user_id == user_id);
-            for (auto& item : r) {
-                result.push_back(item);
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::vector<Note> result;
+        for (const auto& n : notes_) {
+            if (n.user_id == user_id) {
+                result.push_back(n);
             }
-            return result;
-        });
+        }
+        return result;
+    }
+
+    std::optional<Note> find_by_id(int id) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = std::find_if(notes_.begin(), notes_.end(), [id](const Note& n) { return n.id == id; });
+        if (it != notes_.end()) return *it;
+        return std::nullopt;
+    }
+
+    Note save(Note note) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (note.id == 0) {
+            note.id = next_id_++;
+            notes_.push_back(note);
+            return note;
+        } else {
+            auto it = std::find_if(notes_.begin(), notes_.end(), [id = note.id](const Note& n) { return n.id == id; });
+            if (it != notes_.end()) {
+                *it = note;
+                return note;
+            } else {
+                notes_.push_back(note);
+                return note;
+            }
+        }
+    }
+
+    void delete_by_id(int id) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        notes_.erase(
+            std::remove_if(notes_.begin(), notes_.end(), [id](const Note& n) { return n.id == id; }),
+            notes_.end()
+        );
     }
 };

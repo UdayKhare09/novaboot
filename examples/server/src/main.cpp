@@ -27,7 +27,6 @@
 
 using namespace novaboot;
 using namespace novaboot::di;
-using namespace novaboot::data;
 using namespace novaboot::config;
 using namespace novaboot::middleware;
 using examples::model::User;
@@ -49,26 +48,13 @@ int main() {
         return new AppConfig(cfg);
     });
 
-    // Explicitly register all components and database sources in the container
-    di_root.singleton<PgsqlDataSource>([](ContainerBase& c) {
-        return new PgsqlDataSource(c.resolve<AppConfig>().postgres());
-    }).depends_on<AppConfig>();
-    
-    di_root.singleton<RedisDataSource>([](ContainerBase& c) {
-        return new RedisDataSource(c.resolve<AppConfig>().redis());
-    }).depends_on<AppConfig>();
-
     di_root.request<RequestLogger>([](ContainerBase&) {
         return new RequestLogger();
     });
 
-    di_root.autowire<UserSqlRepository>();
-    di_root.bind<CrudRepository<User, int>>().to<UserSqlRepository>();
-
-    di_root.autowire<UserCacheRepository>();
-    di_root.bind<CacheRepository<User, int>>().to<UserCacheRepository>();
-
-    di_root.autowire<UserRepository>();
+    di_root.singleton<UserRepository>([](ContainerBase&) {
+        return new UserRepository();
+    });
 
     di_root.autowire<UserService>()
         .on_start(&UserService::init)

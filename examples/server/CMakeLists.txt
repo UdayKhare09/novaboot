@@ -18,5 +18,4 @@ target_link_libraries(sample_app
         spdlog::spdlog
 )
 
-# Generate ODB database mapping for User entity
-odb_generate(sample_app ${CMAKE_CURRENT_SOURCE_DIR}/src/model/user.h)
+

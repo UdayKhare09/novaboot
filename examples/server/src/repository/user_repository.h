@@ -1,38 +1,63 @@
 #pragma once
 
-#include "novaboot/data/caching_crud_repository.h"
-#include "novaboot/data/pgsql/pgsql_repository_base.h"
-#include "novaboot/data/redis/redis_repository_base.h"
 #include "model/user.h"
-#include "user-odb.hxx"
-#include <chrono>
+#include <vector>
+#include <optional>
+#include <mutex>
+#include <algorithm>
 
-using namespace novaboot;
-using namespace novaboot::data;
 using examples::model::User;
 
-/// Concrete Postgres DB repository for User, registered as a component.
-struct UserSqlRepository
-    : public PgsqlRepositoryBase<User, int> {
-public:
-    explicit UserSqlRepository(PgsqlDataSource& ds)
-        : PgsqlRepositoryBase<User, int>(ds) {}
-};
+struct UserRepository {
+private:
+    std::vector<User> users_;
+    std::mutex mutex_;
+    int next_id_ = 1;
 
-/// Concrete Redis Cache repository for User, registered as a component.
-struct UserCacheRepository
-    : public RedisRepositoryBase<User, int> {
 public:
-    explicit UserCacheRepository(RedisDataSource& ds)
-        : RedisRepositoryBase<User, int>(ds, "User", std::chrono::seconds(60)) {}
-};
+    UserRepository() {
+        users_.push_back(User{ .id = 1, .name = "Alice", .email = "alice@example.com", .role = "ROLE_ADMIN" });
+        users_.push_back(User{ .id = 2, .name = "Bob", .email = "bob@example.com", .role = "ROLE_USER" });
+        next_id_ = 3;
+    }
 
-/// Real database and Redis cache backed repository handling User entities via abstract interfaces.
-struct UserRepository
-    : public CachingCrudRepository<User, int> {
-public:
-    explicit UserRepository(CrudRepository<User, int>& sql_repo,
-                            CacheRepository<User, int>& cache_repo)
-        : CachingCrudRepository<User, int>(sql_repo, cache_repo, std::chrono::seconds(60)) {}
-};
+    std::optional<User> find_by_id(int id) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = std::find_if(users_.begin(), users_.end(), [id](const User& u) { return u.id == id; });
+        if (it != users_.end()) {
+            return *it;
+        }
+        return std::nullopt;
+    }
 
+    std::vector<User> find_all() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return users_;
+    }
+
+    User save(User u) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (u.id == 0) {
+            u.id = next_id_++;
+            users_.push_back(u);
+            return u;
+        } else {
+            auto it = std::find_if(users_.begin(), users_.end(), [id = u.id](const User& existing) { return existing.id == id; });
+            if (it != users_.end()) {
+                *it = u;
+                return u;
+            } else {
+                users_.push_back(u);
+                return u;
+            }
+        }
+    }
+
+    void delete_by_id(int id) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        users_.erase(
+            std::remove_if(users_.begin(), users_.end(), [id](const User& u) { return u.id == id; }),
+            users_.end()
+        );
+    }
+};

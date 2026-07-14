@@ -1,29 +1,63 @@
 #pragma once
 
-#include "novaboot/data/pgsql/pgsql_repository_base.h"
 #include "model/todo.h"
-#include <odb/query.hxx>
-#include "todo-odb.hxx"
 #include <vector>
+#include <optional>
+#include <mutex>
+#include <algorithm>
 
-using namespace novaboot;
-using namespace novaboot::data;
 using todo_notes::model::Todo;
 
-struct TodoRepository : public PgsqlRepositoryBase<Todo, int> {
+struct TodoRepository {
+private:
+    std::vector<Todo> todos_;
+    std::mutex mutex_;
+    int next_id_ = 1;
+
 public:
-    explicit TodoRepository(PgsqlDataSource& ds)
-        : PgsqlRepositoryBase<Todo, int>(ds) {}
+    TodoRepository() = default;
 
     std::vector<Todo> find_by_user_id(const std::string& user_id) {
-        return ds_.transact([&](auto& db) {
-            std::vector<Todo> result;
-            typedef odb::query<Todo> query;
-            auto r = db.template query<Todo>(query::user_id == user_id);
-            for (auto& item : r) {
-                result.push_back(item);
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::vector<Todo> result;
+        for (const auto& t : todos_) {
+            if (t.user_id == user_id) {
+                result.push_back(t);
             }
-            return result;
-        });
+        }
+        return result;
+    }
+
+    std::optional<Todo> find_by_id(int id) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = std::find_if(todos_.begin(), todos_.end(), [id](const Todo& t) { return t.id == id; });
+        if (it != todos_.end()) return *it;
+        return std::nullopt;
+    }
+
+    Todo save(Todo todo) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (todo.id == 0) {
+            todo.id = next_id_++;
+            todos_.push_back(todo);
+            return todo;
+        } else {
+            auto it = std::find_if(todos_.begin(), todos_.end(), [id = todo.id](const Todo& t) { return t.id == id; });
+            if (it != todos_.end()) {
+                *it = todo;
+                return todo;
+            } else {
+                todos_.push_back(todo);
+                return todo;
+            }
+        }
+    }
+
+    void delete_by_id(int id) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        todos_.erase(
+            std::remove_if(todos_.begin(), todos_.end(), [id](const Todo& t) { return t.id == id; }),
+            todos_.end()
+        );
     }
 };

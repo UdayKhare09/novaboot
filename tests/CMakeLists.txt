@@ -43,13 +43,4 @@ novaboot_test(test_query_validation unit/test_query_validation.cpp)
 novaboot_test(test_app_config unit/test_app_config.cpp)
 novaboot_test(test_client_protocols unit/test_client_protocols.cpp)
 
-# ─── Data Source unit tests ───────────────────────────────────────────────────
-novaboot_test(test_pgsql_data_source unit/test_pgsql_data_source.cpp)
-novaboot_test(test_redis_data_source unit/test_redis_data_source.cpp)
 
-# ─── Data Repository unit tests ───────────────────────────────────────────────
-novaboot_test(test_pgsql_repository unit/test_pgsql_repository.cpp)
-odb_generate(test_pgsql_repository ${CMAKE_CURRENT_SOURCE_DIR}/unit/db_user.h)
-
-novaboot_test(test_redis_repository unit/test_redis_repository.cpp)
-novaboot_test(test_caching_crud unit/test_caching_crud.cpp)

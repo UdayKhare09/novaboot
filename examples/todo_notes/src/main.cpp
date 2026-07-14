@@ -26,7 +26,6 @@
 
 using namespace novaboot;
 using namespace novaboot::di;
-using namespace novaboot::data;
 using namespace novaboot::config;
 using namespace novaboot::middleware;
 
@@ -49,15 +48,18 @@ int main() {
         return new AppConfig(cfg);
     });
 
-    // Register data sources
-    di_root.singleton<PgsqlDataSource>([](ContainerBase& c) {
-        return new PgsqlDataSource(c.resolve<AppConfig>().postgres());
-    }).depends_on<AppConfig>();
+
 
     // Repositories
-    di_root.autowire<AppUserRepository>();
-    di_root.autowire<TodoRepository>();
-    di_root.autowire<NoteRepository>();
+    di_root.singleton<AppUserRepository>([](ContainerBase&) {
+        return new AppUserRepository();
+    });
+    di_root.singleton<TodoRepository>([](ContainerBase&) {
+        return new TodoRepository();
+    });
+    di_root.singleton<NoteRepository>([](ContainerBase&) {
+        return new NoteRepository();
+    });
 
     // Services
     di_root.autowire<AuthService>();
@@ -72,44 +74,7 @@ int main() {
     // Build DI Container
     di_root.build();
 
-    // 2. Programmatically initialize tables in PostgreSQL
-    {
-        auto& ds = di_root.resolve<PgsqlDataSource>();
-        try {
-            ds.transact([](auto& db) {
-                // Clean up any legacy integer-based schemas so they are recreated as UUID strings
-                db.execute("DROP TABLE IF EXISTS todos;");
-                db.execute("DROP TABLE IF EXISTS notes;");
-                db.execute("DROP TABLE IF EXISTS app_users;");
 
-                db.execute("CREATE TABLE IF NOT EXISTS app_users ("
-                           "id TEXT PRIMARY KEY, "
-                           "username TEXT NOT NULL UNIQUE, "
-                           "password_hash TEXT NOT NULL, "
-                           "email TEXT NOT NULL"
-                           ");");
-
-                db.execute("CREATE TABLE IF NOT EXISTS todos ("
-                           "id SERIAL PRIMARY KEY, "
-                           "user_id TEXT NOT NULL, "
-                           "title TEXT NOT NULL, "
-                           "description TEXT, "
-                           "completed BOOLEAN NOT NULL DEFAULT FALSE"
-                           ");");
-
-                db.execute("CREATE TABLE IF NOT EXISTS notes ("
-                           "id SERIAL PRIMARY KEY, "
-                           "user_id TEXT NOT NULL, "
-                           "title TEXT NOT NULL, "
-                           "content TEXT"
-                           ");");
-            });
-            spdlog::info("Database schema checks completed (tables initialized if not exist).");
-        } catch (const std::exception& e) {
-            spdlog::error("Failed to check/initialize database schema: {}", e.what());
-            return 1;
-        }
-    }
 
     // 3. Middleware setup
     auto cors = std::make_shared<CorsMiddleware>(
