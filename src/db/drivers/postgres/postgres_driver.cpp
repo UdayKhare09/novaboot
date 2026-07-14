@@ -170,7 +170,7 @@ std::vector<std::string> PostgresConnection::serialize_params(const std::vector<
     return serialized;
 }
 
-void PostgresConnection::execute(std::string_view sql, const std::vector<Parameter>& params) {
+std::int64_t PostgresConnection::execute(std::string_view sql, const std::vector<Parameter>& params) {
     log_query(sql, params);
     std::string converted_sql = convert_placeholders(sql);
     std::vector<std::string> str_params = serialize_params(params);
@@ -201,11 +201,24 @@ void PostgresConnection::execute(std::string_view sql, const std::vector<Paramet
     }
 
     ExecStatusType status = PQresultStatus(res);
+    std::int64_t affected = 0;
+    if (status == PGRES_COMMAND_OK || status == PGRES_TUPLES_OK) {
+        char* tuples = PQcmdTuples(res);
+        if (tuples && *tuples) {
+            try {
+                affected = std::stoll(tuples);
+            } catch (...) {
+                affected = 0;
+            }
+        }
+    }
+
     PQclear(res);
 
     if (status != PGRES_COMMAND_OK && status != PGRES_TUPLES_OK) {
         throw std::runtime_error(std::format("Postgres execution failed: {}", PQerrorMessage(conn_)));
     }
+    return affected;
 }
 
 std::unique_ptr<ResultSet> PostgresConnection::query(std::string_view sql, const std::vector<Parameter>& params) {

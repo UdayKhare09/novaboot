@@ -28,6 +28,8 @@ struct [[= Service() ]] TodoService {
         todo.title = req.title;
         todo.description = req.description;
         todo.completed = req.completed;
+        todo.priority = req.priority;
+        todo.temp_note = "Transient note created";
 
         return todo_repo.save(todo);
     }
@@ -41,6 +43,8 @@ struct [[= Service() ]] TodoService {
         existing->title = req.title;
         existing->description = req.description;
         existing->completed = req.completed;
+        existing->priority = req.priority;
+        existing->temp_note = "Transient note updated";
 
         return todo_repo.save(*existing);
     }

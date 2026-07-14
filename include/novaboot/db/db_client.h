@@ -124,8 +124,8 @@ class Connection {
 public:
     virtual ~Connection() = default;
 
-    /// Execute write queries (INSERT, UPDATE, DELETE, CREATE TABLE)
-    virtual void execute(std::string_view sql, const std::vector<Parameter>& params = {}) = 0;
+    /// Execute write queries (INSERT, UPDATE, DELETE, CREATE TABLE) returning affected rows count
+    virtual std::int64_t execute(std::string_view sql, const std::vector<Parameter>& params = {}) = 0;
 
     /// Execute read queries (SELECT) returning a ResultSet
     virtual std::unique_ptr<ResultSet> query(std::string_view sql, const std::vector<Parameter>& params = {}) = 0;

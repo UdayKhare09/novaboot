@@ -37,10 +37,13 @@ struct LoginResponse {
     std::string token;
 };
 
+#include "model/todo.h"
+
 struct TodoRequest {
     std::string title;
     std::string description;
     bool completed = false;
+    TodoPriority priority = TodoPriority::Medium;
 
     inline static const Schema<TodoRequest> validator =
         Schema<TodoRequest>()

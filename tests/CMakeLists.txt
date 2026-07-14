@@ -46,6 +46,9 @@ target_link_libraries(test_postgres_crud PRIVATE novaboot::postgres)
 novaboot_test(test_portable_types     unit/test_portable_types.cpp)
 target_link_libraries(test_portable_types PRIVATE novaboot::sqlite novaboot::postgres)
 
+novaboot_test(test_jpa_annotations    unit/test_jpa_annotations.cpp)
+target_link_libraries(test_jpa_annotations PRIVATE novaboot::sqlite)
+
 # ─── Integration tests ────────────────────────────────────────────────────────
 novaboot_test(test_server_basic integration/test_server_basic.cpp)
 novaboot_test(test_exception_handler unit/test_exception_handler.cpp)

@@ -30,6 +30,23 @@ consteval auto get_members() {
     }
     return result;
 }
+template<typename Enum>
+consteval auto get_enumerator_list() {
+    struct ArrayWrapper {
+        std::meta::info data[64] = {};
+        std::size_t     size = 0;
+
+        consteval const std::meta::info* begin() const noexcept { return data; }
+        consteval const std::meta::info* end() const noexcept { return data + size; }
+    };
+    ArrayWrapper result;
+    for (auto e : std::meta::enumerators_of(^^Enum)) {
+        if (result.size < 64) {
+            result.data[result.size++] = e;
+        }
+    }
+    return result;
+}
 #endif
 } // namespace detail
 
@@ -58,6 +75,21 @@ std::string serialize(const T& obj) {
         return obj ? "true" : "false";
     } else if constexpr (std::is_arithmetic_v<T>) {
         return std::to_string(obj);
+    } else if constexpr (std::is_enum_v<T>) {
+        std::string enum_str = "\"";
+        static constexpr auto enums = detail::get_enumerator_list<T>();
+        bool matched = false;
+        template for (constexpr auto e : enums) {
+            if ([:e:] == obj) {
+                enum_str += std::meta::identifier_of(e);
+                matched = true;
+            }
+        }
+        if (!matched) {
+            enum_str += std::to_string(static_cast<std::int64_t>(obj));
+        }
+        enum_str += "\"";
+        return enum_str;
     } else if constexpr (is_vector<T>::value) {
         std::string out = "[";
         bool first = true;
@@ -117,6 +149,21 @@ void deserialize_elem(simdjson::dom::element elem, T& obj) {
         double val;
         if (elem.get(val) == simdjson::SUCCESS) {
             obj = static_cast<T>(val);
+        }
+    } else if constexpr (std::is_enum_v<T>) {
+        std::string_view sv;
+        if (elem.get(sv) == simdjson::SUCCESS) {
+            static constexpr auto enums = detail::get_enumerator_list<T>();
+            template for (constexpr auto e : enums) {
+                if (std::meta::identifier_of(e) == sv) {
+                    obj = [:e:];
+                }
+            }
+        } else {
+            int64_t val;
+            if (elem.get(val) == simdjson::SUCCESS) {
+                obj = static_cast<T>(val);
+            }
         }
     } else if constexpr (is_vector<T>::value) {
         simdjson::dom::array arr;

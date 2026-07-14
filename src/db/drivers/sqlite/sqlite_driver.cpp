@@ -124,7 +124,7 @@ void SqliteConnection::bind_params(sqlite3_stmt* stmt, const std::vector<Paramet
     }
 }
 
-void SqliteConnection::execute(std::string_view sql, const std::vector<Parameter>& params) {
+std::int64_t SqliteConnection::execute(std::string_view sql, const std::vector<Parameter>& params) {
     log_query(sql, params);
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(db_, sql.data(), -1, &stmt, nullptr);
@@ -140,6 +140,7 @@ void SqliteConnection::execute(std::string_view sql, const std::vector<Parameter
     if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
         throw std::runtime_error(std::format("SQL execute failed: {}", sqlite3_errmsg(db_)));
     }
+    return sqlite3_changes(db_);
 }
 
 std::unique_ptr<ResultSet> SqliteConnection::query(std::string_view sql, const std::vector<Parameter>& params) {

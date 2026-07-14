@@ -46,7 +46,7 @@ public:
     explicit PostgresConnection(PGconn* conn, bool own_conn = false);
     ~PostgresConnection() override;
 
-    void execute(std::string_view sql, const std::vector<Parameter>& params = {}) override;
+    std::int64_t execute(std::string_view sql, const std::vector<Parameter>& params = {}) override;
     std::unique_ptr<ResultSet> query(std::string_view sql, const std::vector<Parameter>& params = {}) override;
     
     std::int64_t last_insert_id() override;

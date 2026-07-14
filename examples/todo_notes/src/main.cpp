@@ -73,13 +73,16 @@ int main() {
             );
         )");
         
+        conn->execute("DROP TABLE IF EXISTS todos;");
         conn->execute(R"(
             CREATE TABLE IF NOT EXISTS todos (
                 id TEXT PRIMARY KEY,
                 user_id TEXT NOT NULL,
                 title TEXT NOT NULL,
                 description TEXT,
-                completed BOOLEAN NOT NULL
+                completed BOOLEAN NOT NULL,
+                version INTEGER,
+                priority TEXT
             );
         )");
         

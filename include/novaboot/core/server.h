@@ -79,6 +79,19 @@ std::optional<T> parse_value(std::string_view val) {
         if (val == "true" || val == "1") return true;
         if (val == "false" || val == "0") return false;
         return std::nullopt;
+    } else if constexpr (std::is_enum_v<CleanT>) {
+        static constexpr auto enums = json::detail::get_enumerator_list<CleanT>();
+        template for (constexpr auto e : enums) {
+            if (std::meta::identifier_of(e) == val) {
+                return [:e:];
+            }
+        }
+        std::int64_t int_val = 0;
+        auto [ptr, ec] = std::from_chars(val.data(), val.data() + val.size(), int_val);
+        if (ec == std::errc{}) {
+            return static_cast<CleanT>(int_val);
+        }
+        return std::nullopt;
     } else {
         CleanT result{};
         auto [ptr, ec] = std::from_chars(val.data(), val.data() + val.size(), result);

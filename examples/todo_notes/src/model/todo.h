@@ -8,6 +8,8 @@ namespace todo_notes::model {
 using novaboot::validation::Schema;
 using namespace novaboot::annotations;
 
+enum class TodoPriority { Low, Medium, High };
+
 struct [[= Entity("todos") ]] Todo {
     [[= Id() ]]
     [[= GeneratedValue(GenerationType::UUID) ]]
@@ -17,6 +19,15 @@ struct [[= Entity("todos") ]] Todo {
     std::string title;
     std::string description;
     bool completed = false;
+
+    [[= Version() ]]
+    int version = 0;
+
+    [[= Enumerated(EnumType::String) ]]
+    TodoPriority priority = TodoPriority::Medium;
+
+    [[= Transient() ]]
+    std::string temp_note;
 
     inline static const Schema<Todo> validator =
         Schema<Todo>()
