@@ -37,6 +37,17 @@
 
 namespace novaboot::memory { class ArenaAllocator; }  // forward decl
 namespace novaboot::router { class Router; }
+namespace novaboot::middleware { class Middleware; }
+#include "novaboot/annotations/stereotypes.h"
+
+#ifdef __cpp_impl_reflection
+namespace novaboot::di::detail {
+    template<typename Ann>
+    consteval bool has_annotation(std::meta::info target);
+    template<typename Ann>
+    consteval Ann get_annotation(std::meta::info target);
+}
+#endif
 
 namespace novaboot::di {
 
@@ -103,6 +114,12 @@ struct BeanRegistration {
 
     /// Dependency type_ids (for cycle detection at build time)
     std::vector<std::type_index> dep_type_ids;
+
+    /// Middleware sorting order
+    int middleware_order = 0;
+
+    /// Function to wrap the resolved instance as std::shared_ptr<Middleware>
+    std::function<std::shared_ptr<novaboot::middleware::Middleware>(void*)> get_middleware_fn;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -174,6 +191,15 @@ public:
     }
 
     ContainerBase* parent() noexcept { return parent_; }
+
+    /// Resolve a bean dynamically by type index at runtime.
+    /// Returns nullptr if the bean is not found.
+    void* resolve(std::type_index tid) {
+        auto it = instances_.find(tid);
+        if (it != instances_.end()) return it->second;
+        if (parent_) return parent_->resolve(tid);
+        return nullptr;
+    }
 
 protected:
     ContainerBase() = default;
@@ -266,7 +292,8 @@ public:
             Scope                               scope     = Scope::Singleton,
             const char*                         qualifier = "",
             bool                                is_primary = false,
-            bool                                is_lazy    = false) {
+            bool                                is_lazy    = false,
+            int                                 order      = 0) {
         BeanRegistration reg;
         reg.type_id    = std::type_index(typeid(T));
         reg.name       = typeid(T).name();
@@ -274,6 +301,7 @@ public:
         reg.scope      = scope;
         reg.is_primary = is_primary;
         reg.is_lazy    = is_lazy;
+        reg.middleware_order = order;
         reg.factory    = [f = std::move(factory)](ContainerBase& c) -> void* {
             return f(c);
         };
@@ -290,6 +318,38 @@ public:
             reg.pre_destroy_fn = [](void* p) {
                 static_cast<Destroyable*>(static_cast<T*>(p))->pre_destroy();
             };
+        }
+
+        // Populate get_middleware_fn if T is a middleware or a shared_ptr of middleware
+        if constexpr (requires { typename T::element_type; }) {
+            using Elem = typename T::element_type;
+            if constexpr (std::is_base_of_v<novaboot::middleware::Middleware, Elem>) {
+                reg.get_middleware_fn = [](void* p) -> std::shared_ptr<novaboot::middleware::Middleware> {
+                    auto* s_ptr = static_cast<std::shared_ptr<Elem>*>(p);
+                    return std::static_pointer_cast<novaboot::middleware::Middleware>(*s_ptr);
+                };
+#ifdef __cpp_impl_reflection
+                if (reg.middleware_order == 0) {
+                    if constexpr (novaboot::di::detail::has_annotation<novaboot::annotations::Order>(^^Elem)) {
+                        reg.middleware_order = novaboot::di::detail::get_annotation<novaboot::annotations::Order>(^^Elem).value;
+                    }
+                }
+#endif
+            }
+        } else {
+            if constexpr (std::is_base_of_v<novaboot::middleware::Middleware, T>) {
+                reg.get_middleware_fn = [](void* p) -> std::shared_ptr<novaboot::middleware::Middleware> {
+                    auto* raw_mw = static_cast<T*>(p);
+                    return std::shared_ptr<novaboot::middleware::Middleware>(raw_mw, [](void*){});
+                };
+#ifdef __cpp_impl_reflection
+                if (reg.middleware_order == 0) {
+                    if constexpr (novaboot::di::detail::has_annotation<novaboot::annotations::Order>(^^T)) {
+                        reg.middleware_order = novaboot::di::detail::get_annotation<novaboot::annotations::Order>(^^T).value;
+                    }
+                }
+#endif
+            }
         }
 
         registrations_[reg.type_id] = std::move(reg);

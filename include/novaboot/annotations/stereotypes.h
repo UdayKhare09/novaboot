@@ -60,4 +60,11 @@ struct Bean {
     consteval explicit Bean(di::Scope s) : scope(s) {}
 };
 
+/// Specify execution order for components like filters/middlewares.
+struct Order {
+    int value = 0;
+    consteval Order() = default;
+    consteval Order(int val) : value(val) {}
+};
+
 } // namespace novaboot::annotations

@@ -35,6 +35,7 @@ novaboot_test(test_di_handler_injection unit/test_di_handler_injection.cpp)
 novaboot_test(test_di_value           unit/test_di_value.cpp)
 novaboot_test(test_di_config_bean     unit/test_di_config_bean.cpp)
 novaboot_test(test_auto_routing       unit/test_auto_routing.cpp)
+novaboot_test(test_auto_middleware    unit/test_auto_middleware.cpp)
 
 # ─── Integration tests ────────────────────────────────────────────────────────
 novaboot_test(test_server_basic integration/test_server_basic.cpp)

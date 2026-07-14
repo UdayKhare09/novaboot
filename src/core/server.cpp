@@ -1,4 +1,5 @@
 #include "novaboot/core/server.h"
+#include <algorithm>
 
 #include <csignal>
 #include <format>
@@ -122,6 +123,36 @@ std::unique_ptr<Server> Server::Builder::build() {
     if (di_root_) {
         server->pipeline_.add(std::make_shared<DIMiddleware>(*di_root_));
         di_root_->register_routes_and_advice(server->router());
+
+        // Gather all middlewares from the DI container
+        struct OrderedMiddleware {
+            std::shared_ptr<middleware::Middleware> middleware;
+            int order;
+        };
+        std::vector<OrderedMiddleware> di_middlewares;
+
+        for (auto& [tid, reg] : di_root_->get_registrations()) {
+            if (reg.get_middleware_fn) {
+                void* instance = di_root_->resolve(tid);
+                if (instance) {
+                    auto mw = reg.get_middleware_fn(instance);
+                    if (mw) {
+                        di_middlewares.push_back({std::move(mw), reg.middleware_order});
+                    }
+                }
+            }
+        }
+
+        // Sort middlewares by order ascending
+        std::stable_sort(di_middlewares.begin(), di_middlewares.end(),
+                         [](const OrderedMiddleware& a, const OrderedMiddleware& b) {
+                             return a.order < b.order;
+                         });
+
+        // Add them to pipeline
+        for (auto& omw : di_middlewares) {
+            server->pipeline_.add(std::move(omw.middleware));
+        }
     }
     for (auto& mw : middlewares_) {
         server->pipeline_.add(std::move(mw));

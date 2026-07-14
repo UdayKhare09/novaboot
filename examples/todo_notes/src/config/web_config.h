@@ -19,7 +19,7 @@ struct [[= Configuration() ]] WebConfig {
     [[= Value("jwt.secret") ]]
     std::string jwt_secret = "default-secret";
 
-    [[= Bean() ]]
+    [[= Bean() ]] [[= Order(1) ]]
     std::shared_ptr<CorsMiddleware> cors_middleware() {
         return std::make_shared<CorsMiddleware>(
             CorsMiddleware::Config{
@@ -31,12 +31,12 @@ struct [[= Configuration() ]] WebConfig {
             });
     }
 
-    [[= Bean() ]]
+    [[= Bean() ]] [[= Order(2) ]]
     std::shared_ptr<SecurityHeadersMiddleware> security_headers() {
         return std::make_shared<SecurityHeadersMiddleware>();
     }
 
-    [[= Bean() ]]
+    [[= Bean() ]] [[= Order(3) ]]
     std::shared_ptr<JwtMiddleware> jwt_middleware() {
         return std::make_shared<JwtMiddleware>(
             JwtMiddleware::Config{
@@ -49,7 +49,7 @@ struct [[= Configuration() ]] WebConfig {
             });
     }
 
-    [[= Bean() ]]
+    [[= Bean() ]] [[= Order(4) ]]
     std::shared_ptr<RequestLoggingMiddleware> request_logging() {
         return std::make_shared<RequestLoggingMiddleware>();
     }

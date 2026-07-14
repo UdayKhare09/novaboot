@@ -248,6 +248,13 @@ void register_beans(di::RootContainer& container) {
                         if constexpr (has_annotation<Bean>(m)) {
                             constexpr auto pmf = get_member_ptr<m>();
                             constexpr auto scope = get_annotation<Bean>(m).scope;
+                            
+                            constexpr int order_val = []() {
+                                if constexpr (has_annotation<Order>(m)) {
+                                    return get_annotation<Order>(m).value;
+                                }
+                                return 0;
+                            }();
 
                             using Traits = bean_method_traits<decltype(pmf)>;
                             using BType = typename Traits::bean_type;
@@ -258,7 +265,11 @@ void register_beans(di::RootContainer& container) {
                                     auto& config = c.resolve<Type>();
                                     return Traits::invoke(config, pmf, c);
                                 },
-                                scope
+                                scope,
+                                "",     // qualifier
+                                false,  // is_primary
+                                false,  // is_lazy
+                                order_val
                             );
 
                             container.add_dependency(std::type_index(typeid(BType)), std::type_index(typeid(Type)));

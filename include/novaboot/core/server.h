@@ -339,6 +339,9 @@ public:
     /// Get the router (for testing)
     [[nodiscard]] router::Router& router() noexcept { return router_; }
 
+    /// Get the pipeline (for testing)
+    [[nodiscard]] middleware::Pipeline& pipeline() noexcept { return pipeline_; }
+
 private:
     Server() = default;
 

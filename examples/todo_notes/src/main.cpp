@@ -60,12 +60,6 @@ int main() {
 
 
 
-    // 3. Middleware setup (resolved from DI container)
-    auto cors = di_root.resolve<std::shared_ptr<CorsMiddleware>>();
-    auto security_headers = di_root.resolve<std::shared_ptr<SecurityHeadersMiddleware>>();
-    auto jwt = di_root.resolve<std::shared_ptr<JwtMiddleware>>();
-    auto logger = di_root.resolve<std::shared_ptr<RequestLoggingMiddleware>>();
-
     // 4. Server setup
     int worker_count = static_cast<int>(cfg.server().workers);
     if (worker_count == 0) {
@@ -78,10 +72,6 @@ int main() {
         .tls(cfg.server().tls_cert, cfg.server().tls_key)
         .di_container(di_root)
         .static_resources(cfg.server().static_resources)
-        .middleware(cors)
-        .middleware(security_headers)
-        .middleware(jwt)
-        .middleware(logger)
         .build();
 
     // 7. Run the Server
