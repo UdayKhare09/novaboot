@@ -1,53 +1,30 @@
 #pragma once
 
 #include "model/app_user.h"
+#include "novaboot/db/repository.h"
+#include "novaboot/db/db_client.h"
 #include <vector>
 #include <optional>
-#include <mutex>
-#include <algorithm>
-
-#include "novaboot/novaboot.h"
+#include <string>
+#include <memory>
 
 using namespace novaboot::annotations;
 using todo_notes::model::AppUser;
 
-struct [[= Repository() ]] AppUserRepository {
-private:
-    std::vector<AppUser> users_;
-    std::mutex mutex_;
-
+struct [[= Repository() ]] AppUserRepository : public novaboot::db::CrudRepository<AppUser, std::string> {
 public:
-    AppUserRepository() = default;
+    explicit AppUserRepository(std::shared_ptr<novaboot::db::DataSource> ds)
+        : novaboot::db::CrudRepository<AppUser, std::string>(ds) {}
 
     std::optional<AppUser> find_by_username(const std::string& username) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        auto it = std::find_if(users_.begin(), users_.end(), [&](const AppUser& u) { return u.username == username; });
-        if (it != users_.end()) return *it;
-        return std::nullopt;
+        return query()
+            .where<&AppUser::username>(novaboot::db::Op::Equal, username)
+            .single();
     }
 
     std::optional<AppUser> find_by_email(const std::string& email) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        auto it = std::find_if(users_.begin(), users_.end(), [&](const AppUser& u) { return u.email == email; });
-        if (it != users_.end()) return *it;
-        return std::nullopt;
-    }
-
-    std::optional<AppUser> find_by_id(const std::string& id) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        auto it = std::find_if(users_.begin(), users_.end(), [&](const AppUser& u) { return u.id == id; });
-        if (it != users_.end()) return *it;
-        return std::nullopt;
-    }
-
-    AppUser save(const AppUser& user) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        auto it = std::find_if(users_.begin(), users_.end(), [&](const AppUser& u) { return u.id == user.id; });
-        if (it != users_.end()) {
-            *it = user;
-        } else {
-            users_.push_back(user);
-        }
-        return user;
+        return query()
+            .where<&AppUser::email>(novaboot::db::Op::Equal, email)
+            .single();
     }
 };

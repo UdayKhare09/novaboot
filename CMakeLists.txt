@@ -139,6 +139,17 @@ target_link_libraries(novaboot
 
 target_compile_features(novaboot PUBLIC cxx_std_26)
 
+# ─── SQLite Driver Target ──────────────────────────────────────────────────────
+find_package(SQLite3 REQUIRED)
+add_library(novaboot_sqlite STATIC
+    src/db/drivers/sqlite/sqlite_driver.cpp
+)
+target_link_libraries(novaboot_sqlite PUBLIC novaboot SQLite::SQLite3)
+target_include_directories(novaboot_sqlite PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+)
+add_library(novaboot::sqlite ALIAS novaboot_sqlite)
+
 # ─── Examples ─────────────────────────────────────────────────────────────────
 if(NOVABOOT_BUILD_EXAMPLES)
     add_subdirectory(examples)

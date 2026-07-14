@@ -67,4 +67,45 @@ struct Order {
     consteval Order(int val) : value(val) {}
 };
 
+/// Mark a struct/class as a database entity
+struct Entity {
+    char name[64] = {};
+    consteval Entity() = default;
+    consteval Entity(const char* n) {
+        int i = 0;
+        while (n[i] && i < 63) {
+            name[i] = n[i];
+            i++;
+        }
+        name[i] = '\0';
+    }
+};
+
+/// Designate the primary key field
+struct Id {
+    consteval Id() = default;
+};
+
+/// Mark field for auto-increment identity column
+struct GeneratedValue {
+    consteval GeneratedValue() = default;
+};
+
+/// Field-level column customization
+struct Column {
+    char name[64] = {};
+    bool nullable = true;
+
+    consteval Column() = default;
+    consteval Column(const char* col_name, bool is_nullable = true) 
+        : nullable(is_nullable) {
+        int i = 0;
+        while (col_name[i] && i < 63) {
+            name[i] = col_name[i];
+            i++;
+        }
+        name[i] = '\0';
+    }
+};
+
 } // namespace novaboot::annotations

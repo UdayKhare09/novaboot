@@ -12,6 +12,7 @@ target_include_directories(todo_notes_app
 target_link_libraries(todo_notes_app 
     PRIVATE 
         novaboot::novaboot 
+        novaboot::sqlite
         spdlog::spdlog
 )
 

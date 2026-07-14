@@ -1,4 +1,5 @@
 #include "novaboot/config/app_config.h"
+#include "novaboot/db/db_client.h"
 
 // Middleware
 #include "novaboot/middleware/cors_middleware.h"
@@ -58,7 +59,39 @@ int main() {
     // Build DI Container
     di_root.build();
 
-
+    // 2. Bootstrap DB Schema
+    {
+        auto ds = di_root.resolve<std::shared_ptr<novaboot::db::DataSource>>();
+        auto conn = ds->get_connection();
+        
+        conn->execute(R"(
+            CREATE TABLE IF NOT EXISTS users (
+                id TEXT PRIMARY KEY,
+                username TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                email TEXT NOT NULL UNIQUE
+            );
+        )");
+        
+        conn->execute(R"(
+            CREATE TABLE IF NOT EXISTS todos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT,
+                completed BOOLEAN NOT NULL
+            );
+        )");
+        
+        conn->execute(R"(
+            CREATE TABLE IF NOT EXISTS notes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                content TEXT
+            );
+        )");
+    }
 
     // 4. Server setup
     int worker_count = static_cast<int>(cfg.server().workers);

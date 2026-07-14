@@ -1,13 +1,17 @@
 #pragma once
 #include <string>
 #include "novaboot/validation/validation.h"
+#include "novaboot/annotations/stereotypes.h"
 
 namespace todo_notes::model {
 
 using novaboot::validation::Schema;
+using namespace novaboot::annotations;
 
-struct AppUser {
+struct [[= Entity("users") ]] AppUser {
+    [[= Id() ]]
     std::string id;
+    
     std::string username;
     std::string password_hash;
     std::string email;

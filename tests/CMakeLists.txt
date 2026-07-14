@@ -36,6 +36,9 @@ novaboot_test(test_di_value           unit/test_di_value.cpp)
 novaboot_test(test_di_config_bean     unit/test_di_config_bean.cpp)
 novaboot_test(test_auto_routing       unit/test_auto_routing.cpp)
 novaboot_test(test_auto_middleware    unit/test_auto_middleware.cpp)
+novaboot_test(test_orm_reflection     unit/test_orm_reflection.cpp)
+novaboot_test(test_database_crud     unit/test_database_crud.cpp)
+target_link_libraries(test_database_crud PRIVATE novaboot::sqlite)
 
 # ─── Integration tests ────────────────────────────────────────────────────────
 novaboot_test(test_server_basic integration/test_server_basic.cpp)
