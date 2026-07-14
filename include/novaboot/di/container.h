@@ -17,6 +17,7 @@
 
 #include "novaboot/di/lifecycle.h"
 #include "novaboot/di/scope.h"
+#include "novaboot/config/app_config.h"
 #ifdef __cpp_impl_reflection
 #include <meta>
 #endif
@@ -37,6 +38,20 @@
 namespace novaboot::memory { class ArenaAllocator; }  // forward decl
 
 namespace novaboot::di {
+
+/// Annotation for injecting configuration values into class fields.
+struct Value {
+    char key[64] = {};
+    consteval Value() = default;
+    consteval explicit Value(const char* k) {
+        int i = 0;
+        while (k[i] && i < 63) {
+            key[i] = k[i];
+            i++;
+        }
+        key[i] = '\0';
+    }
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Forward declarations
@@ -424,6 +439,45 @@ struct TypeList {
 #ifdef __cpp_impl_reflection
 namespace detail {
     template<typename T>
+    consteval auto get_members() {
+        constexpr auto ctx = std::meta::access_context::current();
+        struct ArrayWrapper {
+            std::meta::info data[64] = {};
+            std::size_t     size = 0;
+
+            consteval const std::meta::info* begin() const noexcept { return data; }
+            consteval const std::meta::info* end() const noexcept { return data + size; }
+        };
+        ArrayWrapper result;
+        for (auto m : std::meta::members_of(^^T, ctx)) {
+            if (result.size < 64) {
+                result.data[result.size++] = m;
+            }
+        }
+        return result;
+    }
+
+    template<typename Ann>
+    consteval bool has_annotation(std::meta::info target) {
+        for (auto ann : std::meta::annotations_of(std::meta::dealias(target))) {
+            if (std::meta::is_same_type(std::meta::remove_cv(std::meta::type_of(ann)), ^^Ann)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    template<typename Ann>
+    consteval Ann get_annotation(std::meta::info target) {
+        for (auto ann : std::meta::annotations_of(std::meta::dealias(target))) {
+            if (std::meta::is_same_type(std::meta::remove_cv(std::meta::type_of(ann)), ^^Ann)) {
+                return std::meta::extract<Ann>(ann);
+            }
+        }
+        return Ann{};
+    }
+
+    template<typename T>
     consteval std::meta::info get_constructor_typelist() {
         constexpr auto ctx = std::meta::access_context::current();
         std::meta::info target_ctor = std::meta::info{};
@@ -473,7 +527,27 @@ BeanBuilder<T> RootContainer::autowire(Scope scope) {
     using ExtractedTypeList = typename[: type_info :];
 
     register_bean<T>([](ContainerBase& c) {
-        return ExtractedTypeList::template construct<T>(c);
+        T* obj = ExtractedTypeList::template construct<T>(c);
+
+        // Perform @Value property injection
+        static constexpr auto members = detail::get_members<T>();
+        template for (constexpr auto m : members) {
+            if constexpr (std::meta::is_nonstatic_data_member(m)) {
+                if constexpr (detail::has_annotation<Value>(m)) {
+                    constexpr auto ann = detail::get_annotation<Value>(m);
+                    using FieldType = std::remove_cvref_t<decltype(obj->*&[:m:])>;
+                    if (c.has<config::AppConfig>()) {
+                        auto& app_cfg = c.resolve<config::AppConfig>();
+                        auto val_opt = app_cfg.get<FieldType>(ann.key);
+                        if (val_opt) {
+                            obj->*&[:m:] = *val_opt;
+                        }
+                    }
+                }
+            }
+        }
+
+        return obj;
     }, scope);
 
     ExtractedTypeList::template add_dependencies<T>(*this);

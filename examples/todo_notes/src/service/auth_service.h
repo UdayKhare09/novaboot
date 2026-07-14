@@ -21,8 +21,13 @@ using todo_notes::model::LoginResponse;
 using novaboot::middleware::JwtIssuer;
 using novaboot::middleware::JwtTokenBuilder;
 
+using novaboot::di::Value;
+
 struct [[= Service() ]] AuthService {
     AppUserRepository& user_repo;
+
+    [[= Value("jwt.secret") ]]
+    std::string jwt_secret = "default-secret";
 
     explicit AuthService(AppUserRepository& repo) : user_repo(repo) {}
 
@@ -103,7 +108,7 @@ struct [[= Service() ]] AuthService {
         // Issue JWT token with 24 hours expiration
         JwtIssuer issuer(JwtIssuer::Config{
             .algorithm = JwtIssuer::Algorithm::HS256,
-            .hmac_secret = "sample-secret",
+            .hmac_secret = jwt_secret,
             .default_ttl = std::chrono::hours{24}
         });
 

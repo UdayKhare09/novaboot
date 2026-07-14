@@ -32,6 +32,7 @@ novaboot_test(test_di_qualifiers      unit/test_di_qualifiers.cpp)
 novaboot_test(test_di_async           unit/test_di_async.cpp)
 novaboot_test(test_di_cycle_detection unit/test_di_cycle_detection.cpp)
 novaboot_test(test_di_handler_injection unit/test_di_handler_injection.cpp)
+novaboot_test(test_di_value           unit/test_di_value.cpp)
 
 # ─── Integration tests ────────────────────────────────────────────────────────
 novaboot_test(test_server_basic integration/test_server_basic.cpp)

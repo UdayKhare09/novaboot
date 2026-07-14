@@ -6,11 +6,5 @@ tls.cert = "cert.pem"
 tls.key = "key.pem"
 static_resources = "examples/todo_notes/src/resources/static"
 
-[datasource.postgres]
-host     = "127.0.0.1"
-port     = 5432
-user     = "nova"
-password = "secret"
-database = "novadb"
-pool.min = 2
-pool.max = 10
+[jwt]
+secret = "sample-secret"
