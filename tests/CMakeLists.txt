@@ -40,6 +40,9 @@ novaboot_test(test_orm_reflection     unit/test_orm_reflection.cpp)
 novaboot_test(test_database_crud     unit/test_database_crud.cpp)
 target_link_libraries(test_database_crud PRIVATE novaboot::sqlite)
 
+novaboot_test(test_postgres_crud     unit/test_postgres_crud.cpp)
+target_link_libraries(test_postgres_crud PRIVATE novaboot::postgres)
+
 # ─── Integration tests ────────────────────────────────────────────────────────
 novaboot_test(test_server_basic integration/test_server_basic.cpp)
 novaboot_test(test_exception_handler unit/test_exception_handler.cpp)

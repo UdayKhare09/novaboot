@@ -1,0 +1,301 @@
+#include "novaboot/db/drivers/postgres/postgres_driver.h"
+#include <stdexcept>
+#include <format>
+#include <iostream>
+#include <cstdlib>
+
+namespace novaboot::db::postgres {
+
+// ─── PostgresResultSet ────────────────────────────────────────────────────────
+
+PostgresResultSet::PostgresResultSet(PGresult* res) : res_(res) {
+    if (res_) {
+        row_count_ = PQntuples(res_);
+    }
+}
+
+PostgresResultSet::~PostgresResultSet() {
+    if (res_) {
+        PQclear(res_);
+    }
+}
+
+bool PostgresResultSet::next() {
+    if (current_row_ + 1 < row_count_) {
+        current_row_++;
+        return true;
+    }
+    return false;
+}
+
+bool PostgresResultSet::is_null(int col_index) {
+    if (!res_ || current_row_ < 0 || current_row_ >= row_count_) return true;
+    return PQgetisnull(res_, current_row_, col_index) != 0;
+}
+
+std::int64_t PostgresResultSet::get_int(int col_index) {
+    if (is_null(col_index)) return 0;
+    return std::stoll(PQgetvalue(res_, current_row_, col_index));
+}
+
+double PostgresResultSet::get_double(int col_index) {
+    if (is_null(col_index)) return 0.0;
+    return std::stod(PQgetvalue(res_, current_row_, col_index));
+}
+
+std::string PostgresResultSet::get_string(int col_index) {
+    if (is_null(col_index)) return "";
+    return PQgetvalue(res_, current_row_, col_index);
+}
+
+std::vector<std::uint8_t> PostgresResultSet::get_blob(int col_index) {
+    if (is_null(col_index)) return {};
+    std::string val = PQgetvalue(res_, current_row_, col_index);
+    if (val.starts_with("\\x")) {
+        std::vector<std::uint8_t> result;
+        result.reserve((val.length() - 2) / 2);
+        for (size_t i = 2; i < val.length(); i += 2) {
+            std::string byteString = val.substr(i, 2);
+            uint8_t byte = static_cast<uint8_t>(std::strtol(byteString.c_str(), nullptr, 16));
+            result.push_back(byte);
+        }
+        return result;
+    }
+    return std::vector<std::uint8_t>(val.begin(), val.end());
+}
+
+bool PostgresResultSet::get_bool(int col_index) {
+    if (is_null(col_index)) return false;
+    std::string val = PQgetvalue(res_, current_row_, col_index);
+    return val == "t" || val == "true" || val == "1";
+}
+
+int PostgresResultSet::column_count() const {
+    return res_ ? PQnfields(res_) : 0;
+}
+
+std::string_view PostgresResultSet::column_name(int col_index) const {
+    if (!res_) return {};
+    const char* name = PQfname(res_, col_index);
+    return name ? std::string_view(name) : std::string_view();
+}
+
+// ─── PostgresConnection ──────────────────────────────────────────────────────
+
+PostgresConnection::PostgresConnection(PGconn* conn, bool own_conn) 
+    : conn_(conn), own_conn_(own_conn) {}
+
+PostgresConnection::~PostgresConnection() {
+    if (own_conn_ && conn_) {
+        PQfinish(conn_);
+    }
+}
+
+std::string PostgresConnection::convert_placeholders(std::string_view sql) {
+    std::string out;
+    out.reserve(sql.size() + 10);
+    int count = 1;
+    for (size_t i = 0; i < sql.size(); ++i) {
+        if (sql[i] == '?') {
+            out += "$" + std::to_string(count++);
+        } else {
+            out += sql[i];
+        }
+    }
+    return out;
+}
+
+std::vector<std::string> PostgresConnection::serialize_params(const std::vector<Parameter>& params) {
+    std::vector<std::string> serialized;
+    serialized.reserve(params.size());
+    for (const auto& param : params) {
+        std::visit([&serialized](auto&& val) {
+            using T = std::decay_t<decltype(val)>;
+            if constexpr (std::is_same_v<T, std::nullptr_t>) {
+                serialized.push_back("");
+            } else if constexpr (std::is_same_v<T, std::int64_t>) {
+                serialized.push_back(std::to_string(val));
+            } else if constexpr (std::is_same_v<T, double>) {
+                serialized.push_back(std::to_string(val));
+            } else if constexpr (std::is_same_v<T, std::string>) {
+                serialized.push_back(val);
+            } else if constexpr (std::is_same_v<T, std::vector<std::uint8_t>>) {
+                // Escape bytea blob for PostgreSQL
+                serialized.push_back(std::string(val.begin(), val.end()));
+            } else if constexpr (std::is_same_v<T, bool>) {
+                serialized.push_back(val ? "true" : "false");
+            }
+        }, param);
+    }
+    return serialized;
+}
+
+void PostgresConnection::execute(std::string_view sql, const std::vector<Parameter>& params) {
+    std::string converted_sql = convert_placeholders(sql);
+    std::vector<std::string> str_params = serialize_params(params);
+    std::vector<const char*> param_values;
+    param_values.reserve(params.size());
+
+    for (size_t i = 0; i < params.size(); ++i) {
+        if (std::holds_alternative<std::nullptr_t>(params[i])) {
+            param_values.push_back(nullptr);
+        } else {
+            param_values.push_back(str_params[i].c_str());
+        }
+    }
+
+    PGresult* res = PQexecParams(
+        conn_,
+        converted_sql.c_str(),
+        static_cast<int>(params.size()),
+        nullptr, // Let Postgres infer types
+        param_values.empty() ? nullptr : param_values.data(),
+        nullptr, // Text format lengths are ignored
+        nullptr, // All text formats
+        0        // Text format result
+    );
+
+    if (!res) {
+        throw std::runtime_error(std::format("Postgres execution failed: {}", PQerrorMessage(conn_)));
+    }
+
+    ExecStatusType status = PQresultStatus(res);
+    PQclear(res);
+
+    if (status != PGRES_COMMAND_OK && status != PGRES_TUPLES_OK) {
+        throw std::runtime_error(std::format("Postgres execution failed: {}", PQerrorMessage(conn_)));
+    }
+}
+
+std::unique_ptr<ResultSet> PostgresConnection::query(std::string_view sql, const std::vector<Parameter>& params) {
+    std::string converted_sql = convert_placeholders(sql);
+    std::vector<std::string> str_params = serialize_params(params);
+    std::vector<const char*> param_values;
+    param_values.reserve(params.size());
+
+    for (size_t i = 0; i < params.size(); ++i) {
+        if (std::holds_alternative<std::nullptr_t>(params[i])) {
+            param_values.push_back(nullptr);
+        } else {
+            param_values.push_back(str_params[i].c_str());
+        }
+    }
+
+    PGresult* res = PQexecParams(
+        conn_,
+        converted_sql.c_str(),
+        static_cast<int>(params.size()),
+        nullptr,
+        param_values.empty() ? nullptr : param_values.data(),
+        nullptr,
+        nullptr,
+        0
+    );
+
+    if (!res) {
+        throw std::runtime_error(std::format("Postgres query failed: {}", PQerrorMessage(conn_)));
+    }
+
+    ExecStatusType status = PQresultStatus(res);
+    if (status != PGRES_TUPLES_OK && status != PGRES_COMMAND_OK) {
+        PQclear(res);
+        throw std::runtime_error(std::format("Postgres query failed: {}", PQerrorMessage(conn_)));
+    }
+
+    return std::make_unique<PostgresResultSet>(res);
+}
+
+std::int64_t PostgresConnection::last_insert_id() {
+    auto res = query("SELECT lastval();");
+    if (res && res->next()) {
+        return res->get_int(0);
+    }
+    return 0;
+}
+
+void PostgresConnection::begin_transaction() {
+    execute("BEGIN;");
+}
+
+void PostgresConnection::commit() {
+    execute("COMMIT;");
+}
+
+void PostgresConnection::rollback() {
+    execute("ROLLBACK;");
+}
+
+// ─── PostgresDataSource ──────────────────────────────────────────────────────
+
+PostgresDataSource::PostgresDataSource(std::string conn_info, int pool_size)
+    : conn_info_(std::move(conn_info)), pool_size_(pool_size) {
+    for (int i = 0; i < pool_size_; ++i) {
+        connections_.push(create_connection());
+    }
+}
+
+PostgresDataSource::~PostgresDataSource() {
+    close();
+}
+
+PGconn* PostgresDataSource::create_connection() {
+    PGconn* conn = PQconnectdb(conn_info_.c_str());
+    if (PQstatus(conn) != CONNECTION_OK) {
+        std::string err = PQerrorMessage(conn);
+        PQfinish(conn);
+        throw std::runtime_error(std::format("PostgreSQL connection failed: {}", err));
+    }
+    return conn;
+}
+
+std::shared_ptr<Connection> PostgresDataSource::get_connection() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    cv_.wait(lock, [this] { return !connections_.empty() || closed_; });
+
+    if (closed_) {
+        throw std::runtime_error("DataSource is closed");
+    }
+
+    PGconn* conn = connections_.front();
+    connections_.pop();
+
+    // Verify connection status
+    if (PQstatus(conn) != CONNECTION_OK) {
+        PQfinish(conn);
+        try {
+            conn = create_connection();
+        } catch (...) {
+            // Put remaining connections back and propagate
+            cv_.notify_all();
+            throw;
+        }
+    }
+
+    auto cleanup = [this, conn](Connection* ptr) {
+        delete ptr;
+        std::lock_guard<std::mutex> pool_lock(mutex_);
+        if (!closed_) {
+            connections_.push(conn);
+            cv_.notify_one();
+        } else {
+            PQfinish(conn);
+        }
+    };
+
+    return std::shared_ptr<Connection>(new PostgresConnection(conn, false), cleanup);
+}
+
+void PostgresDataSource::close() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (closed_) return;
+    closed_ = true;
+
+    while (!connections_.empty()) {
+        PGconn* conn = connections_.front();
+        connections_.pop();
+        PQfinish(conn);
+    }
+    cv_.notify_all();
+}
+
+} // namespace novaboot::db::postgres

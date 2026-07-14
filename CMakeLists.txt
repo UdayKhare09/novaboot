@@ -150,6 +150,18 @@ target_include_directories(novaboot_sqlite PUBLIC
 )
 add_library(novaboot::sqlite ALIAS novaboot_sqlite)
 
+# ─── PostgreSQL Driver Target ──────────────────────────────────────────────────
+find_package(PostgreSQL REQUIRED)
+add_library(novaboot_postgres STATIC
+    src/db/drivers/postgres/postgres_driver.cpp
+)
+target_link_libraries(novaboot_postgres PUBLIC novaboot ${PostgreSQL_LIBRARIES})
+target_include_directories(novaboot_postgres PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    PRIVATE ${PostgreSQL_INCLUDE_DIRS}
+)
+add_library(novaboot::postgres ALIAS novaboot_postgres)
+
 # ─── Examples ─────────────────────────────────────────────────────────────────
 if(NOVABOOT_BUILD_EXAMPLES)
     add_subdirectory(examples)
