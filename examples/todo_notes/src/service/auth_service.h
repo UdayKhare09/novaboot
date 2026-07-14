@@ -9,8 +9,11 @@
 #include <sstream>
 #include <iomanip>
 
+#include "novaboot/novaboot.h"
+
 namespace todo_notes::service {
 
+using namespace novaboot::annotations;
 using todo_notes::model::AppUser;
 using todo_notes::model::RegisterRequest;
 using todo_notes::model::LoginRequest;
@@ -18,7 +21,7 @@ using todo_notes::model::LoginResponse;
 using novaboot::middleware::JwtIssuer;
 using novaboot::middleware::JwtTokenBuilder;
 
-struct AuthService {
+struct [[= Service() ]] AuthService {
     AppUserRepository& user_repo;
 
     explicit AuthService(AppUserRepository& repo) : user_repo(repo) {}

@@ -4,12 +4,15 @@
 #include <stdexcept>
 #include <vector>
 
+#include "novaboot/novaboot.h"
+
 namespace todo_notes::service {
 
+using namespace novaboot::annotations;
 using todo_notes::model::Todo;
 using todo_notes::model::TodoRequest;
 
-struct TodoService {
+struct [[= Service() ]] TodoService {
     TodoRepository& todo_repo;
 
     explicit TodoService(TodoRepository& repo) : todo_repo(repo) {}

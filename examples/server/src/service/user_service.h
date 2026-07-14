@@ -8,11 +8,12 @@
 #include <vector>
 #include <optional>
 
+using namespace novaboot::annotations;
 using examples::model::User;
 using examples::exception::UserNotFoundException;
 
 /// Business logic implementation (Spring-style Service)
-struct UserService {
+struct [[= Service() ]] UserService {
     UserRepository& user_repo;
 
     // Constructor injection: DI container automatically resolves and injects UserRepository
@@ -30,10 +31,12 @@ struct UserService {
         return user_repo.find_all();
     }
 
+    [[= PostConstruct() ]]
     void init() {
         spdlog::info("UserService initialized successfully with UserRepository auto-wired.");
     }
 
+    [[= PreDestroy() ]]
     void cleanup() {
         spdlog::info("UserService shutting down.");
     }

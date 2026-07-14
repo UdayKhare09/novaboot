@@ -14,9 +14,11 @@ using todo_notes::service::TodoService;
 using todo_notes::model::TodoRequest;
 using todo_notes::model::Todo;
 
+using namespace novaboot::annotations;
+
 namespace todo_notes::controller {
 
-struct TodoController {
+struct [[= RestController("/api/todos") ]] TodoController {
     TodoService& todo_service;
 
     explicit TodoController(TodoService& svc) : todo_service(svc) {}
@@ -33,11 +35,13 @@ struct TodoController {
         return std::string(*uid);
     }
 
+    [[= GetMapping("") ]]
     ResponseEntity<std::vector<Todo>> list_todos(RequestContext& ctx) {
         std::string uid = get_user_id(ctx);
         return ResponseEntity<std::vector<Todo>>::ok(todo_service.get_todos(uid));
     }
 
+    [[= GetMapping("/:id") ]]
     ResponseEntity<Todo> get_todo(int id, RequestContext& ctx) {
         std::string uid = get_user_id(ctx);
         auto items = todo_service.get_todos(uid);
@@ -49,18 +53,21 @@ struct TodoController {
         throw std::runtime_error("Todo not found or access denied");
     }
 
+    [[= PostMapping("") ]]
     ResponseEntity<Todo> create_todo(TodoRequest req, RequestContext& ctx) {
         std::string uid = get_user_id(ctx);
         auto saved = todo_service.create_todo(uid, req);
         return ResponseEntity<Todo>::status(201, saved);
     }
 
+    [[= PutMapping("/:id") ]]
     ResponseEntity<Todo> update_todo(int id, TodoRequest req, RequestContext& ctx) {
         std::string uid = get_user_id(ctx);
         auto saved = todo_service.update_todo(uid, id, req);
         return ResponseEntity<Todo>::ok(saved);
     }
 
+    [[= DeleteMapping("/:id") ]]
     ResponseEntity<void> delete_todo(int id, RequestContext& ctx) {
         std::string uid = get_user_id(ctx);
         todo_service.delete_todo(uid, id);

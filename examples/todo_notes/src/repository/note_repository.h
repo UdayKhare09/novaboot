@@ -6,9 +6,12 @@
 #include <mutex>
 #include <algorithm>
 
+#include "novaboot/novaboot.h"
+
+using namespace novaboot::annotations;
 using todo_notes::model::Note;
 
-struct NoteRepository {
+struct [[= Repository() ]] NoteRepository {
 private:
     std::vector<Note> notes_;
     std::mutex mutex_;

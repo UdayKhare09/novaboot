@@ -6,9 +6,12 @@
 #include <mutex>
 #include <algorithm>
 
+#include "novaboot/novaboot.h"
+
+using namespace novaboot::annotations;
 using todo_notes::model::Todo;
 
-struct TodoRepository {
+struct [[= Repository() ]] TodoRepository {
 private:
     std::vector<Todo> todos_;
     std::mutex mutex_;

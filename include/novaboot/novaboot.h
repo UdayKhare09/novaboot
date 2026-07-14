@@ -24,6 +24,10 @@
 // Validation
 #include "novaboot/validation/validation.h"
 
+// Annotations
+#include "novaboot/annotations/annotations.h"
+#include "novaboot/annotations/scanner.h"
+
 
 // Middleware
 #include "novaboot/middleware/middleware.h"

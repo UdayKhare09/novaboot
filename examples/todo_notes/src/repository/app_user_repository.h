@@ -6,9 +6,12 @@
 #include <mutex>
 #include <algorithm>
 
+#include "novaboot/novaboot.h"
+
+using namespace novaboot::annotations;
 using todo_notes::model::AppUser;
 
-struct AppUserRepository {
+struct [[= Repository() ]] AppUserRepository {
 private:
     std::vector<AppUser> users_;
     std::mutex mutex_;

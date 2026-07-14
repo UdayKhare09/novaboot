@@ -433,10 +433,22 @@ namespace detail {
         for (auto m : std::meta::members_of(^^T, ctx)) {
             if (std::meta::is_constructor(m)) {
                 auto params = std::meta::parameters_of(m);
-                if (!found || params.size() > max_params) {
-                    target_ctor = m;
-                    max_params = params.size();
-                    found = true;
+                
+                // Ignore copy and move constructors
+                bool is_copy_or_move = false;
+                if (params.size() == 1) {
+                    auto p_type = std::meta::type_of(params[0]);
+                    if (std::meta::is_same_type(std::meta::remove_cvref(p_type), ^^T)) {
+                        is_copy_or_move = true;
+                    }
+                }
+                
+                if (!is_copy_or_move) {
+                    if (!found || params.size() > max_params) {
+                        target_ctor = m;
+                        max_params = params.size();
+                        found = true;
+                    }
                 }
             }
         }

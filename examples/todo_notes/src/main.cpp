@@ -1,6 +1,3 @@
-#include "novaboot/novaboot.h"
-#include "novaboot/di/di.h"
-#include "novaboot/middleware/middleware.h"
 #include "novaboot/config/app_config.h"
 
 // Middleware
@@ -13,12 +10,10 @@
 #include "repository/app_user_repository.h"
 #include "repository/todo_repository.h"
 #include "repository/note_repository.h"
-#include "service/auth_service.h"
-#include "service/todo_service.h"
-#include "service/note_service.h"
 #include "controller/auth_controller.h"
 #include "controller/todo_controller.h"
 #include "controller/note_controller.h"
+#include "controller/global_exception_handler.h"
 
 #include <spdlog/spdlog.h>
 #include <thread>
@@ -50,26 +45,13 @@ int main() {
 
 
 
-    // Repositories
-    di_root.singleton<AppUserRepository>([](ContainerBase&) {
-        return new AppUserRepository();
-    });
-    di_root.singleton<TodoRepository>([](ContainerBase&) {
-        return new TodoRepository();
-    });
-    di_root.singleton<NoteRepository>([](ContainerBase&) {
-        return new NoteRepository();
-    });
-
-    // Services
-    di_root.autowire<AuthService>();
-    di_root.autowire<TodoService>();
-    di_root.autowire<NoteService>();
-
-    // Controllers
-    di_root.autowire<AuthController>();
-    di_root.autowire<TodoController>();
-    di_root.autowire<NoteController>();
+    // Automatically scan and register repositories, services, and controllers
+    novaboot::annotations::register_beans<
+        AppUserRepository, TodoRepository, NoteRepository,
+        AuthService, TodoService, NoteService,
+        AuthController, TodoController, NoteController,
+        GlobalExceptionHandler
+    >(di_root);
 
     // Build DI Container
     di_root.build();
@@ -119,43 +101,8 @@ int main() {
         .build();
 
     // 5. Routing Mapping
-    app->router().group("/public")
-        .post("/register", di::handler<&todo_notes::controller::AuthController::register_user>())
-        .post("/login", di::handler<&todo_notes::controller::AuthController::login_user>());
-
-    app->router().group("/api/todos")
-        .get("", di::handler<&todo_notes::controller::TodoController::list_todos>())
-        .get("/:id", di::handler<&todo_notes::controller::TodoController::get_todo>())
-        .post("", di::handler<&todo_notes::controller::TodoController::create_todo>())
-        .put("/:id", di::handler<&todo_notes::controller::TodoController::update_todo>())
-        .del("/:id", di::handler<&todo_notes::controller::TodoController::delete_todo>());
-
-    app->router().group("/api/notes")
-        .get("", di::handler<&todo_notes::controller::NoteController::list_notes>())
-        .get("/:id", di::handler<&todo_notes::controller::NoteController::get_note>())
-        .post("", di::handler<&todo_notes::controller::NoteController::create_note>())
-        .put("/:id", di::handler<&todo_notes::controller::NoteController::update_note>())
-        .del("/:id", di::handler<&todo_notes::controller::NoteController::delete_note>());
-
-    // 6. Global Exception Handlers mapping to JSON responses
-    app->on_exception<std::runtime_error>(
-        [](const std::runtime_error& ex, context::RequestContext&) {
-            ErrorResponse err{"Bad Request", ex.what()};
-            return ResponseEntity<ErrorResponse>::status(400, err);
-        }
-    );
-
-    app->on_exception<novaboot::validation::ValidationException>(
-        [](const novaboot::validation::ValidationException& ex, context::RequestContext&) {
-            std::string msg;
-            for (const auto& err : ex.errors()) {
-                if (!msg.empty()) msg += ", ";
-                msg += err;
-            }
-            ErrorResponse err{"Validation Failed", msg};
-            return ResponseEntity<ErrorResponse>::status(400, err);
-        }
-    );
+    novaboot::annotations::register_routes<AuthController, TodoController, NoteController>(app->router());
+    novaboot::annotations::register_advice<GlobalExceptionHandler>(app->router());
 
     // 7. Run the Server
     app->run();

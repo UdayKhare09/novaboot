@@ -4,12 +4,15 @@
 #include <stdexcept>
 #include <vector>
 
+#include "novaboot/novaboot.h"
+
 namespace todo_notes::service {
 
+using namespace novaboot::annotations;
 using todo_notes::model::Note;
 using todo_notes::model::NoteRequest;
 
-struct NoteService {
+struct [[= Service() ]] NoteService {
     NoteRepository& note_repo;
 
     explicit NoteService(NoteRepository& repo) : note_repo(repo) {}

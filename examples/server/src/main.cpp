@@ -52,15 +52,8 @@ int main() {
         return new RequestLogger();
     });
 
-    di_root.singleton<UserRepository>([](ContainerBase&) {
-        return new UserRepository();
-    });
-
-    di_root.autowire<UserService>()
-        .on_start(&UserService::init)
-        .on_stop(&UserService::cleanup);
-
-    di_root.autowire<UserController>();
+    // Automatically scan and register beans: UserRepository, UserService, UserController
+    novaboot::annotations::register_beans<UserRepository, UserService, UserController>(di_root);
 
 
     // Build the container: builds dependency graph and instantiates singletons
@@ -158,13 +151,7 @@ int main() {
         .build();
 
     // 4. Web Routing Mapping
-    app->router().group("/api/users")
-        .get("", di::handler<&UserController::list_users>())
-        .get("/:id", di::handler<&UserController::get_user>())
-        .post("", di::handler<&UserController::create_user>())
-        .put("/:id", di::handler<&UserController::update_user>())
-        .del("/:id", di::handler<&UserController::delete_user>())
-        .patch("/:id", di::handler<&UserController::patch_user>());
+    novaboot::annotations::register_routes<UserController>(app->router());
 
     app->on_exception<UserNotFoundException>(
         [](const UserNotFoundException& ex, context::RequestContext&) {

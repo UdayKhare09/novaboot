@@ -42,5 +42,7 @@ novaboot_test(test_query_validation unit/test_query_validation.cpp)
 # ─── Config unit tests ────────────────────────────────────────────────────────
 novaboot_test(test_app_config unit/test_app_config.cpp)
 novaboot_test(test_client_protocols unit/test_client_protocols.cpp)
+novaboot_test(test_annotations unit/test_annotations.cpp)
+novaboot_test(test_controller_advice unit/test_controller_advice.cpp)
 
 

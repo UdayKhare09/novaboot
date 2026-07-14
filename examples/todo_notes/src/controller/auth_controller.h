@@ -14,19 +14,23 @@ using todo_notes::model::LoginRequest;
 using todo_notes::model::LoginResponse;
 using todo_notes::model::AppUser;
 
+using namespace novaboot::annotations;
+
 namespace todo_notes::controller {
 
-struct AuthController {
+struct [[= RestController("/public") ]] AuthController {
     AuthService& auth_service;
 
     explicit AuthController(AuthService& svc) : auth_service(svc) {}
 
+    [[= PostMapping("/register") ]]
     ResponseEntity<AppUser> register_user(RegisterRequest req, RequestContext&) {
         spdlog::info("Registering user: {}", req.username);
         auto registered = auth_service.register_user(req);
         return ResponseEntity<AppUser>::status(201, registered);
     }
 
+    [[= PostMapping("/login") ]]
     ResponseEntity<LoginResponse> login_user(LoginRequest req, RequestContext&) {
         spdlog::info("Logging in user: {}", req.username);
         auto resp = auth_service.login_user(req);

@@ -6,9 +6,12 @@
 #include <mutex>
 #include <algorithm>
 
+#include "novaboot/novaboot.h"
+
+using namespace novaboot::annotations;
 using examples::model::User;
 
-struct UserRepository {
+struct [[= Repository() ]] UserRepository {
 private:
     std::vector<User> users_;
     std::mutex mutex_;
