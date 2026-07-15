@@ -144,7 +144,7 @@ find_package(SQLite3 REQUIRED)
 add_library(novaboot_sqlite STATIC
     src/db/drivers/sqlite/sqlite_driver.cpp
 )
-target_link_libraries(novaboot_sqlite PUBLIC novaboot SQLite::SQLite3)
+target_link_libraries(novaboot_sqlite PUBLIC novaboot SQLite3::SQLite3)
 target_include_directories(novaboot_sqlite PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
