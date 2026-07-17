@@ -3,6 +3,7 @@
 #include "novaboot/db/exceptions.h"
 #include "novaboot/db/query_builder.h"
 #include "novaboot/db/orm_reflection.h"
+#include "novaboot/db/transaction.h"
 #include "novaboot/db/uuid.h"
 #include <memory>
 #include <vector>
@@ -22,6 +23,10 @@ protected:
     std::string pk_col_name_;
 
     std::shared_ptr<Connection> acquire_connection() const {
+        if (connection_) return connection_;
+        if (auto ambient = TransactionManager::current_connection_for(datasource_.get())) {
+            return ambient;
+        }
         return connection_ ? connection_ : datasource_->get_connection();
     }
 
@@ -52,6 +57,26 @@ protected:
             return result.get_uuid(column_index);
         } else {
             static_assert(std::is_same_v<Value, void>, "Unsupported entity identifier type");
+        }
+    }
+
+    template<std::meta::info Member>
+    static bool collection_loaded(Entity& entity) {
+        using Field = std::remove_cvref_t<decltype(entity.[:Member:])>;
+        if constexpr (detail::is_lazy_collection<Field>::value) {
+            return entity.[:Member:].loaded();
+        } else {
+            return true;
+        }
+    }
+
+    template<std::meta::info Member>
+    static decltype(auto) collection_values(Entity& entity) {
+        using Field = std::remove_cvref_t<decltype(entity.[:Member:])>;
+        if constexpr (detail::is_lazy_collection<Field>::value) {
+            return (entity.[:Member:].get());
+        } else {
+            return (entity.[:Member:]);
         }
     }
 
@@ -100,9 +125,11 @@ protected:
         using ChildId = typename detail::entity_id_type<Child>::type;
         constexpr auto one_to_many = novaboot::di::detail::get_annotation<novaboot::annotations::OneToMany>(Member);
 
+        if (!collection_loaded<Member>(entity)) return;
+
         std::string placeholders;
         std::vector<Parameter> params{detail::entity_id_parameter(entity)};
-        for (const auto& child : entity.[:Member:]) {
+        for (const auto& child : collection_values<Member>(entity)) {
             if (!placeholders.empty()) placeholders += ", ";
             placeholders += "?";
             params.push_back(detail::entity_id_parameter(child));
@@ -135,7 +162,8 @@ protected:
     void save_one_to_many_association(Entity& entity, const std::shared_ptr<Connection>& conn,
                                       bool parent_is_new) {
         using Field = std::remove_cvref_t<decltype(std::declval<Entity&>().[:Member:])>;
-        static_assert(detail::is_std_vector<Field>::value, "@OneToMany fields must be std::vector<T>");
+        static_assert(detail::is_collection_relation_v<Field>,
+                      "@OneToMany fields must be std::vector<T> or LazyCollection<T>");
         using Child = typename detail::vector_value_type<Field>::type;
         using ChildId = typename detail::entity_id_type<Child>::type;
         constexpr auto one_to_many = novaboot::di::detail::get_annotation<novaboot::annotations::OneToMany>(Member);
@@ -143,9 +171,10 @@ protected:
 
         constexpr bool cascade_on_insert = cascades_persist(one_to_many.cascade);
         constexpr bool cascade_on_update = cascades_merge(one_to_many.cascade);
-        if ((parent_is_new && cascade_on_insert) || (!parent_is_new && cascade_on_update)) {
+        if (collection_loaded<Member>(entity) &&
+            ((parent_is_new && cascade_on_insert) || (!parent_is_new && cascade_on_update))) {
             CrudRepository<Child, ChildId> child_repository(datasource_, conn);
-            for (auto& child : entity.[:Member:]) {
+            for (auto& child : collection_values<Member>(entity)) {
                 detail::set_many_to_one_reference(child, one_to_many.mapped_by, entity);
                 child = child_repository.save(child);
             }
@@ -160,7 +189,8 @@ protected:
     void save_many_to_many_association(Entity& entity, const std::shared_ptr<Connection>& conn,
                                        bool parent_is_new) {
         using Field = std::remove_cvref_t<decltype(std::declval<Entity&>().[:Member:])>;
-        static_assert(detail::is_std_vector<Field>::value, "@ManyToMany fields must be std::vector<T>");
+        static_assert(detail::is_collection_relation_v<Field>,
+                      "@ManyToMany fields must be std::vector<T> or LazyCollection<T>");
         using Related = typename detail::vector_value_type<Field>::type;
         using RelatedId = typename detail::entity_id_type<Related>::type;
         constexpr auto many_to_many = novaboot::di::detail::get_annotation<novaboot::annotations::ManyToMany>(Member);
@@ -173,9 +203,11 @@ protected:
 
         constexpr bool cascade_on_insert = cascades_persist(many_to_many.cascade);
         constexpr bool cascade_on_update = cascades_merge(many_to_many.cascade);
+        if (!collection_loaded<Member>(entity)) return;
+
         if ((parent_is_new && cascade_on_insert) || (!parent_is_new && cascade_on_update)) {
             CrudRepository<Related, RelatedId> related_repository(datasource_, conn);
-            for (auto& related : entity.[:Member:]) {
+            for (auto& related : collection_values<Member>(entity)) {
                 related = related_repository.save(related);
             }
         }
@@ -186,7 +218,7 @@ protected:
                           " WHERE " + std::string(join.join_column) + " = ?"),
                       {detail::entity_id_parameter(entity)});
 
-        for (const auto& related : entity.[:Member:]) {
+        for (const auto& related : collection_values<Member>(entity)) {
             conn->execute(dialect->convert_placeholders(
                               "INSERT INTO " + std::string(join.name) + " (" +
                               std::string(join.join_column) + ", " +
@@ -199,7 +231,8 @@ protected:
     template<std::meta::info Member>
     void delete_one_to_many_association(const ID& id, const std::shared_ptr<Connection>& conn) {
         using Field = std::remove_cvref_t<decltype(std::declval<Entity&>().[:Member:])>;
-        static_assert(detail::is_std_vector<Field>::value, "@OneToMany fields must be std::vector<T>");
+        static_assert(detail::is_collection_relation_v<Field>,
+                      "@OneToMany fields must be std::vector<T> or LazyCollection<T>");
         using Child = typename detail::vector_value_type<Field>::type;
         using ChildId = typename detail::entity_id_type<Child>::type;
         constexpr auto one_to_many = novaboot::di::detail::get_annotation<novaboot::annotations::OneToMany>(Member);
@@ -276,7 +309,11 @@ public:
     virtual ~CrudRepository() = default;
 
     QueryBuilder<Entity> query() {
-        return QueryBuilder<Entity>(datasource_, table_name_, connection_);
+        auto connection = connection_;
+        if (!connection) {
+            connection = TransactionManager::current_connection_for(datasource_.get());
+        }
+        return QueryBuilder<Entity>(datasource_, table_name_, connection);
     }
 
     std::optional<Entity> find_by_id(const ID& id) {
@@ -289,6 +326,7 @@ public:
             detail::EntityLoadContext load_context;
             load_context.datasource = datasource_.get();
             load_context.connection = conn;
+            load_context.retain_connection_for_lazy = connection_ != nullptr;
             return detail::map_row_to_entity<Entity>(rs.get(), &load_context);
         }
         return std::nullopt;
@@ -328,6 +366,7 @@ public:
         detail::EntityLoadContext load_context;
         load_context.datasource = datasource_.get();
         load_context.connection = conn;
+        load_context.retain_connection_for_lazy = connection_ != nullptr;
         while (rs->next()) {
             entities.push_back(detail::map_row_to_entity<Entity>(rs.get(), &load_context));
         }
@@ -682,6 +721,36 @@ public:
         auto builder = query();
         ((builder.template and_<FieldPtrs>(Op::Equal, args)), ...);
         return builder;
+    }
+
+    template<auto FieldPtr, typename Value>
+    std::optional<Entity> find_one_by(const Value& value) {
+        return query().template where<FieldPtr>(Op::Equal, value).single();
+    }
+
+    template<auto FieldPtr, typename Value>
+    std::vector<Entity> find_all_by(const Value& value) {
+        return query().template where<FieldPtr>(Op::Equal, value).list();
+    }
+
+    template<auto FieldPtr, typename Value>
+    bool exists_by(const Value& value) {
+        return query().template where<FieldPtr>(Op::Equal, value).exists();
+    }
+
+    template<auto FieldPtr, typename Value>
+    std::int64_t count_by(const Value& value) {
+        return query().template where<FieldPtr>(Op::Equal, value).count();
+    }
+
+    template<auto FieldPtr, typename Value>
+    std::int64_t delete_by(const Value& value) {
+        auto matches = find_all_by<FieldPtr>(value);
+        const auto deleted = static_cast<std::int64_t>(matches.size());
+        for (const auto& entity : matches) {
+            delete_entity(entity);
+        }
+        return deleted;
     }
 };
 

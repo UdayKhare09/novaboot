@@ -55,7 +55,18 @@ struct [[= Entity("schema_articles") ]] SchemaArticle {
     SchemaAuthor author;
 };
 
+struct [[= Entity("schema_lazy_articles") ]] SchemaLazyArticle {
+    [[= Id() ]]
+    [[= GeneratedValue(GenerationType::AutoIncrement) ]]
+    int id = 0;
+
+    [[= ManyToOne(FetchType::Lazy) ]]
+    [[= JoinColumn("author_id") ]]
+    Lazy<SchemaAuthor> author;
+};
+
 struct [[= Entity("schema_blog_posts") ]] SchemaBlogPost;
+struct [[= Entity("schema_lazy_blog_posts") ]] SchemaLazyBlogPost;
 
 struct [[= Entity("schema_blogs") ]] SchemaBlog {
     [[= Id() ]]
@@ -68,6 +79,17 @@ struct [[= Entity("schema_blogs") ]] SchemaBlog {
     std::vector<SchemaBlogPost> posts;
 };
 
+struct [[= Entity("schema_lazy_blogs") ]] SchemaLazyBlog {
+    [[= Id() ]]
+    [[= GeneratedValue(GenerationType::AutoIncrement) ]]
+    int id = 0;
+
+    std::string title;
+
+    [[= OneToMany("blog", FetchType::Lazy, CascadeType::All, true) ]]
+    LazyCollection<SchemaLazyBlogPost> posts;
+};
+
 struct [[= Entity("schema_blog_posts") ]] SchemaBlogPost {
     [[= Id() ]]
     [[= GeneratedValue(GenerationType::AutoIncrement) ]]
@@ -78,6 +100,18 @@ struct [[= Entity("schema_blog_posts") ]] SchemaBlogPost {
     [[= ManyToOne() ]]
     [[= JoinColumn("blog_id") ]]
     SchemaBlog blog;
+};
+
+struct [[= Entity("schema_lazy_blog_posts") ]] SchemaLazyBlogPost {
+    [[= Id() ]]
+    [[= GeneratedValue(GenerationType::AutoIncrement) ]]
+    int id = 0;
+
+    std::string title;
+
+    [[= ManyToOne(FetchType::Lazy) ]]
+    [[= JoinColumn("blog_id") ]]
+    SchemaLazyBlog blog;
 };
 
 struct [[= Entity("schema_tags") ]] SchemaTag {
@@ -98,6 +132,18 @@ struct [[= Entity("schema_tagged_posts") ]] SchemaTaggedPost {
     [[= ManyToMany(FetchType::Eager) ]]
     [[= JoinTable("schema_post_tags", "post_id", "tag_id") ]]
     std::vector<SchemaTag> tags;
+};
+
+struct [[= Entity("schema_lazy_tagged_posts") ]] SchemaLazyTaggedPost {
+    [[= Id() ]]
+    [[= GeneratedValue(GenerationType::AutoIncrement) ]]
+    int id = 0;
+
+    std::string title;
+
+    [[= ManyToMany(FetchType::Lazy) ]]
+    [[= JoinTable("schema_lazy_post_tags", "post_id", "tag_id") ]]
+    LazyCollection<SchemaTag> tags;
 };
 
 struct SchemaJsonSettings {
@@ -232,6 +278,9 @@ TEST(SchemaGeneratorTest, GeneratesManyToOneForeignKey) {
     EXPECT_NE(SchemaGenerator::create_table_sql<SchemaArticle>(postgres).find(
                   "author_id INTEGER REFERENCES schema_authors(id)"),
               std::string::npos);
+    EXPECT_NE(SchemaGenerator::create_table_sql<SchemaLazyArticle>(sqlite).find(
+                  "author_id INTEGER REFERENCES schema_authors(id)"),
+              std::string::npos);
 }
 
 TEST(SchemaGeneratorTest, PersistsManyToOneForeignKey) {
@@ -359,6 +408,59 @@ TEST(SchemaGeneratorTest, DeletesOneToManyChildrenWhenRemoveCascades) {
     EXPECT_EQ(posts.count(), 0);
 }
 
+TEST(SchemaGeneratorTest, LazyOneToManyLoadsOnFirstAccessAndCanBeFetched) {
+    auto datasource = std::make_shared<SqliteDataSource>(":memory:", 1);
+    SchemaGenerator::create_table<SchemaLazyBlog>(*datasource);
+    SchemaGenerator::create_table<SchemaLazyBlogPost>(*datasource);
+
+    CrudRepository<SchemaLazyBlog, int> blogs(datasource);
+    CrudRepository<SchemaLazyBlogPost, int> posts(datasource);
+
+    SchemaLazyBlog blog;
+    blog.title = "Lazy";
+    blog = blogs.save(blog);
+    posts.save(SchemaLazyBlogPost{.title = "First", .blog = blog});
+    posts.save(SchemaLazyBlogPost{.title = "Second", .blog = blog});
+
+    SchemaLazyBlog other;
+    other.title = "Other lazy";
+    other = blogs.save(other);
+    posts.save(SchemaLazyBlogPost{.title = "Third", .blog = other});
+
+    auto loaded = blogs.find_by_id(blog.id);
+    ASSERT_TRUE(loaded.has_value());
+    EXPECT_FALSE(loaded->posts.loaded());
+    EXPECT_EQ(loaded->posts.count(), 2);
+    EXPECT_FALSE(loaded->posts.loaded()) << "count() should not force hydration";
+
+    const auto& lazy_posts = loaded->posts.get();
+    ASSERT_EQ(lazy_posts.size(), 2);
+    EXPECT_TRUE(loaded->posts.loaded());
+    EXPECT_EQ(lazy_posts[0].title, "First");
+    EXPECT_EQ(lazy_posts[1].title, "Second");
+
+    auto fetched = blogs.query()
+        .fetch<&SchemaLazyBlog::posts>()
+        .where<&SchemaLazyBlog::id>(Op::Equal, blog.id)
+        .single();
+    ASSERT_TRUE(fetched.has_value());
+    EXPECT_TRUE(fetched->posts.loaded());
+    ASSERT_EQ(fetched->posts.get().size(), 2);
+
+    auto fetched_all = blogs.query()
+        .fetch<&SchemaLazyBlog::posts>()
+        .order_by<&SchemaLazyBlog::id>()
+        .list();
+    ASSERT_EQ(fetched_all.size(), 2);
+    EXPECT_TRUE(fetched_all[0].posts.loaded());
+    ASSERT_EQ(fetched_all[0].posts.get().size(), 2);
+    EXPECT_EQ(fetched_all[0].posts.get()[0].title, "First");
+    EXPECT_EQ(fetched_all[0].posts.get()[1].title, "Second");
+    EXPECT_TRUE(fetched_all[1].posts.loaded());
+    ASSERT_EQ(fetched_all[1].posts.get().size(), 1);
+    EXPECT_EQ(fetched_all[1].posts.get()[0].title, "Third");
+}
+
 TEST(SchemaGeneratorTest, CreatesManyToManyJoinTableAndEagerLoadsRelatedRows) {
     auto datasource = std::make_shared<SqliteDataSource>(":memory:", 1);
     SchemaGenerator::create_table<SchemaTag>(*datasource);
@@ -387,6 +489,64 @@ TEST(SchemaGeneratorTest, CreatesManyToManyJoinTableAndEagerLoadsRelatedRows) {
     ASSERT_EQ(loaded->tags.size(), 2);
     EXPECT_EQ(loaded->tags[0].label, "orm");
     EXPECT_EQ(loaded->tags[1].label, "cpp");
+}
+
+TEST(SchemaGeneratorTest, LazyManyToManyLoadsOnFirstAccessAndCanBeFetched) {
+    auto datasource = std::make_shared<SqliteDataSource>(":memory:", 1);
+    SchemaGenerator::create_table<SchemaTag>(*datasource);
+    SchemaGenerator::create_table<SchemaLazyTaggedPost>(*datasource);
+
+    auto conn = datasource->get_connection();
+    auto join_table = conn->query(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_lazy_post_tags'");
+    ASSERT_TRUE(join_table->next());
+    conn.reset();
+
+    CrudRepository<SchemaLazyTaggedPost, int> posts(datasource);
+
+    SchemaLazyTaggedPost post;
+    post.title = "Lazy join";
+    post.tags.push_back(SchemaTag{.label = "lazy"});
+    post.tags.push_back(SchemaTag{.label = "fetch"});
+    post = posts.save(post);
+
+    SchemaLazyTaggedPost other;
+    other.title = "Other join";
+    other.tags.push_back(SchemaTag{.label = "batch"});
+    other = posts.save(other);
+
+    auto loaded = posts.find_by_id(post.id);
+    ASSERT_TRUE(loaded.has_value());
+    EXPECT_FALSE(loaded->tags.loaded());
+    EXPECT_EQ(loaded->tags.count(), 2);
+    EXPECT_FALSE(loaded->tags.loaded()) << "count() should not force hydration";
+
+    const auto& tags = loaded->tags.get();
+    ASSERT_EQ(tags.size(), 2);
+    EXPECT_TRUE(loaded->tags.loaded());
+    EXPECT_EQ(tags[0].label, "lazy");
+    EXPECT_EQ(tags[1].label, "fetch");
+
+    auto fetched = posts.query()
+        .fetch<&SchemaLazyTaggedPost::tags>()
+        .where<&SchemaLazyTaggedPost::id>(Op::Equal, post.id)
+        .single();
+    ASSERT_TRUE(fetched.has_value());
+    EXPECT_TRUE(fetched->tags.loaded());
+    ASSERT_EQ(fetched->tags.get().size(), 2);
+
+    auto fetched_all = posts.query()
+        .fetch<&SchemaLazyTaggedPost::tags>()
+        .order_by<&SchemaLazyTaggedPost::id>()
+        .list();
+    ASSERT_EQ(fetched_all.size(), 2);
+    EXPECT_TRUE(fetched_all[0].tags.loaded());
+    ASSERT_EQ(fetched_all[0].tags.get().size(), 2);
+    EXPECT_EQ(fetched_all[0].tags.get()[0].label, "lazy");
+    EXPECT_EQ(fetched_all[0].tags.get()[1].label, "fetch");
+    EXPECT_TRUE(fetched_all[1].tags.loaded());
+    ASSERT_EQ(fetched_all[1].tags.get().size(), 1);
+    EXPECT_EQ(fetched_all[1].tags.get()[0].label, "batch");
 }
 
 TEST(SchemaGeneratorTest, DeletesManyToManyJoinRowsButKeepsRelatedEntities) {

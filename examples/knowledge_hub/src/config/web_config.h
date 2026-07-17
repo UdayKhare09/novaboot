@@ -2,6 +2,7 @@
 
 #include "novaboot/config/app_config.h"
 #include "novaboot/db/drivers/postgres/postgres_driver.h"
+#include "novaboot/db/transaction.h"
 #include "novaboot/middleware/cors_middleware.h"
 #include "novaboot/middleware/request_logging_middleware.h"
 #include "novaboot/middleware/security_headers_middleware.h"
@@ -28,6 +29,12 @@ struct [[= Configuration() ]] WebConfig {
         novaboot::db::show_sql = show_sql;
         return std::make_shared<novaboot::db::postgres::PostgresDataSource>(
             database_connection, 4);
+    }
+
+    [[= Bean() ]]
+    novaboot::db::TransactionManager* transaction_manager(
+        std::shared_ptr<novaboot::db::DataSource> datasource) {
+        return new novaboot::db::TransactionManager(std::move(datasource));
     }
 
     [[= Bean() ]] [[= Order(1) ]]

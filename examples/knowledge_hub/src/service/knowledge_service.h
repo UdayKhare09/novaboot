@@ -7,12 +7,9 @@
 #include "repository/project_repository.h"
 
 #include <chrono>
-#include <cctype>
 #include <memory>
 #include <stdexcept>
 #include <string>
-#include <string_view>
-#include <utility>
 #include <vector>
 
 namespace knowledge_hub::service {
@@ -38,52 +35,19 @@ using knowledge_hub::repository::ProjectRepository;
 using namespace novaboot::annotations;
 
 struct [[= Service() ]] KnowledgeService {
-    std::shared_ptr<novaboot::db::DataSource> datasource;
+    novaboot::db::TransactionManager& transactions;
     ProjectRepository& projects;
     ContributorRepository& contributors;
     ArticleRepository& articles;
 
-    KnowledgeService(std::shared_ptr<novaboot::db::DataSource> ds,
+    KnowledgeService(novaboot::db::TransactionManager& transaction_manager,
                      ProjectRepository& project_repo,
                      ContributorRepository& contributor_repo,
                      ArticleRepository& article_repo)
-        : datasource(std::move(ds)),
+        : transactions(transaction_manager),
           projects(project_repo),
           contributors(contributor_repo),
           articles(article_repo) {}
-
-    static std::string trim(std::string value) {
-        auto first = value.begin();
-        while (first != value.end() && std::isspace(static_cast<unsigned char>(*first))) ++first;
-        auto last = value.end();
-        while (last != first && std::isspace(static_cast<unsigned char>(*(last - 1)))) --last;
-        return std::string(first, last);
-    }
-
-    static std::vector<std::string> split_csv(std::string_view csv) {
-        std::vector<std::string> values;
-        std::string current;
-        for (const char ch : csv) {
-            if (ch == ',') {
-                auto value = trim(current);
-                if (!value.empty()) values.push_back(std::move(value));
-                current.clear();
-            } else {
-                current.push_back(ch);
-            }
-        }
-        auto value = trim(current);
-        if (!value.empty()) values.push_back(std::move(value));
-        return values;
-    }
-
-    static std::vector<int> split_id_csv(std::string_view csv) {
-        std::vector<int> ids;
-        for (const auto& value : split_csv(csv)) {
-            ids.push_back(std::stoi(value));
-        }
-        return ids;
-    }
 
     static ContributorView to_view(const Contributor& contributor) {
         return ContributorView{
@@ -195,10 +159,7 @@ struct [[= Service() ]] KnowledgeService {
         project.slug = request.slug;
         project.name = request.name;
         project.description = request.description;
-        project.settings = ProjectSettings{
-            .public_index = request.public_index,
-            .review_limit = request.review_limit,
-        };
+        project.settings = request.settings;
         return to_view(projects.save(project));
     }
 
@@ -217,91 +178,82 @@ struct [[= Service() ]] KnowledgeService {
         return to_view(contributors.save(contributor));
     }
 
+    [[= Transactional() ]]
     ArticleDetail create_article(const ArticleRequest& request) {
         if (request.project_id == 0 || request.title.empty()) {
             throw std::runtime_error("Project and title are required");
         }
 
-        novaboot::db::Transaction transaction(datasource);
-        auto tx_projects = projects.scoped(transaction.connection());
-        auto tx_contributors = contributors.scoped(transaction.connection());
-        auto tx_articles = articles.scoped(transaction.connection());
+        return transactions.execute([&](std::shared_ptr<novaboot::db::Connection>) {
+            auto project = projects.find_by_id(request.project_id);
+            if (!project) throw std::runtime_error("Project not found");
 
-        auto project = tx_projects.find_by_id(request.project_id);
-        if (!project) throw std::runtime_error("Project not found");
+            Article article;
+            article.project = *project;
+            article.title = request.title;
+            article.body = request.body;
+            article.status = request.status;
+            article.metadata = request.metadata;
+            article.published_at = std::chrono::system_clock::now();
 
-        Article article;
-        article.project = *project;
-        article.title = request.title;
-        article.body = request.body;
-        article.status = request.status;
-        article.metadata = ArticleMetadata{
-            .reading_minutes = request.reading_minutes,
-            .topics = split_csv(request.topics_csv),
-        };
-        article.published_at = std::chrono::system_clock::now();
+            for (const auto contributor_id : request.contributor_ids) {
+                auto contributor = contributors.find_by_id(contributor_id);
+                if (!contributor) throw std::runtime_error("Contributor not found");
+                article.contributors.push_back(*contributor);
+            }
 
-        for (const auto contributor_id : split_id_csv(request.contributor_ids_csv)) {
-            auto contributor = tx_contributors.find_by_id(contributor_id);
-            if (!contributor) throw std::runtime_error("Contributor not found");
-            article.contributors.push_back(*contributor);
-        }
-
-        auto saved = tx_articles.save(article);
-        transaction.commit();
-        return to_detail(saved);
+            auto saved = articles.save(article);
+            return to_detail(saved);
+        });
     }
 
+    [[= Transactional() ]]
     DashboardView seed_demo() {
-        novaboot::db::Transaction transaction(datasource);
-        auto tx_projects = projects.scoped(transaction.connection());
-        auto tx_contributors = contributors.scoped(transaction.connection());
-        auto tx_articles = articles.scoped(transaction.connection());
+        return transactions.execute([&](std::shared_ptr<novaboot::db::Connection>) {
+            articles.delete_all();
+            contributors.delete_all();
+            projects.delete_all();
 
-        tx_articles.delete_all();
-        tx_contributors.delete_all();
-        tx_projects.delete_all();
+            Project platform;
+            platform.slug = "platform";
+            platform.name = "Platform Playbook";
+            platform.description = "Operational notes for the NovaBoot platform team.";
+            platform.settings = ProjectSettings{.public_index = true, .review_limit = 2};
+            platform = projects.save(platform);
 
-        Project platform;
-        platform.slug = "platform";
-        platform.name = "Platform Playbook";
-        platform.description = "Operational notes for the NovaBoot platform team.";
-        platform.settings = ProjectSettings{.public_index = true, .review_limit = 2};
-        platform = tx_projects.save(platform);
+            Project research;
+            research.slug = "research";
+            research.name = "Research Notes";
+            research.description = "Experiments, architecture decisions, and technical trails.";
+            research.settings = ProjectSettings{.public_index = false, .review_limit = 3};
+            research = projects.save(research);
 
-        Project research;
-        research.slug = "research";
-        research.name = "Research Notes";
-        research.description = "Experiments, architecture decisions, and technical trails.";
-        research.settings = ProjectSettings{.public_index = false, .review_limit = 3};
-        research = tx_projects.save(research);
+            Contributor ada = contributors.save(Contributor{.handle = "ada", .display_name = "Ada Lovelace", .role = "Editor"});
+            Contributor grace = contributors.save(Contributor{.handle = "grace", .display_name = "Grace Hopper", .role = "Reviewer"});
+            Contributor linus = contributors.save(Contributor{.handle = "linus", .display_name = "Linus Torvalds", .role = "Author"});
 
-        Contributor ada = tx_contributors.save(Contributor{.handle = "ada", .display_name = "Ada Lovelace", .role = "Editor"});
-        Contributor grace = tx_contributors.save(Contributor{.handle = "grace", .display_name = "Grace Hopper", .role = "Reviewer"});
-        Contributor linus = tx_contributors.save(Contributor{.handle = "linus", .display_name = "Linus Torvalds", .role = "Author"});
+            Article onboarding;
+            onboarding.project = platform;
+            onboarding.title = "Postgres-backed repositories";
+            onboarding.body = "This article is saved through NovaBoot repositories, hydrated with ManyToOne and ManyToMany relations, and shown in the browser UI.";
+            onboarding.status = ArticleStatus::Published;
+            onboarding.published_at = std::chrono::system_clock::now();
+            onboarding.metadata = ArticleMetadata{.reading_minutes = 5, .topics = {"postgres", "repository", "schema"}};
+            onboarding.contributors = {ada, grace};
+            articles.save(onboarding);
 
-        Article onboarding;
-        onboarding.project = platform;
-        onboarding.title = "Postgres-backed repositories";
-        onboarding.body = "This article is saved through NovaBoot repositories, hydrated with ManyToOne and ManyToMany relations, and shown in the browser UI.";
-        onboarding.status = ArticleStatus::Published;
-        onboarding.published_at = std::chrono::system_clock::now();
-        onboarding.metadata = ArticleMetadata{.reading_minutes = 5, .topics = {"postgres", "repository", "schema"}};
-        onboarding.contributors = {ada, grace};
-        tx_articles.save(onboarding);
+            Article migrations;
+            migrations.project = research;
+            migrations.title = "Schema guard and migrations";
+            migrations.body = "Schema generation validates the existing tables and migrations remain explicit application code.";
+            migrations.status = ArticleStatus::Review;
+            migrations.published_at = std::chrono::system_clock::now();
+            migrations.metadata = ArticleMetadata{.reading_minutes = 4, .topics = {"schema", "migration"}};
+            migrations.contributors = {grace, linus};
+            articles.save(migrations);
 
-        Article migrations;
-        migrations.project = research;
-        migrations.title = "Schema guard and migrations";
-        migrations.body = "Schema generation validates the existing tables and migrations remain explicit application code.";
-        migrations.status = ArticleStatus::Review;
-        migrations.published_at = std::chrono::system_clock::now();
-        migrations.metadata = ArticleMetadata{.reading_minutes = 4, .topics = {"schema", "migration"}};
-        migrations.contributors = {grace, linus};
-        tx_articles.save(migrations);
-
-        transaction.commit();
-        return dashboard();
+            return dashboard();
+        });
     }
 };
 

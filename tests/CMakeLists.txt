@@ -57,10 +57,10 @@ novaboot_test(test_server_basic integration/test_server_basic.cpp)
 novaboot_test(test_exception_handler unit/test_exception_handler.cpp)
 novaboot_test(test_validation unit/test_validation.cpp)
 novaboot_test(test_query_validation unit/test_query_validation.cpp)
+novaboot_test(test_app_test_client unit/test_app_test_client.cpp)
 
 # ─── Config unit tests ────────────────────────────────────────────────────────
 novaboot_test(test_app_config unit/test_app_config.cpp)
 novaboot_test(test_client_protocols unit/test_client_protocols.cpp)
 novaboot_test(test_annotations unit/test_annotations.cpp)
 novaboot_test(test_controller_advice unit/test_controller_advice.cpp)
-

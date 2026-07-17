@@ -19,14 +19,12 @@ struct ProjectRequest {
     std::string slug;
     std::string name;
     std::string description;
-    bool public_index = true;
-    int review_limit = 2;
+    ProjectSettings settings;
 
     inline static const Schema<ProjectRequest> validator =
         Schema<ProjectRequest>()
             .field<&ProjectRequest::slug>("slug").not_empty().size(2, 80)
-            .field<&ProjectRequest::name>("name").not_empty().size(2, 120)
-            .field<&ProjectRequest::review_limit>("review_limit").min(1).max(20);
+            .field<&ProjectRequest::name>("name").not_empty().size(2, 120);
 };
 
 struct ContributorRequest {
@@ -45,15 +43,13 @@ struct ArticleRequest {
     std::string title;
     std::string body;
     ArticleStatus status = ArticleStatus::Draft;
-    int reading_minutes = 3;
-    std::string topics_csv;
-    std::string contributor_ids_csv;
+    ArticleMetadata metadata;
+    std::vector<int> contributor_ids;
 
     inline static const Schema<ArticleRequest> validator =
         Schema<ArticleRequest>()
             .field<&ArticleRequest::project_id>("project_id").min(1)
-            .field<&ArticleRequest::title>("title").not_empty().size(2, 160)
-            .field<&ArticleRequest::reading_minutes>("reading_minutes").min(1).max(240);
+            .field<&ArticleRequest::title>("title").not_empty().size(2, 160);
 };
 
 struct ContributorView {

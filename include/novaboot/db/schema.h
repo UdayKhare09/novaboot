@@ -167,14 +167,15 @@ private:
         if constexpr (many_to_one) {
             static_assert(novaboot::di::detail::has_annotation<JoinColumn>(Member),
                           "@ManyToOne requires an explicit @JoinColumn");
+            using Target = typename detail::relation_value_type<Field>::type;
             constexpr auto join = novaboot::di::detail::get_annotation<JoinColumn>(Member);
             const auto referenced = join.referenced_column[0] != '\0'
                 ? std::string(join.referenced_column)
-                : primary_key_column<Field>();
-            std::string definition = std::string(name.name) + " " + primary_key_type<Field>(dialect);
+                : primary_key_column<Target>();
+            std::string definition = std::string(name.name) + " " + primary_key_type<Target>(dialect);
             if (!join.nullable) definition += " NOT NULL";
             if (join.unique) definition += " UNIQUE";
-            definition += " REFERENCES " + table_name<Field>() + "(" + referenced + ")";
+            definition += " REFERENCES " + table_name<Target>() + "(" + referenced + ")";
             return definition;
         }
 
@@ -240,8 +241,9 @@ private:
         if constexpr (many_to_one) {
             static_assert(novaboot::di::detail::has_annotation<JoinColumn>(Member),
                           "@ManyToOne requires an explicit @JoinColumn");
+            using Target = typename detail::relation_value_type<Field>::type;
             constexpr auto join = novaboot::di::detail::get_annotation<JoinColumn>(Member);
-            const auto type = primary_key_type<Field>(dialect);
+            const auto type = primary_key_type<Target>(dialect);
             return ColumnSpec{
                 .name = name.name,
                 .type = canonical_type(type),
@@ -433,7 +435,8 @@ private:
     template<typename Entity, std::meta::info Member>
     static std::string join_table_sql(const SqlDialect& dialect) {
         using Field = std::remove_cvref_t<decltype(std::declval<Entity&>().[:Member:])>;
-        static_assert(detail::is_std_vector<Field>::value, "@ManyToMany fields must be std::vector<T>");
+        static_assert(detail::is_collection_relation_v<Field>,
+                      "@ManyToMany fields must be std::vector<T> or LazyCollection<T>");
         using Related = typename detail::vector_value_type<Field>::type;
         static_assert(novaboot::di::detail::has_annotation<novaboot::annotations::JoinTable>(Member),
                       "@ManyToMany requires @JoinTable");

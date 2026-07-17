@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "novaboot/novaboot.h"
+#include "novaboot/db/transaction.h"
 
 using namespace novaboot;
 using namespace novaboot::di;
@@ -11,6 +12,59 @@ static int g_repository_calls = 0;
 static int g_post_construct_calls = 0;
 static int g_pre_destroy_calls = 0;
 static int g_controller_calls = 0;
+static int g_tx_controller_calls = 0;
+
+struct TxRouteState {
+    int begins = 0;
+    int commits = 0;
+    int rollbacks = 0;
+};
+
+class TxRouteConnection : public novaboot::db::Connection {
+public:
+    explicit TxRouteConnection(std::shared_ptr<TxRouteState> state)
+        : state_(std::move(state)) {}
+
+    std::int64_t execute(std::string_view, const std::vector<novaboot::db::Parameter>& = {}) override {
+        return 0;
+    }
+
+    std::unique_ptr<novaboot::db::ResultSet> query(
+        std::string_view, const std::vector<novaboot::db::Parameter>& = {}) override {
+        throw std::logic_error("fake transaction route connection does not support queries");
+    }
+
+    std::int64_t last_insert_id() override { return 0; }
+    void begin_transaction() override { state_->begins++; }
+    void commit() override { state_->commits++; }
+    void rollback() override { state_->rollbacks++; }
+
+private:
+    std::shared_ptr<TxRouteState> state_;
+};
+
+class TxRouteDataSource : public novaboot::db::DataSource {
+public:
+    explicit TxRouteDataSource(std::shared_ptr<TxRouteState> state)
+        : state_(std::move(state)),
+          connection_(std::make_shared<TxRouteConnection>(state_)),
+          dialect_(std::make_shared<novaboot::db::SqliteDialect>()) {}
+
+    std::shared_ptr<novaboot::db::Connection> get_connection() override {
+        return connection_;
+    }
+
+    std::shared_ptr<novaboot::db::SqlDialect> dialect() override {
+        return dialect_;
+    }
+
+    void close() override {}
+
+private:
+    std::shared_ptr<TxRouteState> state_;
+    std::shared_ptr<novaboot::db::Connection> connection_;
+    std::shared_ptr<novaboot::db::SqlDialect> dialect_;
+};
 
 struct [[= Repository() ]] TestRepository {
     void do_db_work() {
@@ -53,6 +107,15 @@ struct [[= RestController("/api/test") ]] TestController {
     void create(http3::Request&, http3::Response&, context::RequestContext&) {
         g_controller_calls += 10;
         service.do_service_work();
+    }
+};
+
+struct [[= RestController("/api/tx") ]] TxRouteController {
+    [[= PostMapping("/fail") ]]
+    [[= Transactional() ]]
+    void fail(http3::Request&, http3::Response&, context::RequestContext&) {
+        g_tx_controller_calls++;
+        throw std::runtime_error("route failure");
     }
 };
 
@@ -122,4 +185,46 @@ TEST(AnnotationsTest, FullLifecycleAndRouteScanning) {
     // Shutdown container and verify PreDestroy
     di_root.shutdown();
     EXPECT_EQ(g_pre_destroy_calls, 1);
+}
+
+TEST(AnnotationsTest, TransactionalRouteRollsBackOnException) {
+    g_tx_controller_calls = 0;
+    auto state = std::make_shared<TxRouteState>();
+    auto ds = std::make_shared<TxRouteDataSource>(state);
+
+    RootContainer di_root;
+    di_root.register_bean<std::shared_ptr<novaboot::db::DataSource>>(
+        [ds](ContainerBase&) {
+            return new std::shared_ptr<novaboot::db::DataSource>(ds);
+        });
+    di_root.register_bean<novaboot::db::TransactionManager>(
+        [](ContainerBase& c) {
+            return new novaboot::db::TransactionManager(
+                c.resolve<std::shared_ptr<novaboot::db::DataSource>>());
+        });
+    register_beans<TxRouteController>(di_root);
+    di_root.build();
+
+    router::Router router;
+    register_routes<TxRouteController>(router);
+
+    auto match = router.match(router::Method::POST, "/api/tx/fail");
+    ASSERT_NE(match.handler, nullptr);
+
+    auto shard = di_root.make_shard_container();
+    auto req_container = shard->make_request_container();
+    context::RequestContext ctx;
+    ctx.bind_container(*req_container);
+
+    http3::Request req;
+    req.set_method("POST");
+    http3::Response res;
+
+    EXPECT_THROW((*match.handler)(req, res, ctx), std::runtime_error);
+    EXPECT_EQ(g_tx_controller_calls, 1);
+    EXPECT_EQ(state->begins, 1);
+    EXPECT_EQ(state->commits, 0);
+    EXPECT_EQ(state->rollbacks, 1);
+
+    di_root.shutdown();
 }

@@ -18,6 +18,7 @@
 #include "novaboot/router/response_entity.h"
 #include "novaboot/router/json.h"
 #include "novaboot/validation/validation.h"
+#include "novaboot/db/transaction.h"
 #ifdef __cpp_impl_reflection
 #  include <meta>
 #endif
@@ -66,7 +67,35 @@ consteval auto get_parameters() {
     }
     return result;
 }
+
+template<typename Ann>
+consteval bool has_annotation(std::meta::info target) {
+    for (auto ann : std::meta::annotations_of(std::meta::dealias(target))) {
+        if (std::meta::is_same_type(std::meta::remove_cv(std::meta::type_of(ann)), ^^Ann)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+template<typename Ann>
+consteval Ann get_annotation(std::meta::info target) {
+    for (auto ann : std::meta::annotations_of(std::meta::dealias(target))) {
+        if (std::meta::is_same_type(std::meta::remove_cv(std::meta::type_of(ann)), ^^Ann)) {
+            return std::meta::extract<Ann>(ann);
+        }
+    }
+    return Ann{};
+}
 #endif
+
+template<typename T>
+inline constexpr bool is_query_parseable_v =
+    std::is_same_v<std::remove_cvref_t<T>, std::string> ||
+    std::is_same_v<std::remove_cvref_t<T>, std::string_view> ||
+    std::is_same_v<std::remove_cvref_t<T>, bool> ||
+    std::is_enum_v<std::remove_cvref_t<T>> ||
+    std::is_arithmetic_v<std::remove_cvref_t<T>>;
 
 template<typename T>
 std::optional<T> parse_value(std::string_view val) {
@@ -92,11 +121,13 @@ std::optional<T> parse_value(std::string_view val) {
             return static_cast<CleanT>(int_val);
         }
         return std::nullopt;
-    } else {
+    } else if constexpr (std::is_arithmetic_v<CleanT>) {
         CleanT result{};
         auto [ptr, ec] = std::from_chars(val.data(), val.data() + val.size(), result);
         if (ec != std::errc{}) return std::nullopt;
         return result;
+    } else {
+        return std::nullopt;
     }
 }
 
@@ -111,9 +142,11 @@ T deserialize_query(const http3::Request& req) {
             auto q_val = req.query_param(name);
             if (q_val) {
                 using MemberType = std::remove_cvref_t<decltype(obj.*&[:m:])>;
-                auto parsed = parse_value<MemberType>(*q_val);
-                if (parsed) {
-                    obj.*&[:m:] = *parsed;
+                if constexpr (is_query_parseable_v<MemberType>) {
+                    auto parsed = parse_value<MemberType>(*q_val);
+                    if (parsed) {
+                        obj.*&[:m:] = *parsed;
+                    }
                 }
             }
         }
@@ -431,6 +464,17 @@ consteval std::meta::info find_method_meta() {
     }
     return {};
 }
+
+template<std::meta::info m>
+novaboot::db::TransactionOptions transaction_options_from_annotation() {
+    constexpr auto transactional = novaboot::detail::get_annotation<novaboot::annotations::Transactional>(m);
+    novaboot::db::TransactionOptions options;
+    options.propagation = transactional.propagation;
+    options.isolation = transactional.isolation;
+    options.read_only = transactional.read_only;
+    options.timeout_seconds = transactional.timeout_seconds;
+    return options;
+}
 #endif
 } // namespace detail
 
@@ -444,7 +488,15 @@ auto handler() {
         using InvokerType = typename Traits::template invoker_type<m_meta>;
 
         auto& controller = ctx.inject<Class>();
-        InvokerType::invoke(controller, MethodPtr, req, res, ctx);
+        if constexpr (novaboot::detail::has_annotation<novaboot::annotations::Transactional>(m_meta)) {
+            auto& transactions = ctx.inject<novaboot::db::TransactionManager>();
+            auto options = detail::transaction_options_from_annotation<m_meta>();
+            transactions.execute(options, [&](std::shared_ptr<novaboot::db::Connection>) {
+                InvokerType::invoke(controller, MethodPtr, req, res, ctx);
+            });
+        } else {
+            InvokerType::invoke(controller, MethodPtr, req, res, ctx);
+        }
     };
 }
 #endif

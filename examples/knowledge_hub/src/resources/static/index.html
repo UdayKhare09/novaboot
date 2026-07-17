@@ -528,8 +528,10 @@
             slug: data.slug,
             name: data.name,
             description: data.description,
-            public_index: data.public_index === "true",
-            review_limit: Number(data.review_limit || 2)
+            settings: {
+              public_index: data.public_index === "true",
+              review_limit: Number(data.review_limit || 2)
+            }
           })
         });
         await loadDashboard();
@@ -561,9 +563,11 @@
             title: form.get("title"),
             body: form.get("body"),
             status: form.get("status"),
-            reading_minutes: Number(form.get("reading_minutes") || 3),
-            topics_csv: form.get("topics"),
-            contributor_ids_csv: selected.join(",")
+            metadata: {
+              reading_minutes: Number(form.get("reading_minutes") || 3),
+              topics: String(form.get("topics") || "").split(",").map((x) => x.trim()).filter(Boolean)
+            },
+            contributor_ids: selected
           })
         });
         await loadDashboard();

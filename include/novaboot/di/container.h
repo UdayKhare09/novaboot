@@ -551,7 +551,9 @@ namespace detail {
     template<typename T>
     consteval std::meta::info get_constructor_typelist() {
         constexpr auto ctx = std::meta::access_context::current();
+        std::meta::info annotated_ctor = std::meta::info{};
         std::meta::info target_ctor = std::meta::info{};
+        bool found_annotated = false;
         bool found = false;
         std::size_t max_params = 0;
 
@@ -569,6 +571,10 @@ namespace detail {
                 }
                 
                 if (!is_copy_or_move) {
+                    if (has_annotation<novaboot::annotations::Autowired>(m)) {
+                        annotated_ctor = m;
+                        found_annotated = true;
+                    }
                     if (!found || params.size() > max_params) {
                         target_ctor = m;
                         max_params = params.size();
@@ -576,6 +582,11 @@ namespace detail {
                     }
                 }
             }
+        }
+
+        if (found_annotated) {
+            target_ctor = annotated_ctor;
+            found = true;
         }
 
         if (!found) {

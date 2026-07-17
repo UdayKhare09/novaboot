@@ -141,5 +141,62 @@ TEST(QueryValidationTest, ZeroCopyJsonDeserialization) {
     EXPECT_EQ(controller.last_name, "John Doe");
     EXPECT_EQ(controller.last_age, 30);
 }
-#endif
 
+struct NestedSettingsDto {
+    bool enabled = false;
+    std::vector<int> levels;
+};
+
+struct RichBodyDto {
+    std::string title;
+    NestedSettingsDto settings;
+    std::vector<std::string> tags;
+
+    inline static const novaboot::validation::Schema<RichBodyDto> validator =
+        novaboot::validation::Schema<RichBodyDto>()
+            .field<&RichBodyDto::title>("title").not_empty();
+};
+
+class RichBodyController {
+public:
+    RichBodyDto last;
+    bool called = false;
+
+    void post_rich(RichBodyDto dto) {
+        called = true;
+        last = std::move(dto);
+    }
+};
+
+TEST(QueryValidationTest, JsonBodyStructMayContainNestedObjectsAndVectors) {
+    RichBodyController controller;
+    http3::Request req;
+    req.set_method("POST");
+    const char* payload = R"({
+        "title": "nested",
+        "settings": { "enabled": true, "levels": [1, 2, 3] },
+        "tags": ["orm", "json"]
+    })";
+    req.append_body(reinterpret_cast<const uint8_t*>(payload), strlen(payload));
+
+    http3::Response res;
+    context::RequestContext ctx;
+
+    using InvokerType = detail::Invoker<
+        RichBodyController,
+        ^^RichBodyController::post_rich,
+        void,
+        RichBodyDto
+    >;
+
+    InvokerType::invoke(controller, &RichBodyController::post_rich, req, res, ctx);
+
+    ASSERT_TRUE(controller.called);
+    EXPECT_EQ(controller.last.title, "nested");
+    EXPECT_TRUE(controller.last.settings.enabled);
+    ASSERT_EQ(controller.last.settings.levels.size(), 3);
+    EXPECT_EQ(controller.last.settings.levels[2], 3);
+    ASSERT_EQ(controller.last.tags.size(), 2);
+    EXPECT_EQ(controller.last.tags[1], "json");
+}
+#endif

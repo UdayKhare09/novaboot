@@ -7,6 +7,7 @@
 #include "novaboot/annotations/stereotypes.h"
 #include "novaboot/di/container.h"
 #include "novaboot/db/db_client.h"
+#include "novaboot/db/lazy.h"
 #include "novaboot/db/uuid.h"
 #include "novaboot/router/json.h"
 #include <chrono>
@@ -14,6 +15,7 @@
 #include <memory>
 #include <sstream>
 #include <type_traits>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -23,6 +25,10 @@ struct EntityLoadContext {
     DataSource* datasource = nullptr;
     std::shared_ptr<Connection> connection;
     std::unordered_set<std::string> loading;
+    std::unordered_set<std::string> fetch_members;
+    std::unordered_map<std::string, std::string> joined_fetch_prefixes;
+    std::string column_prefix;
+    bool retain_connection_for_lazy = false;
 };
 
 template<typename T>
@@ -32,6 +38,12 @@ template<typename Value, typename Allocator>
 struct is_std_vector<std::vector<Value, Allocator>> : std::true_type {};
 
 template<typename T>
+struct is_lazy_collection : std::false_type {};
+
+template<typename Value>
+struct is_lazy_collection<novaboot::db::LazyCollection<Value>> : std::true_type {};
+
+template<typename T>
 struct vector_value_type {
     using type = void;
 };
@@ -39,6 +51,31 @@ struct vector_value_type {
 template<typename Value, typename Allocator>
 struct vector_value_type<std::vector<Value, Allocator>> {
     using type = Value;
+};
+
+template<typename Value>
+struct vector_value_type<novaboot::db::LazyCollection<Value>> {
+    using type = Value;
+};
+
+template<typename T>
+inline constexpr bool is_collection_relation_v =
+    is_std_vector<T>::value || is_lazy_collection<T>::value;
+
+template<typename T>
+struct is_lazy_relation : std::false_type {};
+
+template<typename T>
+struct is_lazy_relation<novaboot::db::Lazy<T>> : std::true_type {};
+
+template<typename T>
+struct relation_value_type {
+    using type = T;
+};
+
+template<typename T>
+struct relation_value_type<novaboot::db::Lazy<T>> {
+    using type = T;
 };
 
 // ---------------------------------------------------------------------------
@@ -88,6 +125,17 @@ consteval MemberList get_enumerators() {
         if (result.size < 128) result.data[result.size++] = e;
     }
     return result;
+}
+
+template<typename Enum>
+std::string enum_name(Enum value) {
+    static constexpr auto enumerators = get_enumerators<Enum>();
+    template for (constexpr auto e : enumerators) {
+        if (value == [:e:]) {
+            return std::string(std::meta::identifier_of(e));
+        }
+    }
+    return std::to_string(static_cast<std::int64_t>(value));
 }
 
 // ---------------------------------------------------------------------------
@@ -156,6 +204,19 @@ consteval ColumnInfo get_column_name() {
     return ColumnInfo{};
 }
 
+template<typename Class, auto FieldPtr>
+consteval std::meta::info get_member_info_for_field() {
+    static constexpr auto members = get_members<Class>();
+    template for (constexpr auto m : members) {
+        if constexpr (std::meta::is_nonstatic_data_member(m)) {
+            if constexpr (std::is_same_v<decltype(&[:m:]), decltype(FieldPtr)>) {
+                if constexpr (&[:m:] == FieldPtr) return m;
+            }
+        }
+    }
+    return std::meta::info{};
+}
+
 template<typename T>
 consteval novaboot::annotations::Entity get_table_metadata() {
     using namespace novaboot::annotations;
@@ -199,6 +260,26 @@ std::string get_select_column_list(std::string_view qualifier) {
 }
 
 template<typename T>
+std::string get_select_column_list_with_aliases(std::string_view qualifier,
+                                                std::string_view alias_prefix) {
+    static constexpr auto members = get_members<T>();
+    std::string columns;
+
+    template for (constexpr auto m : members) {
+        if constexpr (is_persisted_entity_member<m>()) {
+            constexpr auto column = get_member_column_name<m>();
+            if (!columns.empty()) columns += ", ";
+            if (!qualifier.empty()) {
+                columns += std::string(qualifier) + ".";
+            }
+            columns += std::string(column.name) + " AS " +
+                       std::string(alias_prefix) + std::string(column.name);
+        }
+    }
+    return columns;
+}
+
+template<typename T>
 bool is_persisted_column(std::string_view column_name) {
     static constexpr auto members = get_members<T>();
     template for (constexpr auto m : members) {
@@ -215,6 +296,11 @@ inline int find_column_index(ResultSet* rs, std::string_view column_name) {
         if (rs->column_name(index) == column_name) return index;
     }
     return -1;
+}
+
+inline std::string prefixed_column_name(EntityLoadContext* context, std::string_view column_name) {
+    if (!context || context->column_prefix.empty()) return std::string(column_name);
+    return context->column_prefix + std::string(column_name);
 }
 
 template<typename Entity>
@@ -234,6 +320,12 @@ Parameter entity_id_parameter(const Entity& entity) {
         }
     }
     throw std::invalid_argument("Relationship target has no @Id field");
+}
+
+template<typename Entity>
+Parameter entity_id_parameter(const novaboot::db::Lazy<Entity>& lazy) {
+    if (lazy.id_parameter()) return *lazy.id_parameter();
+    return entity_id_parameter(lazy.get());
 }
 
 inline std::string temporal_to_string(std::chrono::system_clock::time_point value,
@@ -343,7 +435,12 @@ void set_many_to_one_reference(Child& child, std::string_view mapped_by, const P
         if constexpr (std::meta::is_nonstatic_data_member(member) &&
                       novaboot::di::detail::has_annotation<novaboot::annotations::ManyToOne>(member)) {
             if (std::meta::identifier_of(member) == mapped_by) {
-                child.[:member:] = parent;
+                using Field = std::remove_cvref_t<decltype(child.[:member:])>;
+                if constexpr (is_lazy_relation<Field>::value) {
+                    child.[:member:] = Field::loaded(parent, entity_id_parameter(parent));
+                } else {
+                    child.[:member:] = parent;
+                }
                 matched = true;
             }
         }
@@ -355,6 +452,18 @@ void set_many_to_one_reference(Child& child, std::string_view mapped_by, const P
 
 template<typename T>
 T map_row_to_entity(ResultSet* rs, EntityLoadContext* context = nullptr);
+
+inline bool should_fetch_member(EntityLoadContext* context, std::string_view member_name) {
+    return context && context->fetch_members.contains(std::string(member_name));
+}
+
+inline std::optional<std::string> joined_fetch_prefix(EntityLoadContext* context,
+                                                      std::string_view member_name) {
+    if (!context) return std::nullopt;
+    auto it = context->joined_fetch_prefixes.find(std::string(member_name));
+    if (it == context->joined_fetch_prefixes.end()) return std::nullopt;
+    return it->second;
+}
 
 template<typename Entity>
 Entity eager_load_many_to_one(ResultSet* rs, int column_index, EntityLoadContext* context) {
@@ -386,6 +495,36 @@ Entity eager_load_many_to_one(ResultSet* rs, int column_index, EntityLoadContext
     return identity;
 }
 
+template<typename Entity>
+novaboot::db::Lazy<Entity> lazy_load_many_to_one(ResultSet* rs, int column_index,
+                                                 EntityLoadContext* context) {
+    auto identity = entity_with_id<Entity>(rs, column_index);
+    auto id = entity_id_parameter(identity);
+    if (!context || !context->datasource) {
+        return novaboot::db::Lazy<Entity>::loaded(std::move(identity), std::move(id));
+    }
+
+    auto* datasource = context->datasource;
+    auto retained_connection = context->retain_connection_for_lazy ? context->connection : nullptr;
+    return novaboot::db::Lazy<Entity>::unloaded(id, [datasource, retained_connection, identity]() mutable {
+        EntityLoadContext load_context;
+        load_context.datasource = datasource;
+        load_context.connection = retained_connection ? retained_connection : datasource->get_connection();
+        load_context.retain_connection_for_lazy = retained_connection != nullptr;
+
+        const auto table = entity_table_name<Entity>();
+        const auto sql = "SELECT " + get_select_column_list<Entity>() + " FROM " + table +
+                         " WHERE " + entity_primary_key_column<Entity>() + " = ?";
+        auto dialect = datasource->dialect();
+        auto result = load_context.connection->query(dialect->convert_placeholders(sql),
+                                                     {entity_id_parameter(identity)});
+        if (result->next()) {
+            return map_row_to_entity<Entity>(result.get(), &load_context);
+        }
+        return identity;
+    });
+}
+
 template<typename Parent, typename Child>
 std::vector<Child> eager_load_one_to_many(const Parent& parent, std::string_view mapped_by,
                                           EntityLoadContext* context) {
@@ -415,6 +554,55 @@ std::vector<Child> eager_load_one_to_many(const Parent& parent, std::string_view
 
     context->loading.erase(parent_key);
     return children;
+}
+
+template<typename Parent, typename Child>
+novaboot::db::LazyCollection<Child> lazy_load_one_to_many(const Parent& parent,
+                                                          std::string_view mapped_by,
+                                                          EntityLoadContext* context) {
+    if (!context || !context->datasource) return {};
+
+    auto* datasource = context->datasource;
+    auto retained_connection = context->retain_connection_for_lazy ? context->connection : nullptr;
+    const auto parent_id = entity_id_parameter(parent);
+    const auto mapped_by_name = std::string(mapped_by);
+
+    auto load = [datasource, retained_connection, parent_id, mapped_by_name]() {
+        EntityLoadContext load_context;
+        load_context.datasource = datasource;
+        load_context.connection = retained_connection ? retained_connection : datasource->get_connection();
+        load_context.retain_connection_for_lazy = retained_connection != nullptr;
+
+        const auto parent_table = entity_table_name<Parent>();
+        const auto parent_key = parent_table + ":" + format_parameter(parent_id);
+        load_context.loading.insert(parent_key);
+
+        const auto child_table = entity_table_name<Child>();
+        const auto join_column = child_join_column_for_mapped_by<Child>(mapped_by_name);
+        const auto sql = "SELECT " + get_select_column_list<Child>() + " FROM " + child_table +
+                         " WHERE " + join_column + " = ?";
+        auto dialect = datasource->dialect();
+        auto result = load_context.connection->query(dialect->convert_placeholders(sql), {parent_id});
+
+        std::vector<Child> children;
+        while (result->next()) {
+            children.push_back(map_row_to_entity<Child>(result.get(), &load_context));
+        }
+        return children;
+    };
+
+    auto count = [datasource, retained_connection, parent_id, mapped_by_name]() -> std::int64_t {
+        const auto child_table = entity_table_name<Child>();
+        const auto join_column = child_join_column_for_mapped_by<Child>(mapped_by_name);
+        const auto sql = "SELECT COUNT(1) FROM " + child_table +
+                         " WHERE " + join_column + " = ?";
+        auto dialect = datasource->dialect();
+        auto active_connection = retained_connection ? retained_connection : datasource->get_connection();
+        auto result = active_connection->query(dialect->convert_placeholders(sql), {parent_id});
+        return result->next() ? result->get_int(0) : 0;
+    };
+
+    return novaboot::db::LazyCollection<Child>::unloaded(std::move(load), std::move(count));
 }
 
 template<typename Parent, typename Child>
@@ -452,6 +640,61 @@ std::vector<Child> eager_load_many_to_many(const Parent& parent,
 
     context->loading.erase(parent_key);
     return children;
+}
+
+template<typename Parent, typename Child>
+novaboot::db::LazyCollection<Child> lazy_load_many_to_many(const Parent& parent,
+                                                           std::string_view join_table,
+                                                           std::string_view join_column,
+                                                           std::string_view inverse_join_column,
+                                                           EntityLoadContext* context) {
+    if (!context || !context->datasource) return {};
+
+    auto* datasource = context->datasource;
+    auto retained_connection = context->retain_connection_for_lazy ? context->connection : nullptr;
+    const auto parent_id = entity_id_parameter(parent);
+    const auto join_table_name = std::string(join_table);
+    const auto join_column_name = std::string(join_column);
+    const auto inverse_join_column_name = std::string(inverse_join_column);
+
+    auto load = [datasource, retained_connection, parent_id, join_table_name,
+                 join_column_name, inverse_join_column_name]() {
+        EntityLoadContext load_context;
+        load_context.datasource = datasource;
+        load_context.connection = retained_connection ? retained_connection : datasource->get_connection();
+        load_context.retain_connection_for_lazy = retained_connection != nullptr;
+
+        const auto parent_table = entity_table_name<Parent>();
+        const auto parent_key = join_table_name + ":" + parent_table + ":" +
+                                format_parameter(parent_id);
+        load_context.loading.insert(parent_key);
+
+        const auto child_table = entity_table_name<Child>();
+        const auto child_pk = entity_primary_key_column<Child>();
+        const auto sql = "SELECT " + get_select_column_list<Child>("c") +
+                         " FROM " + child_table + " c JOIN " + join_table_name +
+                         " jt ON c." + child_pk + " = jt." + inverse_join_column_name +
+                         " WHERE jt." + join_column_name + " = ?";
+        auto dialect = datasource->dialect();
+        auto result = load_context.connection->query(dialect->convert_placeholders(sql), {parent_id});
+
+        std::vector<Child> children;
+        while (result->next()) {
+            children.push_back(map_row_to_entity<Child>(result.get(), &load_context));
+        }
+        return children;
+    };
+
+    auto count = [datasource, retained_connection, parent_id, join_table_name, join_column_name]() -> std::int64_t {
+        const auto sql = "SELECT COUNT(1) FROM " + join_table_name +
+                         " WHERE " + join_column_name + " = ?";
+        auto dialect = datasource->dialect();
+        auto active_connection = retained_connection ? retained_connection : datasource->get_connection();
+        auto result = active_connection->query(dialect->convert_placeholders(sql), {parent_id});
+        return result->next() ? result->get_int(0) : 0;
+    };
+
+    return novaboot::db::LazyCollection<Child>::unloaded(std::move(load), std::move(count));
 }
 
 // ---------------------------------------------------------------------------
@@ -495,11 +738,47 @@ T map_row_to_entity(ResultSet* rs, EntityLoadContext* context) {
                 // intentionally skip
             } else {
                 constexpr auto column = get_member_column_name<m>();
-                const int col_idx = find_column_index(rs, column.name);
+                const int col_idx = find_column_index(rs, prefixed_column_name(context, column.name));
                 if (col_idx < 0 || rs->is_null(col_idx)) continue;
 
                 if constexpr (novaboot::di::detail::has_annotation<novaboot::annotations::ManyToOne>(m)) {
-                    entity.[:m:] = eager_load_many_to_one<FT>(rs, col_idx, context);
+                    constexpr auto many_to_one = novaboot::di::detail::get_annotation<novaboot::annotations::ManyToOne>(m);
+                    constexpr auto member_name = std::meta::identifier_of(m);
+                    if constexpr (is_lazy_relation<FT>::value) {
+                        using Target = typename relation_value_type<FT>::type;
+                        if (should_fetch_member(context, member_name)) {
+                            Target related{};
+                            if (auto prefix = joined_fetch_prefix(context, member_name)) {
+                                auto joined_context = context ? *context : EntityLoadContext{};
+                                joined_context.column_prefix = *prefix;
+                                joined_context.fetch_members.clear();
+                                joined_context.joined_fetch_prefixes.clear();
+                                related = map_row_to_entity<Target>(rs, &joined_context);
+                            } else {
+                                related = eager_load_many_to_one<Target>(rs, col_idx, context);
+                            }
+                            auto related_id = entity_id_parameter(related);
+                            entity.[:m:] = FT::loaded(std::move(related), std::move(related_id));
+                        } else {
+                            entity.[:m:] = lazy_load_many_to_one<Target>(rs, col_idx, context);
+                        }
+                    } else if constexpr (many_to_one.fetch == novaboot::annotations::FetchType::Lazy) {
+                        if (should_fetch_member(context, member_name)) {
+                            if (auto prefix = joined_fetch_prefix(context, member_name)) {
+                                auto joined_context = context ? *context : EntityLoadContext{};
+                                joined_context.column_prefix = *prefix;
+                                joined_context.fetch_members.clear();
+                                joined_context.joined_fetch_prefixes.clear();
+                                entity.[:m:] = map_row_to_entity<FT>(rs, &joined_context);
+                            } else {
+                                entity.[:m:] = eager_load_many_to_one<FT>(rs, col_idx, context);
+                            }
+                        } else {
+                            entity.[:m:] = entity_with_id<FT>(rs, col_idx);
+                        }
+                    } else {
+                        entity.[:m:] = eager_load_many_to_one<FT>(rs, col_idx, context);
+                    }
                 } else if constexpr (novaboot::di::detail::has_annotation<novaboot::annotations::Json>(m)) {
                     if constexpr (std::is_same_v<FT, std::string>) {
                         entity.[:m:] = rs->get_string(col_idx);
@@ -550,18 +829,34 @@ T map_row_to_entity(ResultSet* rs, EntityLoadContext* context) {
                       novaboot::di::detail::has_annotation<novaboot::annotations::OneToMany>(m)) {
             using FT = std::remove_cvref_t<decltype(entity.[:m:])>;
             constexpr auto one_to_many = novaboot::di::detail::get_annotation<novaboot::annotations::OneToMany>(m);
-            static_assert(is_std_vector<FT>::value, "@OneToMany fields must be std::vector<T>");
+            static_assert(is_collection_relation_v<FT>,
+                          "@OneToMany fields must be std::vector<T> or LazyCollection<T>");
             static_assert(one_to_many.mapped_by[0] != '\0', "@OneToMany requires mapped_by");
+            constexpr auto member_name = std::meta::identifier_of(m);
 
-            if constexpr (one_to_many.fetch == novaboot::annotations::FetchType::Eager) {
-                using Child = typename vector_value_type<FT>::type;
-                entity.[:m:] = eager_load_one_to_many<T, Child>(entity, one_to_many.mapped_by, context);
+            using Child = typename vector_value_type<FT>::type;
+            if constexpr (is_lazy_collection<FT>::value) {
+                if (one_to_many.fetch == novaboot::annotations::FetchType::Eager ||
+                    should_fetch_member(context, member_name)) {
+                    entity.[:m:] = FT::loaded(eager_load_one_to_many<T, Child>(
+                        entity, one_to_many.mapped_by, context));
+                } else {
+                    entity.[:m:] = lazy_load_one_to_many<T, Child>(
+                        entity, one_to_many.mapped_by, context);
+                }
+            } else {
+                if (one_to_many.fetch == novaboot::annotations::FetchType::Eager ||
+                    should_fetch_member(context, member_name)) {
+                    entity.[:m:] = eager_load_one_to_many<T, Child>(
+                        entity, one_to_many.mapped_by, context);
+                }
             }
         } else if constexpr (std::meta::is_nonstatic_data_member(m) &&
                              novaboot::di::detail::has_annotation<novaboot::annotations::ManyToMany>(m)) {
             using FT = std::remove_cvref_t<decltype(entity.[:m:])>;
             constexpr auto many_to_many = novaboot::di::detail::get_annotation<novaboot::annotations::ManyToMany>(m);
-            static_assert(is_std_vector<FT>::value, "@ManyToMany fields must be std::vector<T>");
+            static_assert(is_collection_relation_v<FT>,
+                          "@ManyToMany fields must be std::vector<T> or LazyCollection<T>");
             static_assert(novaboot::di::detail::has_annotation<novaboot::annotations::JoinTable>(m),
                           "@ManyToMany requires @JoinTable");
             constexpr auto join_table = novaboot::di::detail::get_annotation<novaboot::annotations::JoinTable>(m);
@@ -569,12 +864,27 @@ T map_row_to_entity(ResultSet* rs, EntityLoadContext* context) {
                           join_table.join_column[0] != '\0' &&
                           join_table.inverse_join_column[0] != '\0',
                           "@JoinTable requires name, join_column, and inverse_join_column");
+            constexpr auto member_name = std::meta::identifier_of(m);
 
-            if constexpr (many_to_many.fetch == novaboot::annotations::FetchType::Eager) {
-                using Child = typename vector_value_type<FT>::type;
-                entity.[:m:] = eager_load_many_to_many<T, Child>(
-                    entity, join_table.name, join_table.join_column,
-                    join_table.inverse_join_column, context);
+            using Child = typename vector_value_type<FT>::type;
+            if constexpr (is_lazy_collection<FT>::value) {
+                if (many_to_many.fetch == novaboot::annotations::FetchType::Eager ||
+                    should_fetch_member(context, member_name)) {
+                    entity.[:m:] = FT::loaded(eager_load_many_to_many<T, Child>(
+                        entity, join_table.name, join_table.join_column,
+                        join_table.inverse_join_column, context));
+                } else {
+                    entity.[:m:] = lazy_load_many_to_many<T, Child>(
+                        entity, join_table.name, join_table.join_column,
+                        join_table.inverse_join_column, context);
+                }
+            } else {
+                if (many_to_many.fetch == novaboot::annotations::FetchType::Eager ||
+                    should_fetch_member(context, member_name)) {
+                    entity.[:m:] = eager_load_many_to_many<T, Child>(
+                        entity, join_table.name, join_table.join_column,
+                        join_table.inverse_join_column, context);
+                }
             }
         }
     }

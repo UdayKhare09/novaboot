@@ -5,6 +5,9 @@
 #include <vector>
 #include <string>
 #include <algorithm>
+#include <cstdio>
+#include <stdexcept>
+#include <thread>
 
 using namespace novaboot;
 using namespace novaboot::db;
@@ -47,6 +50,24 @@ struct QueryPredicateRepository : public CrudRepository<QueryPredicateEntity, in
         : CrudRepository<QueryPredicateEntity, int>(ds) {}
 };
 
+enum class QueryTicketStatus { Open, Closed, Archived };
+
+struct [[= Entity("query_tickets") ]] QueryTicket {
+    [[= Id() ]]
+    [[= GeneratedValue() ]]
+    int id = 0;
+
+    std::string title;
+
+    [[= Enumerated(EnumType::String) ]]
+    QueryTicketStatus status = QueryTicketStatus::Open;
+};
+
+struct QueryTicketRepository : public CrudRepository<QueryTicket, int> {
+    explicit QueryTicketRepository(std::shared_ptr<DataSource> ds)
+        : CrudRepository<QueryTicket, int>(ds) {}
+};
+
 struct QueryNameScoreProjection {
     std::string name;
     int score = 0;
@@ -70,6 +91,100 @@ struct [[= Entity("query_articles") ]] QueryArticle {
     [[= ManyToOne() ]]
     [[= JoinColumn("author_id") ]]
     QueryAuthor author;
+};
+
+struct [[= Entity("lazy_authors") ]] LazyAuthor {
+    [[= Id() ]]
+    [[= GeneratedValue() ]]
+    int id = 0;
+
+    std::string name;
+};
+
+struct [[= Entity("lazy_articles") ]] LazyArticle {
+    [[= Id() ]]
+    [[= GeneratedValue() ]]
+    int id = 0;
+
+    std::string title;
+
+    [[= ManyToOne(FetchType::Lazy) ]]
+    [[= JoinColumn("author_id") ]]
+    Lazy<LazyAuthor> author;
+};
+
+struct TransactionalCrudService {
+    TransactionManager& transactions;
+    std::shared_ptr<DataSource> datasource;
+
+    TransactionalCrudService(TransactionManager& tx, std::shared_ptr<DataSource> ds)
+        : transactions(tx), datasource(std::move(ds)) {}
+
+    [[= Transactional() ]]
+    DBTestEntity create_committed(std::string name, int score) {
+        return transactions.execute([&](std::shared_ptr<Connection> connection) {
+            CrudRepository<DBTestEntity, int> repo(datasource, connection);
+            return repo.save(DBTestEntity{.name = std::move(name), .score = score});
+        });
+    }
+
+    [[= Transactional() ]]
+    void create_then_fail() {
+        transactions.execute([&](std::shared_ptr<Connection> connection) {
+            CrudRepository<DBTestEntity, int> repo(datasource, connection);
+            repo.save(DBTestEntity{.name = "rolled back", .score = 1});
+            throw std::runtime_error("boom");
+        });
+    }
+};
+
+struct TransactionalInvokeService {
+    CrudRepository<DBTestEntity, int>& repo;
+
+    explicit TransactionalInvokeService(CrudRepository<DBTestEntity, int>& repository)
+        : repo(repository) {}
+
+    [[= Transactional() ]]
+    DBTestEntity create(std::string name, int score) {
+        return repo.save(DBTestEntity{.name = std::move(name), .score = score});
+    }
+
+    [[= Transactional() ]]
+    void create_then_fail() {
+        repo.save(DBTestEntity{.name = "invoke rollback", .score = 1});
+        throw std::runtime_error("rollback");
+    }
+
+    DBTestEntity create_without_transaction(std::string name, int score) {
+        return repo.save(DBTestEntity{.name = std::move(name), .score = score});
+    }
+};
+
+static_assert(novaboot::di::detail::has_annotation<Transactional>(
+                  ^^TransactionalCrudService::create_committed),
+              "Transactional annotation should be reflected on service methods");
+
+struct TransactionMetadataProbe {
+    [[= Transactional(TransactionPropagation::RequiresNew,
+                      TransactionIsolation::Serializable,
+                      true,
+                      7) ]]
+    void run() {}
+};
+
+static_assert(novaboot::di::detail::get_annotation<Transactional>(
+                  ^^TransactionMetadataProbe::run).propagation ==
+                  TransactionPropagation::RequiresNew);
+static_assert(novaboot::di::detail::get_annotation<Transactional>(
+                  ^^TransactionMetadataProbe::run).isolation ==
+                  TransactionIsolation::Serializable);
+static_assert(novaboot::di::detail::get_annotation<Transactional>(
+                  ^^TransactionMetadataProbe::run).read_only);
+static_assert(novaboot::di::detail::get_annotation<Transactional>(
+                  ^^TransactionMetadataProbe::run).timeout_seconds == 7);
+
+struct CommitAnywayError : std::runtime_error {
+    CommitAnywayError() : std::runtime_error("commit anyway") {}
 };
 
 TEST(DatabaseCrudTest, LifecycleAndQuery) {
@@ -166,6 +281,40 @@ TEST(DatabaseCrudTest, RepositoryCollectionPrimitives) {
     repo.delete_entity(saved[0]);
     EXPECT_EQ(repo.count(), 1);
     EXPECT_FALSE(repo.exists_by_id(saved[0].id));
+}
+
+TEST(DatabaseCrudTest, TypedRepositoryFieldShortcuts) {
+    auto ds = std::make_shared<SqliteDataSource>(":memory:", 1);
+    auto conn = ds->get_connection();
+    conn->execute(R"(
+        CREATE TABLE test_entities (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            score INTEGER NOT NULL
+        );
+    )");
+    conn.reset();
+
+    CrudRepository<DBTestEntity, int> repo(ds);
+    repo.save(DBTestEntity{.name = "Ada", .score = 10});
+    repo.save(DBTestEntity{.name = "Ada", .score = 20});
+    repo.save(DBTestEntity{.name = "Grace", .score = 30});
+
+    auto one = repo.find_one_by<&DBTestEntity::name>("Ada");
+    ASSERT_TRUE(one.has_value());
+    EXPECT_EQ(one->name, "Ada");
+
+    auto all_ada = repo.find_all_by<&DBTestEntity::name>("Ada");
+    ASSERT_EQ(all_ada.size(), 2);
+    EXPECT_TRUE(repo.exists_by<&DBTestEntity::score>(30));
+    EXPECT_FALSE(repo.exists_by<&DBTestEntity::score>(404));
+    EXPECT_EQ(repo.count_by<&DBTestEntity::name>("Ada"), 2);
+
+    EXPECT_EQ(repo.delete_by<&DBTestEntity::name>("Ada"), 2);
+    EXPECT_EQ(repo.count(), 1);
+    auto grace = repo.find_one_by<&DBTestEntity::name>("Grace");
+    ASSERT_TRUE(grace.has_value());
+    EXPECT_EQ(grace->score, 30);
 }
 
 TEST(DatabaseCrudTest, QueryPredicatesAndGroups) {
@@ -314,6 +463,149 @@ TEST(DatabaseCrudTest, QueryManyToOnePredicateBindsRelatedIdentifier) {
     EXPECT_EQ(ada_articles[0].title, "A");
     EXPECT_EQ(ada_articles[1].title, "C");
     EXPECT_EQ(articles.query().where<&QueryArticle::author>(Op::Equal, grace).count(), 1);
+
+    auto grace_articles = articles.query()
+        .where_related<&QueryArticle::author, &QueryAuthor::name>(Op::Equal, "Grace")
+        .list();
+    ASSERT_EQ(grace_articles.size(), 1);
+    EXPECT_EQ(grace_articles[0].title, "B");
+
+    const auto author_name_matches = articles.query()
+        .where_related<&QueryArticle::author, &QueryAuthor::name>(Op::Like, "A%")
+        .count();
+    EXPECT_EQ(author_name_matches, 2);
+
+    auto sorted_by_author = articles.query()
+        .order_by_related<&QueryArticle::author, &QueryAuthor::name>()
+        .order_by<&QueryArticle::title>()
+        .list();
+    ASSERT_EQ(sorted_by_author.size(), 3);
+    EXPECT_EQ(sorted_by_author[0].title, "A");
+    EXPECT_EQ(sorted_by_author[1].title, "C");
+    EXPECT_EQ(sorted_by_author[2].title, "B");
+}
+
+TEST(DatabaseCrudTest, QueryEnumPredicateBindsStringBackedEnumName) {
+    auto ds = std::make_shared<SqliteDataSource>(":memory:", 1);
+    auto conn = ds->get_connection();
+    conn->execute(R"(
+        CREATE TABLE query_tickets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            status TEXT NOT NULL
+        );
+    )");
+    conn.reset();
+
+    QueryTicketRepository repo(ds);
+    repo.save(QueryTicket{.title = "one", .status = QueryTicketStatus::Open});
+    repo.save(QueryTicket{.title = "two", .status = QueryTicketStatus::Closed});
+    repo.save(QueryTicket{.title = "three", .status = QueryTicketStatus::Closed});
+
+    auto closed = repo.query()
+        .where<&QueryTicket::status>(Op::Equal, QueryTicketStatus::Closed)
+        .order_by<&QueryTicket::title>()
+        .list();
+
+    ASSERT_EQ(closed.size(), 2);
+    EXPECT_EQ(closed[0].title, "three");
+    EXPECT_EQ(closed[1].title, "two");
+    EXPECT_EQ(repo.query().where<&QueryTicket::status>(Op::Equal, QueryTicketStatus::Archived).count(), 0);
+
+    auto open_or_closed = repo.query()
+        .where_in<&QueryTicket::status>(std::vector<QueryTicketStatus>{
+            QueryTicketStatus::Open,
+            QueryTicketStatus::Closed,
+        })
+        .count();
+    EXPECT_EQ(open_or_closed, 3);
+}
+
+TEST(DatabaseCrudTest, LazyManyToOneLoadsOnFirstAccess) {
+    auto ds = std::make_shared<SqliteDataSource>(":memory:", 1);
+    auto conn = ds->get_connection();
+    conn->execute(R"(
+        CREATE TABLE lazy_authors (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL
+        );
+    )");
+    conn->execute(R"(
+        CREATE TABLE lazy_articles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            author_id INTEGER NOT NULL
+        );
+    )");
+    conn.reset();
+
+    CrudRepository<LazyAuthor, int> authors(ds);
+    CrudRepository<LazyArticle, int> articles(ds);
+
+    auto ada = authors.save(LazyAuthor{.name = "Ada"});
+    LazyArticle draft;
+    draft.title = "Deferred relations";
+    draft.author = Lazy<LazyAuthor>::loaded(ada, Parameter(static_cast<std::int64_t>(ada.id)));
+    auto saved = articles.save(draft);
+
+    auto reloaded = articles.find_by_id(saved.id);
+    ASSERT_TRUE(reloaded.has_value());
+    EXPECT_FALSE(reloaded->author.loaded());
+    EXPECT_TRUE(reloaded->author.has_identity());
+
+    const auto& author = reloaded->author.get();
+    EXPECT_TRUE(reloaded->author.loaded());
+    EXPECT_EQ(author.id, ada.id);
+    EXPECT_EQ(author.name, "Ada");
+
+    auto fetched = articles.query()
+        .fetch<&LazyArticle::author>()
+        .where<&LazyArticle::id>(Op::Equal, saved.id)
+        .single();
+    ASSERT_TRUE(fetched.has_value());
+    EXPECT_TRUE(fetched->author.loaded());
+    EXPECT_EQ(fetched->author->id, ada.id);
+    EXPECT_EQ(fetched->author->name, "Ada");
+}
+
+TEST(DatabaseCrudTest, TransactionBoundLazyManyToOneUsesPinnedConnection) {
+    auto ds = std::make_shared<SqliteDataSource>(":memory:", 1);
+    auto conn = ds->get_connection();
+    conn->execute(R"(
+        CREATE TABLE lazy_authors (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL
+        );
+    )");
+    conn->execute(R"(
+        CREATE TABLE lazy_articles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            author_id INTEGER NOT NULL
+        );
+    )");
+    conn.reset();
+
+    Transaction transaction(ds);
+    CrudRepository<LazyAuthor, int> authors(ds, transaction.connection());
+    CrudRepository<LazyArticle, int> articles(ds, transaction.connection());
+
+    auto ada = authors.save(LazyAuthor{.name = "Ada in tx"});
+    LazyArticle draft;
+    draft.title = "Same connection";
+    draft.author = Lazy<LazyAuthor>::loaded(ada, Parameter(static_cast<std::int64_t>(ada.id)));
+    auto saved = articles.save(draft);
+
+    auto reloaded = articles.find_by_id(saved.id);
+    ASSERT_TRUE(reloaded.has_value());
+    EXPECT_FALSE(reloaded->author.loaded());
+
+    const auto& author = reloaded->author.get();
+    EXPECT_TRUE(reloaded->author.loaded());
+    EXPECT_EQ(author.id, ada.id);
+    EXPECT_EQ(author.name, "Ada in tx");
+
+    transaction.rollback();
 }
 
 TEST(DatabaseCrudTest, TransactionCommitAndRollback) {
@@ -346,4 +638,253 @@ TEST(DatabaseCrudTest, TransactionCommitAndRollback) {
         // Destructor performs rollback when commit() is not called.
     }
     EXPECT_EQ(outside_transaction.count(), 1);
+}
+
+TEST(DatabaseCrudTest, TransactionManagerCommitsAndRollsBackCallbacks) {
+    auto ds = std::make_shared<SqliteDataSource>(":memory:", 1);
+    auto conn = ds->get_connection();
+    conn->execute(R"(
+        CREATE TABLE test_entities (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            score INTEGER NOT NULL
+        );
+    )");
+    conn.reset();
+
+    TransactionManager transactions(ds);
+    TransactionalCrudService service(transactions, ds);
+    CrudRepository<DBTestEntity, int> outside_transaction(ds);
+
+    auto saved = service.create_committed("committed", 42);
+    EXPECT_GT(saved.id, 0);
+    EXPECT_EQ(outside_transaction.count(), 1);
+
+    EXPECT_THROW(service.create_then_fail(), std::runtime_error);
+    EXPECT_EQ(outside_transaction.count(), 1);
+}
+
+TEST(DatabaseCrudTest, TransactionManagerInvokeWrapsAnnotatedServiceMethods) {
+    auto ds = std::make_shared<SqliteDataSource>(":memory:", 1);
+    auto conn = ds->get_connection();
+    conn->execute(R"(
+        CREATE TABLE test_entities (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            score INTEGER NOT NULL
+        );
+    )");
+    conn.reset();
+
+    TransactionManager transactions(ds);
+    CrudRepository<DBTestEntity, int> repo(ds);
+    TransactionalInvokeService service(repo);
+
+    auto saved = transactions.invoke<&TransactionalInvokeService::create>(
+        service, std::string("invoke committed"), 42);
+    EXPECT_GT(saved.id, 0);
+    EXPECT_EQ(repo.count(), 1);
+
+    EXPECT_THROW(transactions.invoke<&TransactionalInvokeService::create_then_fail>(service),
+                 std::runtime_error);
+    EXPECT_EQ(repo.count(), 1);
+
+    EXPECT_THROW(service.create_then_fail(), std::runtime_error);
+    EXPECT_EQ(repo.count(), 2) << "Direct C++ service calls are not interceptable; use TransactionManager::invoke or generated dispatch";
+}
+
+TEST(DatabaseCrudTest, TransactionManagerInvokeLeavesUnannotatedMethodsPlain) {
+    auto ds = std::make_shared<SqliteDataSource>(":memory:", 1);
+    auto conn = ds->get_connection();
+    conn->execute(R"(
+        CREATE TABLE test_entities (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            score INTEGER NOT NULL
+        );
+    )");
+    conn.reset();
+
+    TransactionManager transactions(ds);
+    CrudRepository<DBTestEntity, int> repo(ds);
+    TransactionalInvokeService service(repo);
+
+    auto saved = transactions.invoke<&TransactionalInvokeService::create_without_transaction>(
+        service, std::string("plain"), 9);
+    EXPECT_GT(saved.id, 0);
+    EXPECT_EQ(repo.count(), 1);
+}
+
+TEST(DatabaseCrudTest, TransactionManagerRequiredReusesActiveConnection) {
+    auto ds = std::make_shared<SqliteDataSource>(":memory:", 1);
+    auto conn = ds->get_connection();
+    conn->execute(R"(
+        CREATE TABLE test_entities (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            score INTEGER NOT NULL
+        );
+    )");
+    conn.reset();
+
+    TransactionManager transactions(ds);
+    transactions.execute([&](std::shared_ptr<Connection> outer_connection) {
+        CrudRepository<DBTestEntity, int> outer_repo(ds, outer_connection);
+        outer_repo.save(DBTestEntity{.name = "outer", .score = 1});
+
+        transactions.execute([&](std::shared_ptr<Connection> inner_connection) {
+            EXPECT_EQ(inner_connection.get(), outer_connection.get());
+            CrudRepository<DBTestEntity, int> inner_repo(ds, inner_connection);
+            inner_repo.save(DBTestEntity{.name = "inner", .score = 2});
+        });
+    });
+
+    CrudRepository<DBTestEntity, int> repo(ds);
+    EXPECT_EQ(repo.count(), 2);
+}
+
+TEST(DatabaseCrudTest, RepositoriesJoinAmbientTransaction) {
+    auto ds = std::make_shared<SqliteDataSource>(":memory:", 1);
+    auto conn = ds->get_connection();
+    conn->execute(R"(
+        CREATE TABLE test_entities (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            score INTEGER NOT NULL
+        );
+    )");
+    conn.reset();
+
+    TransactionManager transactions(ds);
+    CrudRepository<DBTestEntity, int> repo(ds);
+
+    EXPECT_THROW(transactions.execute([&](std::shared_ptr<Connection>) {
+        repo.save(DBTestEntity{.name = "ambient rollback", .score = 1});
+        throw std::runtime_error("rollback");
+    }), std::runtime_error);
+
+    EXPECT_EQ(repo.count(), 0);
+}
+
+TEST(DatabaseCrudTest, TransactionManagerNoRollbackForCommitsThenRethrows) {
+    auto ds = std::make_shared<SqliteDataSource>(":memory:", 1);
+    auto conn = ds->get_connection();
+    conn->execute(R"(
+        CREATE TABLE test_entities (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            score INTEGER NOT NULL
+        );
+    )");
+    conn.reset();
+
+    TransactionManager transactions(ds);
+    TransactionOptions options;
+    options.no_rollback_for<CommitAnywayError>();
+
+    EXPECT_THROW(transactions.execute(options, [&](std::shared_ptr<Connection> connection) {
+        CrudRepository<DBTestEntity, int> repo(ds, connection);
+        repo.save(DBTestEntity{.name = "committed despite exception", .score = 99});
+        throw CommitAnywayError();
+    }), CommitAnywayError);
+
+    CrudRepository<DBTestEntity, int> repo(ds);
+    EXPECT_EQ(repo.count(), 1);
+}
+
+TEST(DatabaseCrudTest, TransactionManagerRollbackForRestrictsRollbackTypes) {
+    auto ds = std::make_shared<SqliteDataSource>(":memory:", 1);
+    auto conn = ds->get_connection();
+    conn->execute(R"(
+        CREATE TABLE test_entities (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            score INTEGER NOT NULL
+        );
+    )");
+    conn.reset();
+
+    TransactionManager transactions(ds);
+    TransactionOptions options;
+    options.rollback_for<CommitAnywayError>();
+
+    EXPECT_THROW(transactions.execute(options, [&](std::shared_ptr<Connection> connection) {
+        CrudRepository<DBTestEntity, int> repo(ds, connection);
+        repo.save(DBTestEntity{.name = "committed runtime_error", .score = 11});
+        throw std::runtime_error("not listed");
+    }), std::runtime_error);
+
+    CrudRepository<DBTestEntity, int> repo(ds);
+    EXPECT_EQ(repo.count(), 1);
+
+    EXPECT_THROW(transactions.execute(options, [&](std::shared_ptr<Connection> connection) {
+        CrudRepository<DBTestEntity, int> scoped_repo(ds, connection);
+        scoped_repo.save(DBTestEntity{.name = "rolled back listed", .score = 12});
+        throw CommitAnywayError();
+    }), CommitAnywayError);
+
+    EXPECT_EQ(repo.count(), 1);
+}
+
+TEST(DatabaseCrudTest, TransactionManagerTimeoutRollsBack) {
+    auto ds = std::make_shared<SqliteDataSource>(":memory:", 1);
+    auto conn = ds->get_connection();
+    conn->execute(R"(
+        CREATE TABLE test_entities (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            score INTEGER NOT NULL
+        );
+    )");
+    conn.reset();
+
+    TransactionManager transactions(ds);
+    TransactionOptions options;
+    options.timeout_seconds = 1;
+
+    EXPECT_THROW(transactions.execute(options, [&](std::shared_ptr<Connection> connection) {
+        CrudRepository<DBTestEntity, int> repo(ds, connection);
+        repo.save(DBTestEntity{.name = "too slow", .score = 1});
+        std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+    }), TransactionTimeoutException);
+
+    CrudRepository<DBTestEntity, int> repo(ds);
+    EXPECT_EQ(repo.count(), 0);
+}
+
+TEST(DatabaseCrudTest, TransactionManagerRequiresNewCommitsInnerWhenOuterRollsBack) {
+    const char* path = "/tmp/novaboot_tx_requires_new.sqlite";
+    std::remove(path);
+
+    auto ds = std::make_shared<SqliteDataSource>(path, 2);
+    auto conn = ds->get_connection();
+    conn->execute(R"(
+        CREATE TABLE test_entities (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            score INTEGER NOT NULL
+        );
+    )");
+    conn.reset();
+
+    TransactionManager transactions(ds);
+    TransactionOptions requires_new;
+    requires_new.propagation = TransactionPropagation::RequiresNew;
+
+    EXPECT_THROW(transactions.execute([&](std::shared_ptr<Connection>) {
+        transactions.execute(requires_new, [&](std::shared_ptr<Connection> inner_connection) {
+            CrudRepository<DBTestEntity, int> inner_repo(ds, inner_connection);
+            inner_repo.save(DBTestEntity{.name = "inner committed", .score = 7});
+        });
+        throw std::runtime_error("outer rollback");
+    }), std::runtime_error);
+
+    CrudRepository<DBTestEntity, int> repo(ds);
+    EXPECT_EQ(repo.count(), 1);
+    auto saved = repo.find_one_by<&DBTestEntity::name>("inner committed");
+    ASSERT_TRUE(saved.has_value());
+    EXPECT_EQ(saved->score, 7);
+
+    ds->close();
+    std::remove(path);
 }

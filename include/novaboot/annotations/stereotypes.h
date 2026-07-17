@@ -71,6 +71,51 @@ struct Order {
     consteval Order(int val) : value(val) {}
 };
 
+/// Select the constructor used by DI autowiring when a type has multiple
+/// constructors. Without this annotation the container keeps its historical
+/// behaviour and chooses the constructor with the most parameters.
+struct Autowired {
+    consteval Autowired() = default;
+};
+
+enum class TransactionPropagation {
+    Required,
+    RequiresNew,
+    Supports,
+    NotSupported,
+    Mandatory,
+    Never
+};
+
+enum class TransactionIsolation {
+    Default,
+    ReadUncommitted,
+    ReadCommitted,
+    RepeatableRead,
+    Serializable
+};
+
+/// Mark a service/controller method as requiring a database transaction.
+///
+/// Current runtime support is provided by `novaboot::db::TransactionManager`
+/// and explicit callback scopes. The annotation is metadata for NovaBoot's
+/// generated/dispatch-level transaction wrappers.
+struct Transactional {
+    TransactionPropagation propagation = TransactionPropagation::Required;
+    TransactionIsolation isolation = TransactionIsolation::Default;
+    bool read_only = false;
+    int timeout_seconds = 0;
+
+    consteval Transactional() = default;
+    consteval explicit Transactional(bool ro) : read_only(ro) {}
+    consteval explicit Transactional(TransactionPropagation p) : propagation(p) {}
+    consteval Transactional(TransactionPropagation p,
+                            TransactionIsolation i,
+                            bool ro = false,
+                            int timeout = 0)
+        : propagation(p), isolation(i), read_only(ro), timeout_seconds(timeout) {}
+};
+
 // ---------------------------------------------------------------------------
 // ORM — Core Entity Definition
 // ---------------------------------------------------------------------------
@@ -245,6 +290,10 @@ struct ManyToOne {
     CascadeType cascade = CascadeType::All;
     bool optional = true;
     consteval ManyToOne() = default;
+    consteval explicit ManyToOne(FetchType ft) : fetch(ft) {}
+    consteval ManyToOne(FetchType ft, CascadeType ct) : fetch(ft), cascade(ct) {}
+    consteval ManyToOne(FetchType ft, CascadeType ct, bool is_optional)
+        : fetch(ft), cascade(ct), optional(is_optional) {}
 };
 
 struct OneToMany {

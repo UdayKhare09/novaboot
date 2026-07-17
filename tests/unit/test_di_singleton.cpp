@@ -4,8 +4,10 @@
 #include <gtest/gtest.h>
 #include "novaboot/di/container.h"
 #include "novaboot/di/lifecycle.h"
+#include "novaboot/annotations/stereotypes.h"
 
 using namespace novaboot::di;
+using namespace novaboot::annotations;
 
 // ─── Test beans ───────────────────────────────────────────────────────────────
 
@@ -26,6 +28,20 @@ struct Database {
 struct UserService {
     Database& db_;
     explicit UserService(Database& db) : db_(db) {}
+};
+
+struct MissingDependency {};
+
+struct ExplicitCtorService {
+    Logger& logger;
+    bool selected_autowired_ctor = false;
+
+    [[= Autowired() ]]
+    explicit ExplicitCtorService(Logger& injected_logger)
+        : logger(injected_logger), selected_autowired_ctor(true) {}
+
+    ExplicitCtorService(Logger& injected_logger, MissingDependency&)
+        : logger(injected_logger), selected_autowired_ctor(false) {}
 };
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -117,4 +133,18 @@ TEST(DISingleton, UnregisteredBeanThrows) {
     RootContainer root;
     root.build();
     EXPECT_THROW(root.resolve<Logger>(), DIError);
+}
+
+TEST(DISingleton, AutowireUsesExplicitConstructorAnnotation) {
+    RootContainer root;
+
+    root.register_bean<Logger>([](ContainerBase&) { return new Logger{}; });
+    root.autowire<ExplicitCtorService>();
+
+    root.build();
+
+    auto& service = root.resolve<ExplicitCtorService>();
+    auto& logger = root.resolve<Logger>();
+    EXPECT_EQ(&service.logger, &logger);
+    EXPECT_TRUE(service.selected_autowired_ctor);
 }
