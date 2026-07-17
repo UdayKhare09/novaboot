@@ -1,13 +1,11 @@
 #pragma once
 
 #include "model/dto.h"
-#include "novaboot/db/transaction.h"
 #include "repository/article_repository.h"
 #include "repository/contributor_repository.h"
 #include "repository/project_repository.h"
 
 #include <chrono>
-#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -37,17 +35,14 @@ using knowledge_hub::repository::ProjectRepository;
 using namespace novaboot::annotations;
 
 struct [[= Service() ]] KnowledgeService {
-    novaboot::db::TransactionManager& transactions;
     ProjectRepository& projects;
     ContributorRepository& contributors;
     ArticleRepository& articles;
 
-    KnowledgeService(novaboot::db::TransactionManager& transaction_manager,
-                     ProjectRepository& project_repo,
+    KnowledgeService(ProjectRepository& project_repo,
                      ContributorRepository& contributor_repo,
                      ArticleRepository& article_repo)
-        : transactions(transaction_manager),
-          projects(project_repo),
+        : projects(project_repo),
           contributors(contributor_repo),
           articles(article_repo) {}
 
@@ -226,87 +221,75 @@ struct [[= Service() ]] KnowledgeService {
             throw std::runtime_error("Project and title are required");
         }
 
-        return transactions.execute([&](std::shared_ptr<novaboot::db::Connection> connection) {
-            auto tx_projects = projects.scoped(connection);
-            auto tx_contributors = contributors.scoped(connection);
-            auto tx_articles = articles.scoped(connection);
+        auto project = projects.find_by_id(request.project_id);
+        if (!project) throw std::runtime_error("Project not found");
 
-            auto project = tx_projects.find_by_id(request.project_id);
-            if (!project) throw std::runtime_error("Project not found");
+        Article article;
+        article.project = *project;
+        article.title = request.title;
+        article.body = request.body;
+        article.status = request.status;
+        article.metadata = request.metadata;
+        article.published_at = std::chrono::system_clock::now();
 
-            Article article;
-            article.project = *project;
-            article.title = request.title;
-            article.body = request.body;
-            article.status = request.status;
-            article.metadata = request.metadata;
-            article.published_at = std::chrono::system_clock::now();
+        std::vector<Contributor> selected_contributors;
+        for (const auto contributor_id : request.contributor_ids) {
+            auto contributor = contributors.find_by_id(contributor_id);
+            if (!contributor) throw std::runtime_error("Contributor not found");
+            selected_contributors.push_back(*contributor);
+        }
+        article.contributors =
+            novaboot::db::LazyCollection<Contributor>::loaded(std::move(selected_contributors));
 
-            std::vector<Contributor> selected_contributors;
-            for (const auto contributor_id : request.contributor_ids) {
-                auto contributor = tx_contributors.find_by_id(contributor_id);
-                if (!contributor) throw std::runtime_error("Contributor not found");
-                selected_contributors.push_back(*contributor);
-            }
-            article.contributors =
-                novaboot::db::LazyCollection<Contributor>::loaded(std::move(selected_contributors));
-
-            auto saved = tx_articles.save(article);
-            return to_detail(saved);
-        });
+        auto saved = articles.save(article);
+        return to_detail(saved);
     }
 
     [[= Transactional() ]]
     DashboardView seed_demo() {
-        return transactions.execute([&](std::shared_ptr<novaboot::db::Connection> connection) {
-            auto tx_projects = projects.scoped(connection);
-            auto tx_contributors = contributors.scoped(connection);
-            auto tx_articles = articles.scoped(connection);
+        articles.delete_all();
+        contributors.delete_all();
+        projects.delete_all();
 
-            tx_articles.delete_all();
-            tx_contributors.delete_all();
-            tx_projects.delete_all();
+        Project platform;
+        platform.slug = "platform";
+        platform.name = "Platform Playbook";
+        platform.description = "Operational notes for the NovaBoot platform team.";
+        platform.settings = ProjectSettings{.public_index = true, .review_limit = 2};
+        platform = projects.save(platform);
 
-            Project platform;
-            platform.slug = "platform";
-            platform.name = "Platform Playbook";
-            platform.description = "Operational notes for the NovaBoot platform team.";
-            platform.settings = ProjectSettings{.public_index = true, .review_limit = 2};
-            platform = tx_projects.save(platform);
+        Project research;
+        research.slug = "research";
+        research.name = "Research Notes";
+        research.description = "Experiments, architecture decisions, and technical trails.";
+        research.settings = ProjectSettings{.public_index = false, .review_limit = 3};
+        research = projects.save(research);
 
-            Project research;
-            research.slug = "research";
-            research.name = "Research Notes";
-            research.description = "Experiments, architecture decisions, and technical trails.";
-            research.settings = ProjectSettings{.public_index = false, .review_limit = 3};
-            research = tx_projects.save(research);
+        Contributor ada = contributors.save(Contributor{.handle = "ada", .display_name = "Ada Lovelace", .role = "Editor"});
+        Contributor grace = contributors.save(Contributor{.handle = "grace", .display_name = "Grace Hopper", .role = "Reviewer"});
+        Contributor linus = contributors.save(Contributor{.handle = "linus", .display_name = "Linus Torvalds", .role = "Author"});
 
-            Contributor ada = tx_contributors.save(Contributor{.handle = "ada", .display_name = "Ada Lovelace", .role = "Editor"});
-            Contributor grace = tx_contributors.save(Contributor{.handle = "grace", .display_name = "Grace Hopper", .role = "Reviewer"});
-            Contributor linus = tx_contributors.save(Contributor{.handle = "linus", .display_name = "Linus Torvalds", .role = "Author"});
+        Article onboarding;
+        onboarding.project = platform;
+        onboarding.title = "Postgres-backed repositories";
+        onboarding.body = "This article is saved through NovaBoot repositories, hydrated with ManyToOne and ManyToMany relations, and shown in the browser UI.";
+        onboarding.status = ArticleStatus::Published;
+        onboarding.published_at = std::chrono::system_clock::now();
+        onboarding.metadata = ArticleMetadata{.reading_minutes = 5, .topics = {"postgres", "repository", "schema"}};
+        onboarding.contributors = novaboot::db::LazyCollection<Contributor>::loaded({ada, grace});
+        articles.save(onboarding);
 
-            Article onboarding;
-            onboarding.project = platform;
-            onboarding.title = "Postgres-backed repositories";
-            onboarding.body = "This article is saved through NovaBoot repositories, hydrated with ManyToOne and ManyToMany relations, and shown in the browser UI.";
-            onboarding.status = ArticleStatus::Published;
-            onboarding.published_at = std::chrono::system_clock::now();
-            onboarding.metadata = ArticleMetadata{.reading_minutes = 5, .topics = {"postgres", "repository", "schema"}};
-            onboarding.contributors = novaboot::db::LazyCollection<Contributor>::loaded({ada, grace});
-            tx_articles.save(onboarding);
+        Article migrations;
+        migrations.project = research;
+        migrations.title = "Schema guard and migrations";
+        migrations.body = "Schema generation validates the existing tables and migrations remain explicit application code.";
+        migrations.status = ArticleStatus::Review;
+        migrations.published_at = std::chrono::system_clock::now();
+        migrations.metadata = ArticleMetadata{.reading_minutes = 4, .topics = {"schema", "migration"}};
+        migrations.contributors = novaboot::db::LazyCollection<Contributor>::loaded({grace, linus});
+        articles.save(migrations);
 
-            Article migrations;
-            migrations.project = research;
-            migrations.title = "Schema guard and migrations";
-            migrations.body = "Schema generation validates the existing tables and migrations remain explicit application code.";
-            migrations.status = ArticleStatus::Review;
-            migrations.published_at = std::chrono::system_clock::now();
-            migrations.metadata = ArticleMetadata{.reading_minutes = 4, .topics = {"schema", "migration"}};
-            migrations.contributors = novaboot::db::LazyCollection<Contributor>::loaded({grace, linus});
-            tx_articles.save(migrations);
-
-            return dashboard_with(tx_projects, tx_contributors, tx_articles);
-        });
+        return dashboard();
     }
 };
 

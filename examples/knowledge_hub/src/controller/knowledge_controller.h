@@ -1,6 +1,7 @@
 #pragma once
 
 #include "model/dto.h"
+#include "novaboot/db/transaction.h"
 #include "novaboot/router/response_entity.h"
 #include "service/knowledge_service.h"
 
@@ -22,50 +23,53 @@ using knowledge_hub::service::KnowledgeService;
 using namespace novaboot::annotations;
 
 struct [[= RestController("/api") ]] KnowledgeController {
-    KnowledgeService& service;
+    novaboot::db::TransactionalProxy<KnowledgeService>& service;
 
-    explicit KnowledgeController(KnowledgeService& knowledge_service)
+    explicit KnowledgeController(novaboot::db::TransactionalProxy<KnowledgeService>& knowledge_service)
         : service(knowledge_service) {}
 
     [[= GetMapping("/dashboard") ]]
     novaboot::ResponseEntity<DashboardView> dashboard() {
-        return novaboot::ResponseEntity<DashboardView>::ok(service.dashboard());
+        return novaboot::ResponseEntity<DashboardView>::ok(service.target().dashboard());
     }
 
     [[= GetMapping("/projects/:id/articles") ]]
     novaboot::ResponseEntity<std::vector<ArticleSummary>> project_articles(std::string id) {
         return novaboot::ResponseEntity<std::vector<ArticleSummary>>::ok(
-            service.articles_for_project(std::stoi(id)));
+            service.target().articles_for_project(std::stoi(id)));
     }
 
     [[= GetMapping("/articles/:id") ]]
     novaboot::ResponseEntity<ArticleDetail> article(std::string id) {
-        return novaboot::ResponseEntity<ArticleDetail>::ok(service.article_detail(std::stoi(id)));
+        return novaboot::ResponseEntity<ArticleDetail>::ok(service.target().article_detail(std::stoi(id)));
     }
 
     [[= GetMapping("/articles") ]]
     novaboot::ResponseEntity<ArticlePageView> articles(ArticlePageQuery query) {
-        return novaboot::ResponseEntity<ArticlePageView>::ok(service.article_page(query));
+        return novaboot::ResponseEntity<ArticlePageView>::ok(service.target().article_page(query));
     }
 
     [[= PostMapping("/projects") ]]
     novaboot::ResponseEntity<ProjectView> create_project(ProjectRequest request) {
-        return novaboot::ResponseEntity<ProjectView>::status(201, service.create_project(request));
+        return novaboot::ResponseEntity<ProjectView>::status(201, service.target().create_project(request));
     }
 
     [[= PostMapping("/contributors") ]]
     novaboot::ResponseEntity<ContributorView> create_contributor(ContributorRequest request) {
-        return novaboot::ResponseEntity<ContributorView>::status(201, service.create_contributor(request));
+        return novaboot::ResponseEntity<ContributorView>::status(201, service.target().create_contributor(request));
     }
 
     [[= PostMapping("/articles") ]]
     novaboot::ResponseEntity<ArticleDetail> create_article(ArticleRequest request) {
-        return novaboot::ResponseEntity<ArticleDetail>::status(201, service.create_article(request));
+        return novaboot::ResponseEntity<ArticleDetail>::status(
+            201,
+            service.invoke<&KnowledgeService::create_article>(request));
     }
 
     [[= PostMapping("/seed") ]]
     novaboot::ResponseEntity<DashboardView> seed() {
-        return novaboot::ResponseEntity<DashboardView>::ok(service.seed_demo());
+        return novaboot::ResponseEntity<DashboardView>::ok(
+            service.invoke<&KnowledgeService::seed_demo>());
     }
 };
 
