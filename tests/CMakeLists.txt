@@ -49,6 +49,9 @@ target_link_libraries(test_portable_types PRIVATE novaboot::sqlite novaboot::pos
 novaboot_test(test_jpa_annotations    unit/test_jpa_annotations.cpp)
 target_link_libraries(test_jpa_annotations PRIVATE novaboot::sqlite)
 
+novaboot_test(test_schema_generation  unit/test_schema_generation.cpp)
+target_link_libraries(test_schema_generation PRIVATE novaboot::sqlite)
+
 # ─── Integration tests ────────────────────────────────────────────────────────
 novaboot_test(test_server_basic integration/test_server_basic.cpp)
 novaboot_test(test_exception_handler unit/test_exception_handler.cpp)
@@ -60,5 +63,4 @@ novaboot_test(test_app_config unit/test_app_config.cpp)
 novaboot_test(test_client_protocols unit/test_client_protocols.cpp)
 novaboot_test(test_annotations unit/test_annotations.cpp)
 novaboot_test(test_controller_advice unit/test_controller_advice.cpp)
-
 

@@ -1,0 +1,11 @@
+[server]
+host = "::"
+port = 4435
+workers = 4
+tls.cert = "cert.pem"
+tls.key = "key.pem"
+static_resources = "examples/knowledge_hub/src/resources/static"
+
+[database]
+connection = "host=localhost dbname=postgres user=postgres password=postgres connect_timeout=5"
+show-sql = true

@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
 #include "novaboot/db/drivers/postgres/postgres_driver.h"
 #include "novaboot/db/repository.h"
+#include "novaboot/db/schema.h"
+#include "novaboot/db/transaction.h"
 #include <vector>
 #include <string>
 #include <iostream>
@@ -29,6 +31,24 @@ struct PostgresTestEntityRepository : public CrudRepository<DBPostgresTestEntity
             .order_by<&DBPostgresTestEntity::score>(false /* desc */)
             .list();
     }
+};
+
+struct [[= Entity("test_postgres_versioned_entities") ]] VersionedPostgresEntity {
+    [[= Id() ]]
+    [[= GeneratedValue() ]]
+    int id = 0;
+
+    [[= Column("title", false) ]]
+    std::string title;
+
+    [[= Version() ]]
+    int version = 0;
+};
+
+struct VersionedPostgresRepository : public CrudRepository<VersionedPostgresEntity, int> {
+    explicit VersionedPostgresRepository(std::shared_ptr<DataSource> ds,
+                                         std::shared_ptr<Connection> connection = nullptr)
+        : CrudRepository<VersionedPostgresEntity, int>(std::move(ds), std::move(connection)) {}
 };
 
 TEST(PostgresCrudTest, LifecycleAndQuery) {
@@ -102,4 +122,51 @@ TEST(PostgresCrudTest, LifecycleAndQuery) {
     
     // Clean up
     conn->execute("DROP TABLE IF EXISTS test_postgres_entities;");
+}
+
+TEST(PostgresTransactionTest, OptimisticLockAcrossTransactions) {
+    std::string conn_info = "host=localhost dbname=postgres user=postgres password=postgres connect_timeout=2";
+    std::shared_ptr<PostgresDataSource> ds;
+    try {
+        ds = std::make_shared<PostgresDataSource>(conn_info, 3);
+    } catch (const std::exception& e) {
+        GTEST_SKIP() << "PostgreSQL server not available: " << e.what();
+    }
+
+    {
+        auto conn = ds->get_connection();
+        conn->execute("DROP TABLE IF EXISTS test_postgres_versioned_entities;");
+        SchemaGenerator::create_table<VersionedPostgresEntity>(*ds);
+    }
+
+    VersionedPostgresRepository outside_transaction(ds);
+    auto saved = outside_transaction.save(VersionedPostgresEntity{.title = "original"});
+    ASSERT_EQ(saved.version, 1);
+
+    Transaction transaction_a(ds);
+    Transaction transaction_b(ds);
+    VersionedPostgresRepository repo_a(ds, transaction_a.connection());
+    VersionedPostgresRepository repo_b(ds, transaction_b.connection());
+
+    auto first = repo_a.find_by_id(saved.id);
+    auto stale = repo_b.find_by_id(saved.id);
+    ASSERT_TRUE(first.has_value());
+    ASSERT_TRUE(stale.has_value());
+
+    first->title = "transaction A";
+    auto updated = repo_a.save(*first);
+    EXPECT_EQ(updated.version, 2);
+    transaction_a.commit();
+
+    stale->title = "transaction B";
+    EXPECT_THROW(repo_b.save(*stale), OptimisticLockException);
+    transaction_b.rollback();
+
+    auto current = outside_transaction.find_by_id(saved.id);
+    ASSERT_TRUE(current.has_value());
+    EXPECT_EQ(current->title, "transaction A");
+    EXPECT_EQ(current->version, 2);
+
+    auto conn = ds->get_connection();
+    conn->execute("DROP TABLE IF EXISTS test_postgres_versioned_entities;");
 }

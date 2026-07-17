@@ -1,5 +1,6 @@
 #include "novaboot/config/app_config.h"
 #include "novaboot/db/db_client.h"
+#include "novaboot/db/schema.h"
 
 // Middleware
 #include "novaboot/middleware/cors_middleware.h"
@@ -18,6 +19,7 @@
 #include "config/web_config.h"
 
 #include <spdlog/spdlog.h>
+#include <cstdlib>
 #include <thread>
 #include <memory>
 
@@ -59,41 +61,20 @@ int main() {
     // Build DI Container
     di_root.build();
 
-    // 2. Bootstrap DB Schema
+    // 2. Bootstrap DB Schema. Existing tables are validated against the
+    // reflected entity model and a mismatch throws before the server starts.
+    // Schema migration is intentionally a separate future concern.
     {
         auto ds = di_root.resolve<std::shared_ptr<novaboot::db::DataSource>>();
-        auto conn = ds->get_connection();
-        
-        conn->execute(R"(
-            CREATE TABLE IF NOT EXISTS users (
-                id TEXT PRIMARY KEY,
-                username TEXT NOT NULL UNIQUE,
-                password_hash TEXT NOT NULL,
-                email TEXT NOT NULL UNIQUE
-            );
-        )");
-        
-        conn->execute("DROP TABLE IF EXISTS todos;");
-        conn->execute(R"(
-            CREATE TABLE IF NOT EXISTS todos (
-                id TEXT PRIMARY KEY,
-                user_id TEXT NOT NULL,
-                title TEXT NOT NULL,
-                description TEXT,
-                completed BOOLEAN NOT NULL,
-                version INTEGER,
-                priority TEXT
-            );
-        )");
-        
-        conn->execute(R"(
-            CREATE TABLE IF NOT EXISTS notes (
-                id TEXT PRIMARY KEY,
-                user_id TEXT NOT NULL,
-                title TEXT NOT NULL,
-                content TEXT
-            );
-        )");
+        try {
+            novaboot::db::SchemaGenerator::create_table<todo_notes::model::AppUser>(*ds);
+            novaboot::db::SchemaGenerator::create_table<todo_notes::model::Todo>(*ds);
+            novaboot::db::SchemaGenerator::create_table<todo_notes::model::Note>(*ds);
+        } catch (const novaboot::db::SchemaMismatchException& error) {
+            spdlog::critical("Database schema validation failed: {}", error.what());
+            di_root.shutdown();
+            return EXIT_FAILURE;
+        }
     }
 
     // 4. Server setup

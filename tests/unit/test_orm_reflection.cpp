@@ -34,12 +34,44 @@ public:
     Uuid get_uuid(int) override { return {}; }
     std::chrono::system_clock::time_point get_time(int) override { return {}; }
     int column_count() const override { return 3; }
-    std::string_view column_name(int) const override { return ""; }
+    std::string_view column_name(int col) const override {
+        static constexpr std::string_view names[] = {"id", "user_name", "age"};
+        return names[col];
+    }
 };
 
 TEST(OrmReflectionTest, RowMapping) {
     MockResultSet rs;
     auto entity = detail::map_row_to_entity<TestEntity>(&rs);
+    EXPECT_EQ(entity.id, 42);
+    EXPECT_EQ(entity.name, "Alice");
+    EXPECT_EQ(entity.age, 25);
+}
+
+class ReorderedMockResultSet : public ResultSet {
+public:
+    bool next() override { return false; }
+    bool is_null(int) override { return false; }
+    std::int64_t get_int(int col) override {
+        return col == 1 ? 25 : 42;
+    }
+    double get_double(int) override { return 0.0; }
+    std::string get_string(int col) override { return col == 0 ? "Alice" : ""; }
+    std::vector<std::uint8_t> get_blob(int) override { return {}; }
+    bool get_bool(int) override { return false; }
+    Uuid get_uuid(int) override { return {}; }
+    std::chrono::system_clock::time_point get_time(int) override { return {}; }
+    int column_count() const override { return 3; }
+    std::string_view column_name(int col) const override {
+        static constexpr std::string_view names[] = {"user_name", "age", "id"};
+        return names[col];
+    }
+};
+
+TEST(OrmReflectionTest, RowMappingUsesColumnNames) {
+    ReorderedMockResultSet rs;
+    auto entity = detail::map_row_to_entity<TestEntity>(&rs);
+
     EXPECT_EQ(entity.id, 42);
     EXPECT_EQ(entity.name, "Alice");
     EXPECT_EQ(entity.age, 25);

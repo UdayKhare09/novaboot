@@ -166,6 +166,17 @@ struct Column {
         while (col_name[i] && i < 63) { name[i] = col_name[i]; i++; }
         name[i] = '\0';
     }
+
+    /// Full portable schema hint configuration.
+    consteval Column(const char* col_name, bool is_nullable, bool is_insertable,
+                     bool is_updatable, bool is_unique, int max_length)
+        : nullable(is_nullable), unique(is_unique), insertable(is_insertable),
+          updatable(is_updatable), length(max_length)
+    {
+        int i = 0;
+        while (col_name[i] && i < 63) { name[i] = col_name[i]; i++; }
+        name[i] = '\0';
+    }
 };
 
 /// Mark a field as transient — excluded from all SQL (SELECT, INSERT, UPDATE).
@@ -239,9 +250,27 @@ struct ManyToOne {
 struct OneToMany {
     FetchType   fetch   = FetchType::Lazy;
     CascadeType cascade = CascadeType::All;
+    bool orphan_removal = false;
     char mapped_by[64] = {};
     consteval OneToMany() = default;
     consteval explicit OneToMany(const char* mb) {
+        int i = 0;
+        while (mb[i] && i < 63) { mapped_by[i] = mb[i]; i++; }
+        mapped_by[i] = '\0';
+    }
+    consteval OneToMany(const char* mb, FetchType ft) : fetch(ft) {
+        int i = 0;
+        while (mb[i] && i < 63) { mapped_by[i] = mb[i]; i++; }
+        mapped_by[i] = '\0';
+    }
+    consteval OneToMany(const char* mb, FetchType ft, CascadeType ct)
+        : fetch(ft), cascade(ct) {
+        int i = 0;
+        while (mb[i] && i < 63) { mapped_by[i] = mb[i]; i++; }
+        mapped_by[i] = '\0';
+    }
+    consteval OneToMany(const char* mb, FetchType ft, CascadeType ct, bool remove_orphans)
+        : fetch(ft), cascade(ct), orphan_removal(remove_orphans) {
         int i = 0;
         while (mb[i] && i < 63) { mapped_by[i] = mb[i]; i++; }
         mapped_by[i] = '\0';
@@ -259,6 +288,7 @@ struct ManyToMany {
     FetchType   fetch   = FetchType::Lazy;
     CascadeType cascade = CascadeType::All;
     consteval ManyToMany() = default;
+    consteval explicit ManyToMany(FetchType ft) : fetch(ft) {}
 };
 
 struct JoinColumn {
@@ -283,6 +313,17 @@ struct JoinTable {
         int i = 0;
         while (n[i] && i < 63) { name[i] = n[i]; i++; }
         name[i] = '\0';
+    }
+    consteval JoinTable(const char* n, const char* join_col, const char* inverse_col) {
+        int i = 0;
+        while (n[i] && i < 63) { name[i] = n[i]; i++; }
+        name[i] = '\0';
+        i = 0;
+        while (join_col[i] && i < 63) { join_column[i] = join_col[i]; i++; }
+        join_column[i] = '\0';
+        i = 0;
+        while (inverse_col[i] && i < 63) { inverse_join_column[i] = inverse_col[i]; i++; }
+        inverse_join_column[i] = '\0';
     }
 };
 

@@ -9,6 +9,7 @@
 #include <optional>
 #include <string>
 #include <typeindex>
+#include <type_traits>
 
 namespace novaboot::db {
 
@@ -16,8 +17,43 @@ template<typename Entity, typename ID>
 class CrudRepository {
 protected:
     std::shared_ptr<DataSource> datasource_;
+    std::shared_ptr<Connection> connection_;
     std::string table_name_;
     std::string pk_col_name_;
+
+    std::shared_ptr<Connection> acquire_connection() const {
+        return connection_ ? connection_ : datasource_->get_connection();
+    }
+
+    static consteval bool cascades_persist(novaboot::annotations::CascadeType cascade) {
+        return cascade == novaboot::annotations::CascadeType::Persist ||
+               cascade == novaboot::annotations::CascadeType::All;
+    }
+
+    static consteval bool cascades_merge(novaboot::annotations::CascadeType cascade) {
+        return cascade == novaboot::annotations::CascadeType::Merge ||
+               cascade == novaboot::annotations::CascadeType::All;
+    }
+
+    static consteval bool cascades_remove(novaboot::annotations::CascadeType cascade) {
+        return cascade == novaboot::annotations::CascadeType::Remove ||
+               cascade == novaboot::annotations::CascadeType::All;
+    }
+
+    template<typename Value>
+    static Value read_value(ResultSet& result, int column_index) {
+        if constexpr (std::is_same_v<Value, int> || std::is_same_v<Value, std::int64_t>) {
+            return static_cast<Value>(result.get_int(column_index));
+        } else if constexpr (std::is_same_v<Value, double> || std::is_same_v<Value, float>) {
+            return static_cast<Value>(result.get_double(column_index));
+        } else if constexpr (std::is_same_v<Value, std::string>) {
+            return result.get_string(column_index);
+        } else if constexpr (std::is_same_v<Value, Uuid>) {
+            return result.get_uuid(column_index);
+        } else {
+            static_assert(std::is_same_v<Value, void>, "Unsupported entity identifier type");
+        }
+    }
 
     void extract_metadata() {
         using namespace novaboot::annotations;
@@ -57,24 +93,203 @@ protected:
         }
     }
 
+    template<std::meta::info Member>
+    void remove_one_to_many_orphans(Entity& entity, const std::shared_ptr<Connection>& conn) {
+        using Field = std::remove_cvref_t<decltype(std::declval<Entity&>().[:Member:])>;
+        using Child = typename detail::vector_value_type<Field>::type;
+        using ChildId = typename detail::entity_id_type<Child>::type;
+        constexpr auto one_to_many = novaboot::di::detail::get_annotation<novaboot::annotations::OneToMany>(Member);
+
+        std::string placeholders;
+        std::vector<Parameter> params{detail::entity_id_parameter(entity)};
+        for (const auto& child : entity.[:Member:]) {
+            if (!placeholders.empty()) placeholders += ", ";
+            placeholders += "?";
+            params.push_back(detail::entity_id_parameter(child));
+        }
+
+        const auto child_table = detail::entity_table_name<Child>();
+        const auto child_pk = detail::entity_primary_key_column<Child>();
+        const auto join_column = detail::child_join_column_for_mapped_by<Child>(one_to_many.mapped_by);
+        std::string sql = "SELECT " + child_pk + " FROM " + child_table +
+                          " WHERE " + join_column + " = ?";
+        if (!placeholders.empty()) {
+            sql += " AND " + child_pk + " NOT IN (" + placeholders + ")";
+        }
+
+        auto dialect = datasource_->dialect();
+        auto result = conn->query(dialect->convert_placeholders(sql), params);
+        std::vector<ChildId> orphan_ids;
+        while (result->next()) {
+            orphan_ids.push_back(read_value<ChildId>(*result, 0));
+        }
+        result.reset();
+
+        CrudRepository<Child, ChildId> child_repository(datasource_, conn);
+        for (const auto& orphan_id : orphan_ids) {
+            child_repository.delete_by_id(orphan_id);
+        }
+    }
+
+    template<std::meta::info Member>
+    void save_one_to_many_association(Entity& entity, const std::shared_ptr<Connection>& conn,
+                                      bool parent_is_new) {
+        using Field = std::remove_cvref_t<decltype(std::declval<Entity&>().[:Member:])>;
+        static_assert(detail::is_std_vector<Field>::value, "@OneToMany fields must be std::vector<T>");
+        using Child = typename detail::vector_value_type<Field>::type;
+        using ChildId = typename detail::entity_id_type<Child>::type;
+        constexpr auto one_to_many = novaboot::di::detail::get_annotation<novaboot::annotations::OneToMany>(Member);
+        static_assert(one_to_many.mapped_by[0] != '\0', "@OneToMany requires mapped_by");
+
+        constexpr bool cascade_on_insert = cascades_persist(one_to_many.cascade);
+        constexpr bool cascade_on_update = cascades_merge(one_to_many.cascade);
+        if ((parent_is_new && cascade_on_insert) || (!parent_is_new && cascade_on_update)) {
+            CrudRepository<Child, ChildId> child_repository(datasource_, conn);
+            for (auto& child : entity.[:Member:]) {
+                detail::set_many_to_one_reference(child, one_to_many.mapped_by, entity);
+                child = child_repository.save(child);
+            }
+        }
+
+        if constexpr (one_to_many.orphan_removal) {
+            remove_one_to_many_orphans<Member>(entity, conn);
+        }
+    }
+
+    template<std::meta::info Member>
+    void save_many_to_many_association(Entity& entity, const std::shared_ptr<Connection>& conn,
+                                       bool parent_is_new) {
+        using Field = std::remove_cvref_t<decltype(std::declval<Entity&>().[:Member:])>;
+        static_assert(detail::is_std_vector<Field>::value, "@ManyToMany fields must be std::vector<T>");
+        using Related = typename detail::vector_value_type<Field>::type;
+        using RelatedId = typename detail::entity_id_type<Related>::type;
+        constexpr auto many_to_many = novaboot::di::detail::get_annotation<novaboot::annotations::ManyToMany>(Member);
+        static_assert(novaboot::di::detail::has_annotation<novaboot::annotations::JoinTable>(Member),
+                      "@ManyToMany requires @JoinTable");
+        constexpr auto join = novaboot::di::detail::get_annotation<novaboot::annotations::JoinTable>(Member);
+        static_assert(join.name[0] != '\0' && join.join_column[0] != '\0' &&
+                      join.inverse_join_column[0] != '\0',
+                      "@JoinTable requires name, join_column, and inverse_join_column");
+
+        constexpr bool cascade_on_insert = cascades_persist(many_to_many.cascade);
+        constexpr bool cascade_on_update = cascades_merge(many_to_many.cascade);
+        if ((parent_is_new && cascade_on_insert) || (!parent_is_new && cascade_on_update)) {
+            CrudRepository<Related, RelatedId> related_repository(datasource_, conn);
+            for (auto& related : entity.[:Member:]) {
+                related = related_repository.save(related);
+            }
+        }
+
+        auto dialect = datasource_->dialect();
+        conn->execute(dialect->convert_placeholders(
+                          "DELETE FROM " + std::string(join.name) +
+                          " WHERE " + std::string(join.join_column) + " = ?"),
+                      {detail::entity_id_parameter(entity)});
+
+        for (const auto& related : entity.[:Member:]) {
+            conn->execute(dialect->convert_placeholders(
+                              "INSERT INTO " + std::string(join.name) + " (" +
+                              std::string(join.join_column) + ", " +
+                              std::string(join.inverse_join_column) + ") VALUES (?, ?)"),
+                          {detail::entity_id_parameter(entity),
+                           detail::entity_id_parameter(related)});
+        }
+    }
+
+    template<std::meta::info Member>
+    void delete_one_to_many_association(const ID& id, const std::shared_ptr<Connection>& conn) {
+        using Field = std::remove_cvref_t<decltype(std::declval<Entity&>().[:Member:])>;
+        static_assert(detail::is_std_vector<Field>::value, "@OneToMany fields must be std::vector<T>");
+        using Child = typename detail::vector_value_type<Field>::type;
+        using ChildId = typename detail::entity_id_type<Child>::type;
+        constexpr auto one_to_many = novaboot::di::detail::get_annotation<novaboot::annotations::OneToMany>(Member);
+        static_assert(one_to_many.mapped_by[0] != '\0', "@OneToMany requires mapped_by");
+
+        if constexpr (cascades_remove(one_to_many.cascade)) {
+            const auto child_table = detail::entity_table_name<Child>();
+            const auto child_pk = detail::entity_primary_key_column<Child>();
+            const auto join_column = detail::child_join_column_for_mapped_by<Child>(one_to_many.mapped_by);
+            auto dialect = datasource_->dialect();
+            auto result = conn->query(dialect->convert_placeholders(
+                                          "SELECT " + child_pk + " FROM " + child_table +
+                                          " WHERE " + join_column + " = ?"),
+                                      {Parameter(id)});
+            std::vector<ChildId> child_ids;
+            while (result->next()) {
+                child_ids.push_back(read_value<ChildId>(*result, 0));
+            }
+            result.reset();
+
+            CrudRepository<Child, ChildId> child_repository(datasource_, conn);
+            for (const auto& child_id : child_ids) {
+                child_repository.delete_by_id(child_id);
+            }
+        }
+    }
+
+    template<std::meta::info Member>
+    void delete_many_to_many_join_rows(const ID& id, const std::shared_ptr<Connection>& conn) {
+        static_assert(novaboot::di::detail::has_annotation<novaboot::annotations::JoinTable>(Member),
+                      "@ManyToMany requires @JoinTable");
+        constexpr auto join = novaboot::di::detail::get_annotation<novaboot::annotations::JoinTable>(Member);
+        auto dialect = datasource_->dialect();
+        conn->execute(dialect->convert_placeholders(
+                          "DELETE FROM " + std::string(join.name) +
+                          " WHERE " + std::string(join.join_column) + " = ?"),
+                      {Parameter(id)});
+    }
+
+    void delete_associations_by_id(const ID& id, const std::shared_ptr<Connection>& conn) {
+        static constexpr auto members = detail::get_members<Entity>();
+        template for (constexpr auto member : members) {
+            if constexpr (std::meta::is_nonstatic_data_member(member) &&
+                          novaboot::di::detail::has_annotation<novaboot::annotations::OneToMany>(member)) {
+                delete_one_to_many_association<member>(id, conn);
+            } else if constexpr (std::meta::is_nonstatic_data_member(member) &&
+                                 novaboot::di::detail::has_annotation<novaboot::annotations::ManyToMany>(member)) {
+                delete_many_to_many_join_rows<member>(id, conn);
+            }
+        }
+    }
+
+    void save_associations(Entity& entity, const std::shared_ptr<Connection>& conn,
+                           bool parent_is_new) {
+        static constexpr auto members = detail::get_members<Entity>();
+        template for (constexpr auto member : members) {
+            if constexpr (std::meta::is_nonstatic_data_member(member) &&
+                          novaboot::di::detail::has_annotation<novaboot::annotations::OneToMany>(member)) {
+                save_one_to_many_association<member>(entity, conn, parent_is_new);
+            } else if constexpr (std::meta::is_nonstatic_data_member(member) &&
+                                 novaboot::di::detail::has_annotation<novaboot::annotations::ManyToMany>(member)) {
+                save_many_to_many_association<member>(entity, conn, parent_is_new);
+            }
+        }
+    }
+
 public:
-    explicit CrudRepository(std::shared_ptr<DataSource> ds) : datasource_(ds) {
+    explicit CrudRepository(std::shared_ptr<DataSource> ds,
+                            std::shared_ptr<Connection> connection = nullptr)
+        : datasource_(std::move(ds)), connection_(std::move(connection)) {
         extract_metadata();
     }
 
     virtual ~CrudRepository() = default;
 
     QueryBuilder<Entity> query() {
-        return QueryBuilder<Entity>(datasource_, table_name_);
+        return QueryBuilder<Entity>(datasource_, table_name_, connection_);
     }
 
     std::optional<Entity> find_by_id(const ID& id) {
-        std::string sql = "SELECT * FROM " + table_name_ + " WHERE " + pk_col_name_ + " = ?";
+        std::string sql = "SELECT " + detail::get_select_column_list<Entity>() +
+                          " FROM " + table_name_ + " WHERE " + pk_col_name_ + " = ?";
         auto dialect = datasource_->dialect();
-        auto conn    = datasource_->get_connection();
+        auto conn    = acquire_connection();
         auto rs = conn->query(dialect->convert_placeholders(sql), { Parameter(id) });
         if (rs->next()) {
-            return detail::map_row_to_entity<Entity>(rs.get());
+            detail::EntityLoadContext load_context;
+            load_context.datasource = datasource_.get();
+            load_context.connection = conn;
+            return detail::map_row_to_entity<Entity>(rs.get(), &load_context);
         }
         return std::nullopt;
     }
@@ -82,7 +297,7 @@ public:
     bool exists_by_id(const ID& id) {
         std::string sql = "SELECT COUNT(1) FROM " + table_name_ + " WHERE " + pk_col_name_ + " = ?";
         auto dialect = datasource_->dialect();
-        auto conn    = datasource_->get_connection();
+        auto conn    = acquire_connection();
         auto rs = conn->query(dialect->convert_placeholders(sql), { Parameter(id) });
         if (rs->next()) return rs->get_int(0) > 0;
         return false;
@@ -90,18 +305,68 @@ public:
 
     std::vector<Entity> find_all() { return query().list(); }
 
+    std::vector<Entity> find_all_by_id(const std::vector<ID>& ids) {
+        if (ids.empty()) return {};
+
+        std::string placeholders;
+        std::vector<Parameter> params;
+        params.reserve(ids.size());
+        for (const auto& id : ids) {
+            if (!placeholders.empty()) placeholders += ", ";
+            placeholders += "?";
+            params.emplace_back(id);
+        }
+
+        std::string sql = "SELECT " + detail::get_select_column_list<Entity>() +
+                          " FROM " + table_name_ + " WHERE " + pk_col_name_ +
+                          " IN (" + placeholders + ")";
+        auto dialect = datasource_->dialect();
+        auto conn = acquire_connection();
+        auto rs = conn->query(dialect->convert_placeholders(sql), params);
+
+        std::vector<Entity> entities;
+        detail::EntityLoadContext load_context;
+        load_context.datasource = datasource_.get();
+        load_context.connection = conn;
+        while (rs->next()) {
+            entities.push_back(detail::map_row_to_entity<Entity>(rs.get(), &load_context));
+        }
+        return entities;
+    }
+
+    std::int64_t count() {
+        std::string sql = "SELECT COUNT(1) FROM " + table_name_;
+        auto dialect = datasource_->dialect();
+        auto conn = acquire_connection();
+        auto rs = conn->query(dialect->convert_placeholders(sql));
+        return rs->next() ? rs->get_int(0) : 0;
+    }
+
     void delete_by_id(const ID& id) {
         std::string sql = "DELETE FROM " + table_name_ + " WHERE " + pk_col_name_ + " = ?";
         auto dialect = datasource_->dialect();
-        auto conn    = datasource_->get_connection();
+        auto conn    = acquire_connection();
+        delete_associations_by_id(id, conn);
         conn->execute(dialect->convert_placeholders(sql), { Parameter(id) });
     }
 
+    void delete_entity(const Entity& entity) {
+        static constexpr auto members = detail::get_members<Entity>();
+        ID entity_id{};
+
+        template for (constexpr auto m : members) {
+            if constexpr (std::meta::is_nonstatic_data_member(m) &&
+                          novaboot::di::detail::has_annotation<novaboot::annotations::Id>(m)) {
+                entity_id = static_cast<ID>(entity.[:m:]);
+            }
+        }
+        delete_by_id(entity_id);
+    }
+
     void delete_all() {
-        std::string sql = "DELETE FROM " + table_name_;
-        auto dialect = datasource_->dialect();
-        auto conn    = datasource_->get_connection();
-        conn->execute(dialect->convert_placeholders(sql));
+        for (const auto& entity : find_all()) {
+            delete_entity(entity);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -180,58 +445,71 @@ public:
         if (is_new) {
             detail::invoke_lifecycle<PrePersist>(entity);
 
-            auto conn = datasource_->get_connection();
+            auto conn = acquire_connection();
             std::string cols, placeholders;
             std::vector<Parameter> params;
 
             template for (constexpr auto m : members) {
-                if constexpr (std::meta::is_nonstatic_data_member(m)) {
+                if constexpr (detail::is_persisted_entity_member<m>()) {
                     // @Transient — never persisted
-                    constexpr bool is_transient = novaboot::di::detail::has_annotation<Transient>(m);
-                    if constexpr (!is_transient) {
-                        constexpr bool is_id      = novaboot::di::detail::has_annotation<Id>(m);
-                        constexpr bool is_gen_val = novaboot::di::detail::has_annotation<GeneratedValue>(m);
-                        // Skip AutoIncrement PK — DB provides it
-                        constexpr bool is_auto_inc = is_id && is_gen_val && (
-                            novaboot::di::detail::get_annotation<GeneratedValue>(m).strategy == GenerationType::AutoIncrement);
+                    constexpr bool is_id      = novaboot::di::detail::has_annotation<Id>(m);
+                    constexpr bool is_gen_val = novaboot::di::detail::has_annotation<GeneratedValue>(m);
+                    // Skip AutoIncrement PK — DB provides it
+                    constexpr bool is_auto_inc = is_id && is_gen_val && (
+                        novaboot::di::detail::get_annotation<GeneratedValue>(m).strategy == GenerationType::AutoIncrement);
 
-                        if constexpr (!is_auto_inc) {
-                            // Check @Column(insertable=false)
-                            constexpr bool has_col   = novaboot::di::detail::has_annotation<Column>(m);
-                            constexpr bool insertable = !has_col ||
-                                novaboot::di::detail::get_annotation<Column>(m).insertable;
+                    if constexpr (!is_auto_inc) {
+                        // Check @Column(insertable=false)
+                        constexpr bool has_col   = novaboot::di::detail::has_annotation<Column>(m);
+                        constexpr bool insertable = !has_col ||
+                            novaboot::di::detail::get_annotation<Column>(m).insertable;
 
-                            if constexpr (insertable) {
-                                // @Version — initialise to 1 on INSERT
-                                if constexpr (novaboot::di::detail::has_annotation<Version>(m)) {
-                                    entity.[:m:] = static_cast<decltype(entity.[:m:])>(1);
+                        if constexpr (insertable) {
+                            // @Version — initialise to 1 on INSERT
+                            if constexpr (novaboot::di::detail::has_annotation<Version>(m)) {
+                                entity.[:m:] = static_cast<decltype(entity.[:m:])>(1);
+                            }
+                            if (!cols.empty()) { cols += ", "; placeholders += ", "; }
+                            cols += std::string(detail::get_member_column_name<m>().name);
+                            placeholders += "?";
+
+                            using FT = std::remove_cvref_t<decltype(entity.[:m:])>;
+                            if constexpr (novaboot::di::detail::has_annotation<ManyToOne>(m)) {
+                                params.push_back(detail::entity_id_parameter(entity.[:m:]));
+                            } else if constexpr (novaboot::di::detail::has_annotation<Json>(m)) {
+                                if constexpr (std::is_same_v<FT, std::string>) {
+                                    params.push_back(Parameter(entity.[:m:]));
+                                } else {
+                                    params.push_back(Parameter(novaboot::json::serialize(entity.[:m:])));
                                 }
-                                if (!cols.empty()) { cols += ", "; placeholders += ", "; }
-                                cols += std::string(detail::get_member_column_name<m>().name);
-                                placeholders += "?";
-
-                                using FT = std::remove_cvref_t<decltype(entity.[:m:])>;
-                                if constexpr (std::is_enum_v<FT>) {
-                                    if constexpr (novaboot::di::detail::has_annotation<novaboot::annotations::Enumerated>(m)) {
-                                        constexpr auto en = novaboot::di::detail::get_annotation<novaboot::annotations::Enumerated>(m);
-                                        if constexpr (en.value == novaboot::annotations::EnumType::Ordinal) {
-                                            params.push_back(Parameter(static_cast<std::int64_t>(entity.[:m:])));
-                                        } else {
-                                            static constexpr auto enumerators = detail::get_enumerators<FT>();
-                                            std::string enum_str;
-                                            template for (constexpr auto e : enumerators) {
-                                                if ([:e:] == entity.[:m:]) {
-                                                    enum_str = std::string(std::meta::identifier_of(e));
-                                                }
-                                            }
-                                            params.push_back(Parameter(enum_str));
-                                        }
-                                    } else {
+                            } else if constexpr (std::is_same_v<FT, std::chrono::system_clock::time_point> &&
+                                                 novaboot::di::detail::has_annotation<Temporal>(m)) {
+                                constexpr auto temporal = novaboot::di::detail::get_annotation<Temporal>(m);
+                                params.push_back(Parameter(detail::temporal_to_string(entity.[:m:], temporal.value)));
+                            } else if constexpr (std::is_enum_v<FT>) {
+                                if constexpr (novaboot::di::detail::has_annotation<novaboot::annotations::Enumerated>(m)) {
+                                    constexpr auto en = novaboot::di::detail::get_annotation<novaboot::annotations::Enumerated>(m);
+                                    if constexpr (en.value == novaboot::annotations::EnumType::Ordinal) {
                                         params.push_back(Parameter(static_cast<std::int64_t>(entity.[:m:])));
+                                    } else {
+                                        static constexpr auto enumerators = detail::get_enumerators<FT>();
+                                        std::string enum_str;
+                                        template for (constexpr auto e : enumerators) {
+                                            if ([:e:] == entity.[:m:]) {
+                                                enum_str = std::string(std::meta::identifier_of(e));
+                                            }
+                                        }
+                                        params.push_back(Parameter(enum_str));
                                     }
                                 } else {
-                                    params.push_back(Parameter(entity.[:m:]));
+                                    params.push_back(Parameter(static_cast<std::int64_t>(entity.[:m:])));
                                 }
+                            } else if constexpr (std::is_integral_v<FT> && !std::is_same_v<FT, bool>) {
+                                params.push_back(Parameter(static_cast<std::int64_t>(entity.[:m:])));
+                            } else if constexpr (std::is_floating_point_v<FT>) {
+                                params.push_back(Parameter(static_cast<double>(entity.[:m:])));
+                            } else {
+                                params.push_back(Parameter(entity.[:m:]));
                             }
                         }
                     }
@@ -273,6 +551,7 @@ public:
                 }
             }
 
+            save_associations(entity, conn, true);
             detail::invoke_lifecycle<PostPersist>(entity);
             return entity;
 
@@ -280,7 +559,7 @@ public:
         } else {
             detail::invoke_lifecycle<PreUpdate>(entity);
 
-            auto conn = datasource_->get_connection();
+            auto conn = acquire_connection();
 
             // Capture current @Version for WHERE optimistic-lock clause
             std::int64_t current_version = -1;
@@ -299,10 +578,9 @@ public:
             std::vector<Parameter> params;
 
             template for (constexpr auto m : members) {
-                if constexpr (std::meta::is_nonstatic_data_member(m)) {
+                if constexpr (detail::is_persisted_entity_member<m>()) {
                     constexpr bool is_pk        = novaboot::di::detail::has_annotation<Id>(m);
-                    constexpr bool is_transient = novaboot::di::detail::has_annotation<Transient>(m);
-                    if constexpr (!is_pk && !is_transient) {
+                    if constexpr (!is_pk) {
                         constexpr bool has_col    = novaboot::di::detail::has_annotation<Column>(m);
                         constexpr bool updatable  = !has_col ||
                             novaboot::di::detail::get_annotation<Column>(m).updatable;
@@ -316,7 +594,19 @@ public:
                             updates += std::string(detail::get_member_column_name<m>().name) + " = ?";
                             
                             using FT = std::remove_cvref_t<decltype(entity.[:m:])>;
-                            if constexpr (std::is_enum_v<FT>) {
+                            if constexpr (novaboot::di::detail::has_annotation<ManyToOne>(m)) {
+                                params.push_back(detail::entity_id_parameter(entity.[:m:]));
+                            } else if constexpr (novaboot::di::detail::has_annotation<Json>(m)) {
+                                if constexpr (std::is_same_v<FT, std::string>) {
+                                    params.push_back(Parameter(entity.[:m:]));
+                                } else {
+                                    params.push_back(Parameter(novaboot::json::serialize(entity.[:m:])));
+                                }
+                            } else if constexpr (std::is_same_v<FT, std::chrono::system_clock::time_point> &&
+                                                 novaboot::di::detail::has_annotation<Temporal>(m)) {
+                                constexpr auto temporal = novaboot::di::detail::get_annotation<Temporal>(m);
+                                params.push_back(Parameter(detail::temporal_to_string(entity.[:m:], temporal.value)));
+                            } else if constexpr (std::is_enum_v<FT>) {
                                 if constexpr (novaboot::di::detail::has_annotation<novaboot::annotations::Enumerated>(m)) {
                                     constexpr auto en = novaboot::di::detail::get_annotation<novaboot::annotations::Enumerated>(m);
                                     if constexpr (en.value == novaboot::annotations::EnumType::Ordinal) {
@@ -334,6 +624,10 @@ public:
                                 } else {
                                     params.push_back(Parameter(static_cast<std::int64_t>(entity.[:m:])));
                                 }
+                            } else if constexpr (std::is_integral_v<FT> && !std::is_same_v<FT, bool>) {
+                                params.push_back(Parameter(static_cast<std::int64_t>(entity.[:m:])));
+                            } else if constexpr (std::is_floating_point_v<FT>) {
+                                params.push_back(Parameter(static_cast<double>(entity.[:m:])));
                             } else {
                                 params.push_back(Parameter(entity.[:m:]));
                             }
@@ -348,24 +642,37 @@ public:
                 where_clause += " AND " + version_col + " = ?";
             }
 
-            std::string sql = "UPDATE " + table_name_ + " SET " + updates + " WHERE " + where_clause;
-            params.push_back(Parameter(entity_id));
-            if (current_version >= 0) {
-                params.push_back(Parameter(current_version));
-            }
+            std::int64_t affected = 1;
+            if (!updates.empty()) {
+                std::string sql = "UPDATE " + table_name_ + " SET " + updates + " WHERE " + where_clause;
+                params.push_back(Parameter(entity_id));
+                if (current_version >= 0) {
+                    params.push_back(Parameter(current_version));
+                }
 
-            auto dialect = datasource_->dialect();
-            auto affected = conn->execute(dialect->convert_placeholders(sql), params);
-            conn.reset();
+                auto dialect = datasource_->dialect();
+                affected = conn->execute(dialect->convert_placeholders(sql), params);
+            }
 
             // Optimistic lock conflict check: if versioned and affected == 0, conflict!
             if (current_version >= 0 && affected == 0) {
                 throw OptimisticLockException(table_name_);
             }
 
+            save_associations(entity, conn, false);
+            conn.reset();
             detail::invoke_lifecycle<PostUpdate>(entity);
             return entity;
         }
+    }
+
+    std::vector<Entity> save_all(const std::vector<Entity>& entities) {
+        std::vector<Entity> saved;
+        saved.reserve(entities.size());
+        for (const auto& entity : entities) {
+            saved.push_back(save(entity));
+        }
+        return saved;
     }
 
     /// Dynamic derived query shortcut helper
