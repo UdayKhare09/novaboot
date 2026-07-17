@@ -166,6 +166,11 @@ void Router::insert(Node* node, std::string_view remaining,
 
 Router::MatchResult Router::match(Method method,
                                   std::string_view path) const {
+    const auto query_pos = path.find('?');
+    if (query_pos != std::string_view::npos) {
+        path = path.substr(0, query_pos);
+    }
+
     if (path.empty() || path[0] != '/') {
         return {};
     }

@@ -74,6 +74,27 @@ TEST(RouterTest, ParamRoutes) {
     EXPECT_EQ(matched_post_id, "200");
 }
 
+TEST(RouterTest, IgnoresQueryStringWhenMatchingRoutes) {
+    Router router;
+    bool called = false;
+
+    router.add_route(Method::GET, "/api/articles", [&](auto&, auto&, auto&) {
+        called = true;
+    });
+
+    auto match = router.match(Method::GET, "/api/articles?page=0&size=10");
+    ASSERT_NE(match.handler, nullptr);
+
+    novaboot::http3::Request req;
+    novaboot::http3::Response res;
+    novaboot::context::RequestContext ctx;
+    (*match.handler)(req, res, ctx);
+    EXPECT_TRUE(called);
+
+    auto missing = router.match(Method::GET, "/api/missing?page=0");
+    EXPECT_EQ(missing.handler, nullptr);
+}
+
 TEST(RouterTest, WildcardRoutes) {
     Router router;
     std::string matched_path;
