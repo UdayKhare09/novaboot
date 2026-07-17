@@ -8,6 +8,7 @@
 
 #include <chrono>
 #include <ctime>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -63,6 +64,18 @@ struct [[= Entity("schema_lazy_articles") ]] SchemaLazyArticle {
     [[= ManyToOne(FetchType::Lazy) ]]
     [[= JoinColumn("author_id") ]]
     Lazy<SchemaAuthor> author;
+};
+
+struct [[= Entity("schema_optional_articles") ]] SchemaOptionalArticle {
+    [[= Id() ]]
+    [[= GeneratedValue(GenerationType::AutoIncrement) ]]
+    int id = 0;
+
+    std::string title;
+
+    [[= ManyToOne() ]]
+    [[= JoinColumn("author_id") ]]
+    std::optional<SchemaAuthor> author;
 };
 
 struct [[= Entity("schema_blog_posts") ]] SchemaBlogPost;
@@ -299,6 +312,41 @@ TEST(SchemaGeneratorTest, PersistsManyToOneForeignKey) {
     EXPECT_EQ(loaded->author.name, "Ada");
 }
 
+TEST(SchemaGeneratorTest, OptionalManyToOnePersistsAndLoadsNullForeignKey) {
+    auto datasource = std::make_shared<SqliteDataSource>(":memory:", 1);
+    SchemaGenerator::create_table<SchemaAuthor>(*datasource);
+    SchemaGenerator::create_table<SchemaOptionalArticle>(*datasource);
+
+    CrudRepository<SchemaAuthor, int> authors(datasource);
+    CrudRepository<SchemaOptionalArticle, int> articles(datasource);
+
+    SchemaOptionalArticle draft;
+    draft.title = "No author yet";
+    auto saved_without_author = articles.save(draft);
+
+    auto conn = datasource->get_connection();
+    auto raw = conn->query(
+        "SELECT author_id FROM schema_optional_articles WHERE id = ?",
+        {Parameter(saved_without_author.id)});
+    ASSERT_TRUE(raw->next());
+    EXPECT_TRUE(raw->is_null(0));
+    conn.reset();
+
+    auto loaded_without_author = articles.find_by_id(saved_without_author.id);
+    ASSERT_TRUE(loaded_without_author.has_value());
+    EXPECT_FALSE(loaded_without_author->author.has_value());
+
+    auto author = authors.save(SchemaAuthor{.name = "Grace"});
+    saved_without_author.author = author;
+    auto saved_with_author = articles.save(saved_without_author);
+
+    auto loaded_with_author = articles.find_by_id(saved_with_author.id);
+    ASSERT_TRUE(loaded_with_author.has_value());
+    ASSERT_TRUE(loaded_with_author->author.has_value());
+    EXPECT_EQ(loaded_with_author->author->id, author.id);
+    EXPECT_EQ(loaded_with_author->author->name, "Grace");
+}
+
 TEST(SchemaGeneratorTest, OneToManyIsNotStoredAsParentColumn) {
     SqliteDialect sqlite;
     const auto sql = SchemaGenerator::create_table_sql<SchemaBlog>(sqlite);
@@ -491,6 +539,30 @@ TEST(SchemaGeneratorTest, CreatesManyToManyJoinTableAndEagerLoadsRelatedRows) {
     EXPECT_EQ(loaded->tags[1].label, "cpp");
 }
 
+TEST(SchemaGeneratorTest, ManyToManySaveDeduplicatesJoinRows) {
+    auto datasource = std::make_shared<SqliteDataSource>(":memory:", 1);
+    SchemaGenerator::create_table<SchemaTag>(*datasource);
+    SchemaGenerator::create_table<SchemaTaggedPost>(*datasource);
+
+    CrudRepository<SchemaTaggedPost, int> posts(datasource);
+    CrudRepository<SchemaTag, int> tags(datasource);
+
+    auto tag = tags.save(SchemaTag{.label = "shared"});
+
+    SchemaTaggedPost post;
+    post.title = "Duplicate tags";
+    post.tags.push_back(tag);
+    post.tags.push_back(tag);
+    post = posts.save(post);
+
+    auto conn = datasource->get_connection();
+    auto rows = conn->query(
+        "SELECT COUNT(1) FROM schema_post_tags WHERE post_id = ? AND tag_id = ?",
+        {Parameter(post.id), Parameter(tag.id)});
+    ASSERT_TRUE(rows->next());
+    EXPECT_EQ(rows->get_int(0), 1);
+}
+
 TEST(SchemaGeneratorTest, LazyManyToManyLoadsOnFirstAccessAndCanBeFetched) {
     auto datasource = std::make_shared<SqliteDataSource>(":memory:", 1);
     SchemaGenerator::create_table<SchemaTag>(*datasource);
@@ -604,14 +676,14 @@ TEST(MigrationRunnerTest, AppliesEachMigrationOnce) {
     int migration_runs = 0;
     const std::vector<Migration> migrations{
         Migration::sql(1, "create audit log", "CREATE TABLE audit_log (id INTEGER PRIMARY KEY, message TEXT)"),
-        Migration{
-            .version = 2,
-            .description = "seed audit log",
-            .apply = [&migration_runs](Connection& connection) {
+        Migration::callback(
+            2,
+            "seed audit log",
+            "seed-audit-log-v1",
+            [&migration_runs](Connection& connection) {
                 ++migration_runs;
                 connection.execute("INSERT INTO audit_log (id, message) VALUES (1, 'created')");
-            },
-        },
+            }),
     };
 
     MigrationRunner::run(*datasource, migrations);
@@ -631,4 +703,40 @@ TEST(MigrationRunnerTest, RejectsUndeclaredAppliedMigration) {
     });
 
     EXPECT_THROW(MigrationRunner::run(*datasource, {}), MigrationException);
+}
+
+TEST(MigrationRunnerTest, RejectsChangedAppliedSqlMigration) {
+    auto datasource = std::make_shared<SqliteDataSource>(":memory:", 1);
+    MigrationRunner::run(*datasource, {
+        Migration::sql(1, "create audit log",
+                       "CREATE TABLE audit_log (id INTEGER PRIMARY KEY, message TEXT)"),
+    });
+
+    EXPECT_THROW(MigrationRunner::run(*datasource, {
+        Migration::sql(1, "create audit log",
+                       "CREATE TABLE audit_log (id INTEGER PRIMARY KEY, body TEXT)"),
+    }), MigrationException);
+}
+
+TEST(MigrationRunnerTest, RecordsDirtyStateForFailedMigration) {
+    auto datasource = std::make_shared<SqliteDataSource>(":memory:", 1);
+    const std::vector<Migration> migrations{
+        Migration::callback(
+            1,
+            "broken migration",
+            "broken-v1",
+            [](Connection& connection) {
+                connection.execute("CREATE TABLE dirty_table (id INTEGER PRIMARY KEY)");
+                throw std::runtime_error("migration failed");
+            }),
+    };
+
+    EXPECT_THROW(MigrationRunner::run(*datasource, migrations), std::runtime_error);
+
+    auto applied = MigrationRunner::applied(*datasource);
+    ASSERT_EQ(applied.size(), 1);
+    EXPECT_EQ(applied[0].version, 1);
+    EXPECT_FALSE(applied[0].success);
+
+    EXPECT_THROW(MigrationRunner::run(*datasource, migrations), MigrationException);
 }

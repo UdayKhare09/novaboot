@@ -40,6 +40,32 @@ struct [[= ControllerAdvice() ]] GlobalExceptionHandler {
     }
 
     [[= ExceptionHandler() ]]
+    novaboot::ResponseEntity<ErrorResponse> handle_unique_constraint(
+        const novaboot::db::UniqueConstraintViolationException& error) {
+        return novaboot::ResponseEntity<ErrorResponse>::status(
+            409,
+            ErrorResponse{
+                .status = 409,
+                .error = "Conflict",
+                .message = error.what(),
+                .details = {},
+            });
+    }
+
+    [[= ExceptionHandler() ]]
+    novaboot::ResponseEntity<ErrorResponse> handle_constraint(
+        const novaboot::db::ConstraintViolationException& error) {
+        return novaboot::ResponseEntity<ErrorResponse>::status(
+            400,
+            ErrorResponse{
+                .status = 400,
+                .error = "Constraint Violation",
+                .message = error.what(),
+                .details = {},
+            });
+    }
+
+    [[= ExceptionHandler() ]]
     novaboot::ResponseEntity<ErrorResponse> handle_invalid_argument(
         const std::invalid_argument& error) {
         return novaboot::ResponseEntity<ErrorResponse>::status(

@@ -28,6 +28,9 @@ NovaBoot intentionally keeps cascade behaviour explicit and conservative.
 `@ManyToMany` requires an explicit `@JoinTable`.
 
 - The owner side rewrites join-table rows on save.
+- Duplicate related entities in the in-memory collection are collapsed by
+  related id before join rows are inserted. The generated join table also uses
+  a composite primary key on `(join_column, inverse_join_column)`.
 - Deleting an owner always cleans its join-table rows.
 - Deleting an owner does **not** delete shared related entities. This is
   deliberate: a many-to-many target may be referenced by other owners.
@@ -39,6 +42,8 @@ NovaBoot intentionally keeps cascade behaviour explicit and conservative.
 `@ManyToOne` owns a foreign-key column through `@JoinColumn`.
 
 - Direct entity fields are persisted by writing the related entity id.
+- Use `std::optional<T>` for nullable to-one relationships. Empty optionals are
+  persisted as SQL `NULL` and load back as `std::nullopt`.
 - `FetchType::Eager` hydrates the related entity immediately.
 - `FetchType::Lazy` on a direct entity field leaves an identity stub.
 - Use `novaboot::db::Lazy<T>` for real lazy loading on first access.

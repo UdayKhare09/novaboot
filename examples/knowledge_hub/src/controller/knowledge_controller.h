@@ -9,6 +9,8 @@
 namespace knowledge_hub::controller {
 
 using knowledge_hub::model::ArticleDetail;
+using knowledge_hub::model::ArticlePageQuery;
+using knowledge_hub::model::ArticlePageView;
 using knowledge_hub::model::ArticleRequest;
 using knowledge_hub::model::ArticleSummary;
 using knowledge_hub::model::ContributorRequest;
@@ -39,6 +41,11 @@ struct [[= RestController("/api") ]] KnowledgeController {
     [[= GetMapping("/articles/:id") ]]
     novaboot::ResponseEntity<ArticleDetail> article(std::string id) {
         return novaboot::ResponseEntity<ArticleDetail>::ok(service.article_detail(std::stoi(id)));
+    }
+
+    [[= GetMapping("/articles") ]]
+    novaboot::ResponseEntity<ArticlePageView> articles(ArticlePageQuery query) {
+        return novaboot::ResponseEntity<ArticlePageView>::ok(service.article_page(query));
     }
 
     [[= PostMapping("/projects") ]]

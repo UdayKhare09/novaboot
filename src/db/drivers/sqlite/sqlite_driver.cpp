@@ -1,4 +1,5 @@
 #include "novaboot/db/drivers/sqlite/sqlite_driver.h"
+#include "novaboot/db/exceptions.h"
 #include <stdexcept>
 #include <format>
 #include <iostream>
@@ -18,6 +19,26 @@ std::chrono::system_clock::time_point string_to_time(const std::string& s) {
     std::stringstream ss(s);
     ss >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
     return std::chrono::system_clock::from_time_t(timegm(&tm));
+}
+
+[[noreturn]] void throw_sqlite_error(int extended_code,
+                                     const std::string& message,
+                                     std::string_view prefix) {
+    const auto full_message = std::string(prefix) + ": " + message;
+    switch (extended_code) {
+        case SQLITE_CONSTRAINT_UNIQUE:
+        case SQLITE_CONSTRAINT_PRIMARYKEY:
+            throw novaboot::db::UniqueConstraintViolationException(full_message);
+        case SQLITE_CONSTRAINT_FOREIGNKEY:
+            throw novaboot::db::ForeignKeyConstraintViolationException(full_message);
+        case SQLITE_CONSTRAINT_NOTNULL:
+            throw novaboot::db::NotNullConstraintViolationException(full_message);
+        case SQLITE_CONSTRAINT:
+        case SQLITE_CONSTRAINT_CHECK:
+            throw novaboot::db::ConstraintViolationException(full_message);
+        default:
+            throw std::runtime_error(full_message);
+    }
 }
 }
 
@@ -129,16 +150,20 @@ std::int64_t SqliteConnection::execute(std::string_view sql, const std::vector<P
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(db_, sql.data(), -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
-        throw std::runtime_error(std::format("SQL prepare failed: {} (Query: {})", sqlite3_errmsg(db_), sql));
+        throw_sqlite_error(sqlite3_extended_errcode(db_),
+                           std::format("{} (Query: {})", sqlite3_errmsg(db_), sql),
+                           "SQL prepare failed");
     }
 
     bind_params(stmt, params);
 
     rc = sqlite3_step(stmt);
+    const int extended_code = sqlite3_extended_errcode(db_);
+    const std::string error_message = sqlite3_errmsg(db_);
     sqlite3_finalize(stmt);
 
     if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
-        throw std::runtime_error(std::format("SQL execute failed: {}", sqlite3_errmsg(db_)));
+        throw_sqlite_error(extended_code, error_message, "SQL execute failed");
     }
     return sqlite3_changes(db_);
 }
@@ -148,7 +173,9 @@ std::unique_ptr<ResultSet> SqliteConnection::query(std::string_view sql, const s
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(db_, sql.data(), -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
-        throw std::runtime_error(std::format("SQL query prepare failed: {} (Query: {})", sqlite3_errmsg(db_), sql));
+        throw_sqlite_error(sqlite3_extended_errcode(db_),
+                           std::format("{} (Query: {})", sqlite3_errmsg(db_), sql),
+                           "SQL query prepare failed");
     }
 
     bind_params(stmt, params);
@@ -195,7 +222,9 @@ sqlite3* SqliteDataSource::create_connection() {
         throw std::runtime_error(std::format("Failed to open SQLite database: {}", db_path_));
     }
     // Enable WAL mode for concurrency
+    sqlite3_extended_result_codes(db, 1);
     sqlite3_exec(db, "PRAGMA journal_mode=WAL;", nullptr, nullptr, nullptr);
+    sqlite3_exec(db, "PRAGMA foreign_keys=ON;", nullptr, nullptr, nullptr);
     return db;
 }
 
@@ -213,7 +242,7 @@ std::shared_ptr<Connection> SqliteDataSource::get_connection() {
     // Return a connection wrapper that returns the sqlite3 handle to the pool upon destruction
     auto deleter = [this, db](Connection* conn) {
         delete conn;
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> return_lock(mutex_);
         if (!closed_) {
             connections_.push(db);
             cv_.notify_one();

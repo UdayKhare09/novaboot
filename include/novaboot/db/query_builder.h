@@ -24,10 +24,36 @@ struct Sort {
     bool ascending = true;
 };
 
+template<typename Entity, auto FieldPtr>
+Sort sort_by(bool ascending = true) {
+    constexpr auto col = detail::get_column_name<Entity, FieldPtr>();
+    return Sort{.column = std::string(col.name), .ascending = ascending};
+}
+
+template<typename Entity, auto FieldPtr>
+Sort sort_desc() {
+    return sort_by<Entity, FieldPtr>(false);
+}
+
 struct Pageable {
     int page = 0;
     int size = 20;
     std::vector<Sort> sort;
+
+    static Pageable of(int page_number, int page_size) {
+        return Pageable{.page = page_number, .size = page_size, .sort = {}};
+    }
+
+    Pageable& sorted(Sort sort_spec) {
+        sort.push_back(std::move(sort_spec));
+        return *this;
+    }
+
+    template<typename Entity, auto FieldPtr>
+    Pageable& sort_by(bool ascending = true) {
+        sort.push_back(novaboot::db::sort_by<Entity, FieldPtr>(ascending));
+        return *this;
+    }
 };
 
 template<typename Entity>
@@ -43,6 +69,22 @@ struct Page {
 
     bool has_next() const {
         return static_cast<std::int64_t>(page + 1) < total_pages();
+    }
+
+    bool has_previous() const {
+        return page > 0 && total_pages() > 0;
+    }
+
+    bool is_first() const {
+        return !has_previous();
+    }
+
+    bool is_last() const {
+        return !has_next();
+    }
+
+    std::int64_t number_of_elements() const {
+        return static_cast<std::int64_t>(content.size());
     }
 };
 
@@ -66,6 +108,8 @@ private:
         using Value = std::remove_cvref_t<T>;
         if constexpr (std::is_enum_v<Value>) {
             return Parameter(static_cast<std::int64_t>(value));
+        } else if constexpr (detail::is_optional_relation<Value>::value) {
+            return detail::entity_id_parameter(value);
         } else if constexpr (detail::is_lazy_relation<Value>::value) {
             return detail::entity_id_parameter(value);
         } else if constexpr (novaboot::di::detail::has_annotation<novaboot::annotations::Entity>(^^Value)) {

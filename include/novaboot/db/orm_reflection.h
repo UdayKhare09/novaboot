@@ -13,6 +13,7 @@
 #include <chrono>
 #include <iomanip>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <type_traits>
 #include <unordered_map>
@@ -69,12 +70,23 @@ template<typename T>
 struct is_lazy_relation<novaboot::db::Lazy<T>> : std::true_type {};
 
 template<typename T>
+struct is_optional_relation : std::false_type {};
+
+template<typename T>
+struct is_optional_relation<std::optional<T>> : std::true_type {};
+
+template<typename T>
 struct relation_value_type {
     using type = T;
 };
 
 template<typename T>
 struct relation_value_type<novaboot::db::Lazy<T>> {
+    using type = T;
+};
+
+template<typename T>
+struct relation_value_type<std::optional<T>> {
     using type = T;
 };
 
@@ -328,6 +340,12 @@ Parameter entity_id_parameter(const novaboot::db::Lazy<Entity>& lazy) {
     return entity_id_parameter(lazy.get());
 }
 
+template<typename Entity>
+Parameter entity_id_parameter(const std::optional<Entity>& optional) {
+    if (!optional) return Parameter(nullptr);
+    return entity_id_parameter(*optional);
+}
+
 inline std::string temporal_to_string(std::chrono::system_clock::time_point value,
                                       novaboot::annotations::TemporalType temporal_type) {
     const auto time = std::chrono::system_clock::to_time_t(value);
@@ -438,6 +456,8 @@ void set_many_to_one_reference(Child& child, std::string_view mapped_by, const P
                 using Field = std::remove_cvref_t<decltype(child.[:member:])>;
                 if constexpr (is_lazy_relation<Field>::value) {
                     child.[:member:] = Field::loaded(parent, entity_id_parameter(parent));
+                } else if constexpr (is_optional_relation<Field>::value) {
+                    child.[:member:] = parent;
                 } else {
                     child.[:member:] = parent;
                 }
@@ -761,6 +781,23 @@ T map_row_to_entity(ResultSet* rs, EntityLoadContext* context) {
                             entity.[:m:] = FT::loaded(std::move(related), std::move(related_id));
                         } else {
                             entity.[:m:] = lazy_load_many_to_one<Target>(rs, col_idx, context);
+                        }
+                    } else if constexpr (is_optional_relation<FT>::value) {
+                        using Target = typename relation_value_type<FT>::type;
+                        if (should_fetch_member(context, member_name)) {
+                            if (auto prefix = joined_fetch_prefix(context, member_name)) {
+                                auto joined_context = context ? *context : EntityLoadContext{};
+                                joined_context.column_prefix = *prefix;
+                                joined_context.fetch_members.clear();
+                                joined_context.joined_fetch_prefixes.clear();
+                                entity.[:m:] = map_row_to_entity<Target>(rs, &joined_context);
+                            } else {
+                                entity.[:m:] = eager_load_many_to_one<Target>(rs, col_idx, context);
+                            }
+                        } else if constexpr (many_to_one.fetch == novaboot::annotations::FetchType::Lazy) {
+                            entity.[:m:] = entity_with_id<Target>(rs, col_idx);
+                        } else {
+                            entity.[:m:] = eager_load_many_to_one<Target>(rs, col_idx, context);
                         }
                     } else if constexpr (many_to_one.fetch == novaboot::annotations::FetchType::Lazy) {
                         if (should_fetch_member(context, member_name)) {

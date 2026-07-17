@@ -17,6 +17,8 @@ namespace knowledge_hub::service {
 using knowledge_hub::model::Article;
 using knowledge_hub::model::ArticleDetail;
 using knowledge_hub::model::ArticleMetadata;
+using knowledge_hub::model::ArticlePageQuery;
+using knowledge_hub::model::ArticlePageView;
 using knowledge_hub::model::ArticleRequest;
 using knowledge_hub::model::ArticleStatus;
 using knowledge_hub::model::ArticleSummary;
@@ -97,21 +99,23 @@ struct [[= Service() ]] KnowledgeService {
         };
     }
 
-    DashboardView dashboard() {
-        auto all_articles = articles.query()
+    DashboardView dashboard_with(ProjectRepository& project_repo,
+                                 ContributorRepository& contributor_repo,
+                                 ArticleRepository& article_repo) {
+        auto all_articles = article_repo.query()
             .fetch<&Article::contributors>()
             .order_by<&Article::title>()
             .list();
-        auto all_projects = projects.query()
+        auto all_projects = project_repo.query()
             .fetch<&Project::articles>()
             .order_by<&Project::name>()
             .list();
 
         DashboardView view;
         view.stats = DashboardStats{
-            .projects = static_cast<int>(projects.count()),
+            .projects = static_cast<int>(project_repo.count()),
             .articles = static_cast<int>(all_articles.size()),
-            .contributors = static_cast<int>(contributors.count()),
+            .contributors = static_cast<int>(contributor_repo.count()),
             .published = 0,
         };
 
@@ -124,8 +128,36 @@ struct [[= Service() ]] KnowledgeService {
             }
             view.articles.push_back(to_summary(article));
         }
-        for (const auto& contributor : contributors.query().order_by<&Contributor::handle>().list()) {
+        for (const auto& contributor : contributor_repo.query().order_by<&Contributor::handle>().list()) {
             view.contributors.push_back(to_view(contributor));
+        }
+        return view;
+    }
+
+    DashboardView dashboard() {
+        return dashboard_with(projects, contributors, articles);
+    }
+
+    ArticlePageView article_page(const ArticlePageQuery& query) {
+        auto page = articles.query()
+            .fetch<&Article::contributors>()
+            .page(novaboot::db::Pageable::of(query.page, query.size)
+                .sort_by<Article, &Article::published_at>(false)
+                .sort_by<Article, &Article::title>());
+
+        ArticlePageView view;
+        view.page = page.page;
+        view.size = page.size;
+        view.total_pages = static_cast<int>(page.total_pages());
+        view.total_elements = static_cast<int>(page.total_elements);
+        view.number_of_elements = static_cast<int>(page.number_of_elements());
+        view.first = page.is_first();
+        view.last = page.is_last();
+        view.has_next = page.has_next();
+        view.has_previous = page.has_previous();
+        view.content.reserve(page.content.size());
+        for (const auto& article : page.content) {
+            view.content.push_back(to_summary(article));
         }
         return view;
     }
@@ -194,8 +226,12 @@ struct [[= Service() ]] KnowledgeService {
             throw std::runtime_error("Project and title are required");
         }
 
-        return transactions.execute([&](std::shared_ptr<novaboot::db::Connection>) {
-            auto project = projects.find_by_id(request.project_id);
+        return transactions.execute([&](std::shared_ptr<novaboot::db::Connection> connection) {
+            auto tx_projects = projects.scoped(connection);
+            auto tx_contributors = contributors.scoped(connection);
+            auto tx_articles = articles.scoped(connection);
+
+            auto project = tx_projects.find_by_id(request.project_id);
             if (!project) throw std::runtime_error("Project not found");
 
             Article article;
@@ -208,42 +244,46 @@ struct [[= Service() ]] KnowledgeService {
 
             std::vector<Contributor> selected_contributors;
             for (const auto contributor_id : request.contributor_ids) {
-                auto contributor = contributors.find_by_id(contributor_id);
+                auto contributor = tx_contributors.find_by_id(contributor_id);
                 if (!contributor) throw std::runtime_error("Contributor not found");
                 selected_contributors.push_back(*contributor);
             }
             article.contributors =
                 novaboot::db::LazyCollection<Contributor>::loaded(std::move(selected_contributors));
 
-            auto saved = articles.save(article);
+            auto saved = tx_articles.save(article);
             return to_detail(saved);
         });
     }
 
     [[= Transactional() ]]
     DashboardView seed_demo() {
-        return transactions.execute([&](std::shared_ptr<novaboot::db::Connection>) {
-            articles.delete_all();
-            contributors.delete_all();
-            projects.delete_all();
+        return transactions.execute([&](std::shared_ptr<novaboot::db::Connection> connection) {
+            auto tx_projects = projects.scoped(connection);
+            auto tx_contributors = contributors.scoped(connection);
+            auto tx_articles = articles.scoped(connection);
+
+            tx_articles.delete_all();
+            tx_contributors.delete_all();
+            tx_projects.delete_all();
 
             Project platform;
             platform.slug = "platform";
             platform.name = "Platform Playbook";
             platform.description = "Operational notes for the NovaBoot platform team.";
             platform.settings = ProjectSettings{.public_index = true, .review_limit = 2};
-            platform = projects.save(platform);
+            platform = tx_projects.save(platform);
 
             Project research;
             research.slug = "research";
             research.name = "Research Notes";
             research.description = "Experiments, architecture decisions, and technical trails.";
             research.settings = ProjectSettings{.public_index = false, .review_limit = 3};
-            research = projects.save(research);
+            research = tx_projects.save(research);
 
-            Contributor ada = contributors.save(Contributor{.handle = "ada", .display_name = "Ada Lovelace", .role = "Editor"});
-            Contributor grace = contributors.save(Contributor{.handle = "grace", .display_name = "Grace Hopper", .role = "Reviewer"});
-            Contributor linus = contributors.save(Contributor{.handle = "linus", .display_name = "Linus Torvalds", .role = "Author"});
+            Contributor ada = tx_contributors.save(Contributor{.handle = "ada", .display_name = "Ada Lovelace", .role = "Editor"});
+            Contributor grace = tx_contributors.save(Contributor{.handle = "grace", .display_name = "Grace Hopper", .role = "Reviewer"});
+            Contributor linus = tx_contributors.save(Contributor{.handle = "linus", .display_name = "Linus Torvalds", .role = "Author"});
 
             Article onboarding;
             onboarding.project = platform;
@@ -253,7 +293,7 @@ struct [[= Service() ]] KnowledgeService {
             onboarding.published_at = std::chrono::system_clock::now();
             onboarding.metadata = ArticleMetadata{.reading_minutes = 5, .topics = {"postgres", "repository", "schema"}};
             onboarding.contributors = novaboot::db::LazyCollection<Contributor>::loaded({ada, grace});
-            articles.save(onboarding);
+            tx_articles.save(onboarding);
 
             Article migrations;
             migrations.project = research;
@@ -263,9 +303,9 @@ struct [[= Service() ]] KnowledgeService {
             migrations.published_at = std::chrono::system_clock::now();
             migrations.metadata = ArticleMetadata{.reading_minutes = 4, .topics = {"schema", "migration"}};
             migrations.contributors = novaboot::db::LazyCollection<Contributor>::loaded({grace, linus});
-            articles.save(migrations);
+            tx_articles.save(migrations);
 
-            return dashboard();
+            return dashboard_with(tx_projects, tx_contributors, tx_articles);
         });
     }
 };

@@ -1,4 +1,5 @@
 #include "novaboot/db/drivers/postgres/postgres_driver.h"
+#include "novaboot/db/exceptions.h"
 #include <stdexcept>
 #include <format>
 #include <iostream>
@@ -29,6 +30,41 @@ std::chrono::system_clock::time_point string_to_time(const std::string& s) {
     std::stringstream ss(s);
     ss >> std::get_time(&tm, "%Y-%m-%d %H:%M:%S");
     return std::chrono::system_clock::from_time_t(timegm(&tm));
+}
+
+[[noreturn]] void throw_postgres_error(const std::string& sqlstate,
+                                       const std::string& message,
+                                       std::string_view prefix) {
+    const auto full_message = std::string(prefix) + ": " + message;
+    if (sqlstate == "23505") {
+        throw novaboot::db::UniqueConstraintViolationException(full_message);
+    }
+    if (sqlstate == "23503") {
+        throw novaboot::db::ForeignKeyConstraintViolationException(full_message);
+    }
+    if (sqlstate == "23502") {
+        throw novaboot::db::NotNullConstraintViolationException(full_message);
+    }
+    if (sqlstate.starts_with("23")) {
+        throw novaboot::db::ConstraintViolationException(full_message);
+    }
+    throw std::runtime_error(full_message);
+}
+
+void capture_postgres_error(PGresult* result, PGconn* connection,
+                            std::string& sqlstate,
+                            std::string& message) {
+    if (result) {
+        const char* state = PQresultErrorField(result, PG_DIAG_SQLSTATE);
+        const char* result_message = PQresultErrorMessage(result);
+        sqlstate = state ? state : "";
+        message = result_message && *result_message
+            ? result_message
+            : PQerrorMessage(connection);
+    } else {
+        sqlstate.clear();
+        message = PQerrorMessage(connection);
+    }
 }
 }
 
@@ -213,11 +249,14 @@ std::int64_t PostgresConnection::execute(std::string_view sql, const std::vector
         }
     }
 
-    PQclear(res);
-
     if (status != PGRES_COMMAND_OK && status != PGRES_TUPLES_OK) {
-        throw std::runtime_error(std::format("Postgres execution failed: {}", PQerrorMessage(conn_)));
+        std::string sqlstate;
+        std::string message;
+        capture_postgres_error(res, conn_, sqlstate, message);
+        PQclear(res);
+        throw_postgres_error(sqlstate, message, "Postgres execution failed");
     }
+    PQclear(res);
     return affected;
 }
 
@@ -253,8 +292,11 @@ std::unique_ptr<ResultSet> PostgresConnection::query(std::string_view sql, const
 
     ExecStatusType status = PQresultStatus(res);
     if (status != PGRES_TUPLES_OK && status != PGRES_COMMAND_OK) {
+        std::string sqlstate;
+        std::string message;
+        capture_postgres_error(res, conn_, sqlstate, message);
         PQclear(res);
-        throw std::runtime_error(std::format("Postgres query failed: {}", PQerrorMessage(conn_)));
+        throw_postgres_error(sqlstate, message, "Postgres query failed");
     }
 
     return std::make_unique<PostgresResultSet>(res);

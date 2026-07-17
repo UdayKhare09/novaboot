@@ -124,6 +124,46 @@ TEST(PostgresCrudTest, LifecycleAndQuery) {
     conn->execute("DROP TABLE IF EXISTS test_postgres_entities;");
 }
 
+TEST(PostgresCrudTest, MapsConstraintViolationsToPortableExceptions) {
+    std::string conn_info = "host=localhost dbname=postgres user=postgres password=postgres connect_timeout=2";
+
+    std::shared_ptr<PostgresDataSource> ds;
+    try {
+        ds = std::make_shared<PostgresDataSource>(conn_info, 1);
+    } catch (const std::exception& e) {
+        GTEST_SKIP() << "PostgreSQL server not available: " << e.what();
+    }
+
+    auto conn = ds->get_connection();
+    conn->execute("DROP TABLE IF EXISTS test_pg_constraint_children;");
+    conn->execute("DROP TABLE IF EXISTS test_pg_constraint_parents;");
+    conn->execute("CREATE TABLE test_pg_constraint_parents (id INTEGER PRIMARY KEY)");
+    conn->execute(R"(
+        CREATE TABLE test_pg_constraint_children (
+            id INTEGER PRIMARY KEY,
+            parent_id INTEGER NOT NULL REFERENCES test_pg_constraint_parents(id),
+            code TEXT NOT NULL UNIQUE
+        )
+    )");
+    conn->execute("INSERT INTO test_pg_constraint_parents (id) VALUES (1)");
+    conn->execute("INSERT INTO test_pg_constraint_children (id, parent_id, code) VALUES (1, 1, 'a')");
+
+    EXPECT_THROW(conn->execute(
+        "INSERT INTO test_pg_constraint_children (id, parent_id, code) VALUES (2, 1, 'a')"),
+        UniqueConstraintViolationException);
+
+    EXPECT_THROW(conn->execute(
+        "INSERT INTO test_pg_constraint_children (id, parent_id, code) VALUES (3, 1, NULL)"),
+        NotNullConstraintViolationException);
+
+    EXPECT_THROW(conn->execute(
+        "INSERT INTO test_pg_constraint_children (id, parent_id, code) VALUES (4, 404, 'b')"),
+        ForeignKeyConstraintViolationException);
+
+    conn->execute("DROP TABLE IF EXISTS test_pg_constraint_children;");
+    conn->execute("DROP TABLE IF EXISTS test_pg_constraint_parents;");
+}
+
 TEST(PostgresTransactionTest, OptimisticLockAcrossTransactions) {
     std::string conn_info = "host=localhost dbname=postgres user=postgres password=postgres connect_timeout=2";
     std::shared_ptr<PostgresDataSource> ds;

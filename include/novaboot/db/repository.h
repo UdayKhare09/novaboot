@@ -218,13 +218,18 @@ protected:
                           " WHERE " + std::string(join.join_column) + " = ?"),
                       {detail::entity_id_parameter(entity)});
 
+        std::unordered_set<std::string> linked_related_ids;
         for (const auto& related : collection_values<Member>(entity)) {
+            auto related_id = detail::entity_id_parameter(related);
+            if (!linked_related_ids.insert(format_parameter(related_id)).second) {
+                continue;
+            }
             conn->execute(dialect->convert_placeholders(
                               "INSERT INTO " + std::string(join.name) + " (" +
                               std::string(join.join_column) + ", " +
                               std::string(join.inverse_join_column) + ") VALUES (?, ?)"),
                           {detail::entity_id_parameter(entity),
-                           detail::entity_id_parameter(related)});
+                           std::move(related_id)});
         }
     }
 
@@ -342,6 +347,10 @@ public:
     }
 
     std::vector<Entity> find_all() { return query().list(); }
+
+    Page<Entity> find_page(const Pageable& pageable) {
+        return query().page(pageable);
+    }
 
     std::vector<Entity> find_all_by_id(const std::vector<ID>& ids) {
         if (ids.empty()) return {};

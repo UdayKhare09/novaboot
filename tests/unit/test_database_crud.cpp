@@ -244,6 +244,33 @@ TEST(DatabaseCrudTest, LifecycleAndQuery) {
     EXPECT_TRUE(repo.exists_by_id(2));
 }
 
+TEST(DatabaseCrudTest, SqliteMapsConstraintViolationsToPortableExceptions) {
+    auto ds = std::make_shared<SqliteDataSource>(":memory:", 1);
+    auto conn = ds->get_connection();
+    conn->execute("CREATE TABLE constraint_parents (id INTEGER PRIMARY KEY)");
+    conn->execute(R"(
+        CREATE TABLE constraint_children (
+            id INTEGER PRIMARY KEY,
+            parent_id INTEGER NOT NULL REFERENCES constraint_parents(id),
+            code TEXT NOT NULL UNIQUE
+        )
+    )");
+    conn->execute("INSERT INTO constraint_parents (id) VALUES (1)");
+    conn->execute("INSERT INTO constraint_children (id, parent_id, code) VALUES (1, 1, 'a')");
+
+    EXPECT_THROW(conn->execute(
+        "INSERT INTO constraint_children (id, parent_id, code) VALUES (2, 1, 'a')"),
+        UniqueConstraintViolationException);
+
+    EXPECT_THROW(conn->execute(
+        "INSERT INTO constraint_children (id, parent_id, code) VALUES (3, 1, NULL)"),
+        NotNullConstraintViolationException);
+
+    EXPECT_THROW(conn->execute(
+        "INSERT INTO constraint_children (id, parent_id, code) VALUES (4, 404, 'b')"),
+        ForeignKeyConstraintViolationException);
+}
+
 TEST(DatabaseCrudTest, RepositoryCollectionPrimitives) {
     auto ds = std::make_shared<SqliteDataSource>(":memory:", 1);
     auto conn = ds->get_connection();
@@ -376,16 +403,27 @@ TEST(DatabaseCrudTest, QueryPredicatesAndGroups) {
     ASSERT_TRUE(reset_result.has_value());
     EXPECT_EQ(reset_result->name, "Alice");
 
-    auto page = repo.query().page(Pageable{
-        .page = 1,
-        .size = 1,
-        .sort = {{.column = "name", .ascending = true}},
-    });
+    auto pageable = Pageable::of(1, 1);
+    pageable.sort_by<QueryPredicateEntity, &QueryPredicateEntity::name>();
+    auto page = repo.find_page(pageable);
     ASSERT_EQ(page.content.size(), 1);
     EXPECT_EQ(page.content.front().name, "Bob");
     EXPECT_EQ(page.total_elements, 3);
     EXPECT_EQ(page.total_pages(), 3);
+    EXPECT_EQ(page.number_of_elements(), 1);
     EXPECT_TRUE(page.has_next());
+    EXPECT_TRUE(page.has_previous());
+    EXPECT_FALSE(page.is_first());
+    EXPECT_FALSE(page.is_last());
+
+    auto desc_page = repo.query().page(Pageable{
+        .page = 0,
+        .size = 1,
+        .sort = {sort_desc<QueryPredicateEntity, &QueryPredicateEntity::name>()},
+    });
+    ASSERT_EQ(desc_page.content.size(), 1);
+    EXPECT_EQ(desc_page.content.front().name, "Carol");
+    EXPECT_TRUE(desc_page.is_first());
 
     EXPECT_THROW(repo.query().page(Pageable{.page = 0, .size = 1,
                                              .sort = {{.column = "invalid", .ascending = true}}}),

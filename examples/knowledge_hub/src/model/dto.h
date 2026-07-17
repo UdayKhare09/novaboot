@@ -54,6 +54,16 @@ struct ArticleRequest {
             .field<&ArticleRequest::title>("title").not_empty().size(2, 160);
 };
 
+struct ArticlePageQuery {
+    int page = 0;
+    int size = 10;
+
+    inline static const Schema<ArticlePageQuery> validator =
+        Schema<ArticlePageQuery>()
+            .field<&ArticlePageQuery::page>("page").min(0)
+            .field<&ArticlePageQuery::size>("size").min(1).max(100);
+};
+
 struct ContributorView {
     int id = 0;
     std::string handle;
@@ -87,6 +97,19 @@ struct ArticleDetail {
     std::string project_name;
     ArticleMetadata metadata;
     std::vector<ContributorView> contributors;
+};
+
+struct ArticlePageView {
+    std::vector<ArticleSummary> content;
+    int page = 0;
+    int size = 0;
+    int total_pages = 0;
+    int total_elements = 0;
+    int number_of_elements = 0;
+    bool first = true;
+    bool last = true;
+    bool has_next = false;
+    bool has_previous = false;
 };
 
 struct DashboardStats {

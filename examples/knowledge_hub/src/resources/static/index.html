@@ -160,6 +160,21 @@
       justify-content: flex-end;
     }
 
+    .pager {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 8px;
+      padding: 10px 12px;
+      border-top: 1px solid var(--border);
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .pager button {
+      min-height: 30px;
+    }
+
     .stats {
       display: grid;
       grid-template-columns: repeat(4, minmax(140px, 1fr));
@@ -358,6 +373,11 @@
             </thead>
             <tbody id="articles"></tbody>
           </table>
+          <div class="pager">
+            <button id="prev-page">Previous</button>
+            <span id="page-label">Page 1 of 1</span>
+            <button id="next-page">Next</button>
+          </div>
         </div>
 
         <div class="panel" id="side-panel"></div>
@@ -366,7 +386,7 @@
   </div>
 
   <script>
-    const state = { dashboard: null, selectedArticle: null };
+    const state = { dashboard: null, articlePage: null, articlePageNumber: 0, articlePageSize: 10, selectedArticle: null };
     const $ = (id) => document.getElementById(id);
 
     async function api(path, options = {}) {
@@ -400,7 +420,8 @@
       $("stat-published").textContent = stats.published;
     }
 
-    function renderArticles(articles) {
+    function renderArticles(page) {
+      const articles = page?.content || [];
       $("articles").innerHTML = articles.map((article) => `
         <tr>
           <td><button data-article="${article.id}">${article.title}</button></td>
@@ -412,6 +433,11 @@
       document.querySelectorAll("[data-article]").forEach((button) => {
         button.addEventListener("click", () => loadArticle(button.dataset.article));
       });
+
+      const totalPages = Math.max(page?.total_pages || 1, 1);
+      $("page-label").textContent = `Page ${(page?.page || 0) + 1} of ${totalPages} · ${page?.total_elements || 0} articles`;
+      $("prev-page").disabled = !page?.has_previous;
+      $("next-page").disabled = !page?.has_next;
     }
 
     function renderOverview() {
@@ -500,8 +526,13 @@
     async function loadDashboard() {
       state.dashboard = await api("/api/dashboard");
       renderStats(state.dashboard.stats);
-      renderArticles(state.dashboard.articles);
       renderOverview();
+    }
+
+    async function loadArticles(page = state.articlePageNumber) {
+      state.articlePageNumber = Math.max(page, 0);
+      state.articlePage = await api(`/api/articles?page=${state.articlePageNumber}&size=${state.articlePageSize}`);
+      renderArticles(state.articlePage);
     }
 
     async function loadArticle(id) {
@@ -535,6 +566,7 @@
           })
         });
         await loadDashboard();
+        await loadArticles(0);
       } catch (error) {
         setMessage(error.message, true);
       }
@@ -546,6 +578,7 @@
       try {
         await api("/api/contributors", { method: "POST", body: JSON.stringify(data) });
         await loadDashboard();
+        await loadArticles();
       } catch (error) {
         setMessage(error.message, true);
       }
@@ -571,6 +604,7 @@
           })
         });
         await loadDashboard();
+        await loadArticles(0);
       } catch (error) {
         setMessage(error.message, true);
       }
@@ -587,19 +621,24 @@
       });
     });
 
-    $("refresh").addEventListener("click", loadDashboard);
+    $("refresh").addEventListener("click", async () => {
+      await loadDashboard();
+      await loadArticles(state.articlePageNumber);
+    });
+    $("prev-page").addEventListener("click", () => loadArticles(state.articlePageNumber - 1));
+    $("next-page").addEventListener("click", () => loadArticles(state.articlePageNumber + 1));
     $("seed").addEventListener("click", async () => {
       state.dashboard = await api("/api/seed", { method: "POST" });
       renderStats(state.dashboard.stats);
-      renderArticles(state.dashboard.articles);
       renderOverview();
+      await loadArticles(0);
     });
 
-    loadDashboard().catch(async () => {
+    Promise.all([loadDashboard(), loadArticles()]).catch(async () => {
       state.dashboard = await api("/api/seed", { method: "POST" });
       renderStats(state.dashboard.stats);
-      renderArticles(state.dashboard.articles);
       renderOverview();
+      await loadArticles(0);
     });
   </script>
 </body>

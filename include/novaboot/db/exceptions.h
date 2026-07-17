@@ -4,6 +4,35 @@
 
 namespace novaboot::db {
 
+class DatabaseException : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
+
+class ConstraintViolationException : public DatabaseException {
+public:
+    explicit ConstraintViolationException(const std::string& message)
+        : DatabaseException(message) {}
+};
+
+class UniqueConstraintViolationException : public ConstraintViolationException {
+public:
+    explicit UniqueConstraintViolationException(const std::string& message)
+        : ConstraintViolationException(message) {}
+};
+
+class ForeignKeyConstraintViolationException : public ConstraintViolationException {
+public:
+    explicit ForeignKeyConstraintViolationException(const std::string& message)
+        : ConstraintViolationException(message) {}
+};
+
+class NotNullConstraintViolationException : public ConstraintViolationException {
+public:
+    explicit NotNullConstraintViolationException(const std::string& message)
+        : ConstraintViolationException(message) {}
+};
+
 /// Thrown by CrudRepository::save() when an optimistic-locking conflict is detected.
 ///
 /// This happens when two concurrent callers both load the same entity, modify it,
