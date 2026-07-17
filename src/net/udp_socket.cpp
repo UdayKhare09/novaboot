@@ -80,8 +80,8 @@ UdpSocket::create(const UdpSocketConfig& config) {
         }
     }
 
-    spdlog::info("UDP socket bound to {} (fd={})",
-                 config.bind_address.to_string(), fd);
+    spdlog::debug("UDP socket bound to {} (fd={})",
+                  config.bind_address.to_string(), fd);
 
     return sock;
 }
@@ -159,9 +159,9 @@ void UdpSocket::configure_socket(const UdpSocketConfig& config) {
         if (::setsockopt(fd_, SOL_UDP, UDP_GRO,
                          &optval, sizeof(optval)) == 0) {
             gro_supported_ = true;
-            spdlog::info("UDP GRO enabled");
+            spdlog::debug("UDP GRO enabled");
         } else {
-            spdlog::info("UDP GRO not available: {}", std::strerror(errno));
+            spdlog::debug("UDP GRO not available: {}", std::strerror(errno));
         }
     }
 
@@ -171,14 +171,14 @@ void UdpSocket::configure_socket(const UdpSocketConfig& config) {
         if (::setsockopt(fd_, SOL_UDP, UDP_SEGMENT,
                          &segment_size, sizeof(segment_size)) == 0) {
             gso_supported_ = true;
-            spdlog::info("UDP GSO enabled");
+            spdlog::debug("UDP GSO enabled");
 
             // Remove the option; we'll set it per-send via cmsg
             segment_size = 0;
             ::setsockopt(fd_, SOL_UDP, UDP_SEGMENT,
                          &segment_size, sizeof(segment_size));
         } else {
-            spdlog::info("UDP GSO not available: {}", std::strerror(errno));
+            spdlog::debug("UDP GSO not available: {}", std::strerror(errno));
         }
     }
 }

@@ -162,13 +162,25 @@ std::unique_ptr<Server> Server::Builder::build() {
     server->backend_ = backend_;
     server->static_resources_dir_ = static_resources_dir_;
 
-    spdlog::info("NovaBoot server configured:");
-    spdlog::info("  Bind:    {}", server->bind_address_.to_string());
-    spdlog::info("  Workers: {}", server->worker_count_);
-    spdlog::info("  Backend: io_uring");
-    spdlog::info("  TLS:     {} / {}", cert_path_, key_path_);
+    spdlog::info("NovaBoot configured: bind={}, workers={}, backend=io_uring, tls={} / {}",
+                 server->bind_address_.to_string(),
+                 server->worker_count_,
+                 cert_path_,
+                 key_path_);
     if (!static_resources_dir_.empty()) {
-        spdlog::info("  Static:  {}", static_resources_dir_);
+        spdlog::info("Static resources: {}", static_resources_dir_);
+    }
+    if (di_root_) {
+        spdlog::info("DI: {} registrations, {} singleton(s), {} route registrar(s)",
+                     di_root_->registration_count(),
+                     di_root_->singleton_count(),
+                     di_root_->route_registrar_count());
+    }
+    spdlog::info("Routes: {} route(s), {} exception handler(s)",
+                 server->router_.size(),
+                 server->router_.exception_handler_count());
+    for (const auto& route : server->router_.routes()) {
+        spdlog::info("  {} {}", router::method_to_string(route.method), route.pattern);
     }
 
     return server;
@@ -202,7 +214,7 @@ void Server::run() {
     // Install signal handlers
     install_signal_handlers();
 
-    spdlog::info("Starting {} shard(s) on {}...",
+    spdlog::info("Starting NovaBoot: {} shard(s) on {}",
                  worker_count_, bind_address_.to_string());
 
     // Create and start shards

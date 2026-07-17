@@ -3,6 +3,7 @@
 #include "novaboot/di/di.h"
 #include "novaboot/router/router.h"
 #include "novaboot/annotations/annotations.h"
+#include "novaboot/db/transaction.h"
 
 #include <meta>
 #include <string>
@@ -16,6 +17,16 @@ void register_routes(router::Router& router);
 
 template<typename... T>
 void register_advice(router::Router& router);
+
+template<typename T>
+void register_routes_for(router::Router& router) {
+    register_routes<T>(router);
+}
+
+template<typename T>
+void register_advice_for(router::Router& router) {
+    register_advice<T>(router);
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Consteval Reflection Helper Structures
@@ -166,6 +177,46 @@ void wire_lifecycle(Builder& builder) {
     }
 }
 
+template<typename T>
+consteval bool has_transactional_method() {
+    static constexpr auto members = get_members<T>();
+    template for (constexpr auto m : members) {
+        constexpr bool has_id = std::meta::has_identifier(m);
+        if constexpr (has_id) {
+            constexpr bool is_func = std::meta::is_function(m);
+            constexpr bool is_ctor = std::meta::is_constructor(m);
+            constexpr bool is_dtor = std::meta::is_destructor(m);
+            if constexpr (is_func && !is_ctor && !is_dtor) {
+                if constexpr (has_annotation<Transactional>(m)) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+template<typename T>
+void register_transactional_proxy_if_needed(di::RootContainer& container,
+                                            di::Scope scope) {
+    if constexpr (has_transactional_method<T>()) {
+        using Proxy = novaboot::db::TransactionalProxy<T>;
+        container.template register_bean<Proxy>(
+            [](di::ContainerBase& c) -> Proxy* {
+                return new Proxy(c.template resolve<T>(),
+                                 c.template resolve<novaboot::db::TransactionManager>());
+            },
+            scope,
+            "",     // qualifier
+            false,  // is_primary
+            true    // is_lazy: do not require TransactionManager unless proxy is used
+        );
+        container.add_dependency(std::type_index(typeid(Proxy)), std::type_index(typeid(T)));
+        container.add_dependency(std::type_index(typeid(Proxy)),
+                                 std::type_index(typeid(novaboot::db::TransactionManager)));
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Scanner APIs
 // ─────────────────────────────────────────────────────────────────────────────
@@ -213,6 +264,7 @@ void register_beans(di::RootContainer& container) {
             constexpr auto scope = get_annotation<Service>(^^Type).scope;
             auto builder = container.template autowire<Type>(scope);
             wire_lifecycle<Type>(builder);
+            register_transactional_proxy_if_needed<Type>(container, scope);
         } else if constexpr (has_annotation<Repository>(^^Type)) {
             constexpr auto scope = get_annotation<Repository>(^^Type).scope;
             auto builder = container.template autowire<Type>(scope);
@@ -221,18 +273,15 @@ void register_beans(di::RootContainer& container) {
             constexpr auto scope = get_annotation<Component>(^^Type).scope;
             auto builder = container.template autowire<Type>(scope);
             wire_lifecycle<Type>(builder);
+            register_transactional_proxy_if_needed<Type>(container, scope);
         } else if constexpr (has_annotation<RestController>(^^Type)) {
             auto builder = container.template autowire<Type>(di::Scope::Singleton);
             wire_lifecycle<Type>(builder);
-            container.add_route_registrar([](router::Router& r) {
-                novaboot::annotations::register_routes<Type>(r);
-            });
+            container.add_route_registrar(&novaboot::annotations::register_routes_for<Type>);
         } else if constexpr (has_annotation<ControllerAdvice>(^^Type)) {
             auto builder = container.template autowire<Type>(di::Scope::Singleton);
             wire_lifecycle<Type>(builder);
-            container.add_route_registrar([](router::Router& r) {
-                novaboot::annotations::register_advice<Type>(r);
-            });
+            container.add_route_registrar(&novaboot::annotations::register_advice_for<Type>);
         } else if constexpr (has_annotation<Configuration>(^^Type)) {
             auto builder = container.template autowire<Type>(di::Scope::Singleton);
             wire_lifecycle<Type>(builder);

@@ -507,4 +507,48 @@ private:
     std::shared_ptr<DataSource> datasource_;
 };
 
+/// DI-friendly transaction proxy for service-to-service calls.
+///
+/// C++ cannot transparently intercept a normal concrete call such as
+/// `service.method()` without code generation or virtual/interface dispatch.
+/// This proxy gives NovaBoot services a Spring-like injection point while
+/// keeping the call site explicit and type-safe:
+///
+///   TransactionalProxy<OrderService>& orders;
+///   orders.invoke<&OrderService::place_order>(request);
+///
+/// The proxy delegates annotation lookup and transaction semantics to
+/// TransactionManager::invoke(), so unannotated methods remain plain calls and
+/// annotated methods use the configured propagation/rollback/timeout engine.
+template<typename T>
+class TransactionalProxy {
+public:
+    TransactionalProxy(T& target, TransactionManager& transactions)
+        : target_(target), transactions_(transactions) {}
+
+    TransactionalProxy(const TransactionalProxy&) = delete;
+    TransactionalProxy& operator=(const TransactionalProxy&) = delete;
+
+    T& target() noexcept { return target_; }
+    const T& target() const noexcept { return target_; }
+
+#ifdef __cpp_impl_reflection
+    template<auto MethodPtr, typename... Args>
+    decltype(auto) invoke(Args&&... args) {
+        return transactions_.template invoke<MethodPtr>(
+            target_, std::forward<Args>(args)...);
+    }
+
+    template<auto MethodPtr, typename... Args>
+    decltype(auto) invoke(Args&&... args) const {
+        return transactions_.template invoke<MethodPtr>(
+            target_, std::forward<Args>(args)...);
+    }
+#endif
+
+private:
+    T& target_;
+    TransactionManager& transactions_;
+};
+
 } // namespace novaboot::db

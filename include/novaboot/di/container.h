@@ -382,6 +382,18 @@ public:
         return registrations_;
     }
 
+    [[nodiscard]] std::size_t registration_count() const noexcept {
+        return registrations_.size();
+    }
+
+    [[nodiscard]] std::size_t singleton_count() const noexcept {
+        return instances_.size();
+    }
+
+    [[nodiscard]] std::size_t route_registrar_count() const noexcept {
+        return route_registrars_.size();
+    }
+
     /// Register an async bean (factory returns std::future<T*>).
     template<typename T>
     RootContainer& register_async_bean(
@@ -502,8 +514,8 @@ struct TypeList {
 
     template<typename T>
     static void add_dependencies(RootContainer& container) {
-        auto parent_tid = std::type_index(typeid(T));
-        (container.add_dependency(parent_tid, std::type_index(typeid(std::remove_cvref_t<Args>))), ...);
+        (container.add_dependency(std::type_index(typeid(T)),
+                                  std::type_index(typeid(std::remove_cvref_t<Args>))), ...);
     }
 };
 

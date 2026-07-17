@@ -51,8 +51,8 @@ bool Shard::is_running() const noexcept {
 }
 
 void Shard::run() {
-    spdlog::info("Shard {} starting on core {}",
-                 config_.shard_id, config_.cpu_core);
+    spdlog::debug("Shard {} starting on core {}",
+                  config_.shard_id, config_.cpu_core);
 
     // Pin thread to CPU core
     if (config_.cpu_core >= 0) {
@@ -167,12 +167,12 @@ void Shard::run() {
 
     event_loop_->add_fd(tcp_listener_->fd(), core::EventFlags::Readable, [this](uint32_t events) {
         if (events & core::EventFlags::Readable) {
-            spdlog::info("Shard {}: TCP listener fd {} became readable", config_.shard_id, tcp_listener_->fd());
+            spdlog::debug("Shard {}: TCP listener fd {} became readable", config_.shard_id, tcp_listener_->fd());
             struct sockaddr_storage addr{};
             socklen_t len = sizeof(addr);
             int client_fd = ::accept4(tcp_listener_->fd(), reinterpret_cast<struct sockaddr*>(&addr), &len, SOCK_NONBLOCK | SOCK_CLOEXEC);
             if (client_fd >= 0) {
-                spdlog::info("Shard {}: Accepted TCP connection on fd {}", config_.shard_id, client_fd);
+                spdlog::debug("Shard {}: Accepted TCP connection on fd {}", config_.shard_id, client_fd);
                 tcp_conn_mgr_->on_accept(client_fd, *event_loop_, tls_ctx_.native_handle());
             } else {
                 if (errno != EAGAIN && errno != EWOULDBLOCK) {
@@ -187,13 +187,13 @@ void Shard::run() {
         std::chrono::seconds(5),
         [this]() { schedule_cleanup(); });
 
-    spdlog::info("Shard {} ready (fd={}, connections=0)",
-                 config_.shard_id, socket_->fd());
+    spdlog::debug("Shard {} ready (udp_fd={}, connections=0)",
+                  config_.shard_id, socket_->fd());
 
     // Run the event loop (blocks until stop() is called)
     event_loop_->run();
 
-    spdlog::info("Shard {} stopped", config_.shard_id);
+    spdlog::debug("Shard {} stopped", config_.shard_id);
 }
 
 void Shard::pin_to_core() {
@@ -207,8 +207,8 @@ void Shard::pin_to_core() {
         spdlog::warn("Shard {}: Failed to pin to core {} (error {})",
                      config_.shard_id, config_.cpu_core, rv);
     } else {
-        spdlog::info("Shard {}: Pinned to core {}",
-                     config_.shard_id, config_.cpu_core);
+        spdlog::debug("Shard {}: Pinned to core {}",
+                      config_.shard_id, config_.cpu_core);
     }
 }
 

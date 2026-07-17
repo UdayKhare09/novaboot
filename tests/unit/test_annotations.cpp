@@ -13,6 +13,7 @@ static int g_post_construct_calls = 0;
 static int g_pre_destroy_calls = 0;
 static int g_controller_calls = 0;
 static int g_tx_controller_calls = 0;
+static int g_tx_proxy_calls = 0;
 
 struct TxRouteState {
     int begins = 0;
@@ -116,6 +117,23 @@ struct [[= RestController("/api/tx") ]] TxRouteController {
     void fail(http3::Request&, http3::Response&, context::RequestContext&) {
         g_tx_controller_calls++;
         throw std::runtime_error("route failure");
+    }
+};
+
+struct [[= Service() ]] TxProxyService {
+    [[= Transactional() ]]
+    void committed() {
+        g_tx_proxy_calls++;
+    }
+
+    [[= Transactional() ]]
+    void failed() {
+        g_tx_proxy_calls++;
+        throw std::runtime_error("proxy failure");
+    }
+
+    void plain() {
+        g_tx_proxy_calls++;
     }
 };
 
@@ -224,6 +242,50 @@ TEST(AnnotationsTest, TransactionalRouteRollsBackOnException) {
     EXPECT_EQ(g_tx_controller_calls, 1);
     EXPECT_EQ(state->begins, 1);
     EXPECT_EQ(state->commits, 0);
+    EXPECT_EQ(state->rollbacks, 1);
+
+    di_root.shutdown();
+}
+
+TEST(AnnotationsTest, ScannerRegistersTransactionalServiceProxy) {
+    g_tx_proxy_calls = 0;
+    auto state = std::make_shared<TxRouteState>();
+    auto ds = std::make_shared<TxRouteDataSource>(state);
+
+    RootContainer di_root;
+    di_root.register_bean<std::shared_ptr<novaboot::db::DataSource>>(
+        [ds](ContainerBase&) {
+            return new std::shared_ptr<novaboot::db::DataSource>(ds);
+        });
+    di_root.register_bean<novaboot::db::TransactionManager>(
+        [](ContainerBase& c) {
+            return new novaboot::db::TransactionManager(
+                c.resolve<std::shared_ptr<novaboot::db::DataSource>>());
+        });
+    register_beans<TxProxyService>(di_root);
+    di_root.build();
+
+    using Proxy = novaboot::db::TransactionalProxy<TxProxyService>;
+    EXPECT_TRUE(di_root.has<TxProxyService>());
+    EXPECT_TRUE(di_root.has<Proxy>());
+
+    auto& proxy = di_root.resolve<Proxy>();
+    proxy.invoke<&TxProxyService::committed>();
+    EXPECT_EQ(g_tx_proxy_calls, 1);
+    EXPECT_EQ(state->begins, 1);
+    EXPECT_EQ(state->commits, 1);
+    EXPECT_EQ(state->rollbacks, 0);
+
+    EXPECT_THROW(proxy.invoke<&TxProxyService::failed>(), std::runtime_error);
+    EXPECT_EQ(g_tx_proxy_calls, 2);
+    EXPECT_EQ(state->begins, 2);
+    EXPECT_EQ(state->commits, 1);
+    EXPECT_EQ(state->rollbacks, 1);
+
+    proxy.invoke<&TxProxyService::plain>();
+    EXPECT_EQ(g_tx_proxy_calls, 3);
+    EXPECT_EQ(state->begins, 2);
+    EXPECT_EQ(state->commits, 1);
     EXPECT_EQ(state->rollbacks, 1);
 
     di_root.shutdown();

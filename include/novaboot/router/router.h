@@ -143,6 +143,11 @@ public:
         PathParams  params;
     };
 
+    struct RouteInfo {
+        Method method = Method::GET;
+        std::string pattern;
+    };
+
     MatchResult match(Method method, std::string_view path) const;
 
     /// Convenience: match from a string method name
@@ -150,6 +155,16 @@ public:
 
     /// Number of registered routes
     [[nodiscard]] std::size_t size() const noexcept { return route_count_; }
+
+    /// Registered route metadata for diagnostics.
+    [[nodiscard]] const std::vector<RouteInfo>& routes() const noexcept {
+        return route_infos_;
+    }
+
+    /// Number of registered exception handlers.
+    [[nodiscard]] std::size_t exception_handler_count() const noexcept {
+        return exception_handlers_.size();
+    }
 
 private:
     /// Radix tree node
@@ -203,6 +218,7 @@ private:
 
     std::unique_ptr<Node> root_ = std::make_unique<Node>();
     std::size_t           route_count_ = 0;
+    std::vector<RouteInfo> route_infos_;
 
     /// Flat storage for method resolution during lookup
     Method current_method_ = Method::GET;

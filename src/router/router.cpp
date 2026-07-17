@@ -96,6 +96,10 @@ void Router::add_route(Method method, std::string_view pattern,
     auto remaining = pattern.substr(1);
     insert(root_.get(), remaining, method, std::move(handler));
     ++route_count_;
+    route_infos_.push_back(Router::RouteInfo{
+        .method = method,
+        .pattern = std::string(pattern),
+    });
 
     spdlog::debug("Route registered: {} {}", method_to_string(method),
                   pattern);

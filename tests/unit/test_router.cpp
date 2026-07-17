@@ -106,3 +106,15 @@ TEST(RouterTest, MethodAny) {
     auto match_post = router.match(Method::POST, "/api/health");
     ASSERT_NE(match_post.handler, nullptr);
 }
+
+TEST(RouterTest, ExposesRouteMetadataForDiagnostics) {
+    Router router;
+    router.add_route(Method::GET, "/api/diagnostics", [](auto&, auto&, auto&) {});
+    router.add_route(Method::POST, "/api/diagnostics", [](auto&, auto&, auto&) {});
+
+    ASSERT_EQ(router.routes().size(), 2);
+    EXPECT_EQ(router.routes()[0].method, Method::GET);
+    EXPECT_EQ(router.routes()[0].pattern, "/api/diagnostics");
+    EXPECT_EQ(router.routes()[1].method, Method::POST);
+    EXPECT_EQ(router.routes()[1].pattern, "/api/diagnostics");
+}

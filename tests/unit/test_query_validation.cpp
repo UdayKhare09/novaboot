@@ -199,4 +199,27 @@ TEST(QueryValidationTest, JsonBodyStructMayContainNestedObjectsAndVectors) {
     ASSERT_EQ(controller.last.tags.size(), 2);
     EXPECT_EQ(controller.last.tags[1], "json");
 }
+
+TEST(QueryValidationTest, MalformedJsonBodyThrowsBadRequestError) {
+    RichBodyController controller;
+    http3::Request req;
+    req.set_method("POST");
+    const char* payload = R"({"title": "broken")";
+    req.append_body(reinterpret_cast<const uint8_t*>(payload), strlen(payload));
+
+    http3::Response res;
+    context::RequestContext ctx;
+
+    using InvokerType = detail::Invoker<
+        RichBodyController,
+        ^^RichBodyController::post_rich,
+        void,
+        RichBodyDto
+    >;
+
+    EXPECT_THROW(
+        InvokerType::invoke(controller, &RichBodyController::post_rich, req, res, ctx),
+        std::invalid_argument);
+    EXPECT_FALSE(controller.called);
+}
 #endif

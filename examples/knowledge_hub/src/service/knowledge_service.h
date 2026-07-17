@@ -65,7 +65,7 @@ struct [[= Service() ]] KnowledgeService {
             .name = project.name,
             .description = project.description,
             .settings = project.settings,
-            .article_count = articles.count_by_project(project),
+            .article_count = static_cast<int>(project.articles.count()),
         };
     }
 
@@ -98,7 +98,14 @@ struct [[= Service() ]] KnowledgeService {
     }
 
     DashboardView dashboard() {
-        auto all_articles = articles.query().order_by<&Article::title>().list();
+        auto all_articles = articles.query()
+            .fetch<&Article::contributors>()
+            .order_by<&Article::title>()
+            .list();
+        auto all_projects = projects.query()
+            .fetch<&Project::articles>()
+            .order_by<&Project::name>()
+            .list();
 
         DashboardView view;
         view.stats = DashboardStats{
@@ -108,7 +115,7 @@ struct [[= Service() ]] KnowledgeService {
             .published = 0,
         };
 
-        for (const auto& project : projects.find_all()) {
+        for (const auto& project : all_projects) {
             view.projects.push_back(to_view(project));
         }
         for (const auto& article : all_articles) {
@@ -142,7 +149,10 @@ struct [[= Service() ]] KnowledgeService {
     }
 
     ArticleDetail article_detail(int id) {
-        auto article = articles.find_by_id(id);
+        auto article = articles.query()
+            .fetch<&Article::contributors>()
+            .where<&Article::id>(novaboot::db::Op::Equal, id)
+            .single();
         if (!article) throw std::runtime_error("Article not found");
         return to_detail(*article);
     }
@@ -196,11 +206,14 @@ struct [[= Service() ]] KnowledgeService {
             article.metadata = request.metadata;
             article.published_at = std::chrono::system_clock::now();
 
+            std::vector<Contributor> selected_contributors;
             for (const auto contributor_id : request.contributor_ids) {
                 auto contributor = contributors.find_by_id(contributor_id);
                 if (!contributor) throw std::runtime_error("Contributor not found");
-                article.contributors.push_back(*contributor);
+                selected_contributors.push_back(*contributor);
             }
+            article.contributors =
+                novaboot::db::LazyCollection<Contributor>::loaded(std::move(selected_contributors));
 
             auto saved = articles.save(article);
             return to_detail(saved);
@@ -239,7 +252,7 @@ struct [[= Service() ]] KnowledgeService {
             onboarding.status = ArticleStatus::Published;
             onboarding.published_at = std::chrono::system_clock::now();
             onboarding.metadata = ArticleMetadata{.reading_minutes = 5, .topics = {"postgres", "repository", "schema"}};
-            onboarding.contributors = {ada, grace};
+            onboarding.contributors = novaboot::db::LazyCollection<Contributor>::loaded({ada, grace});
             articles.save(onboarding);
 
             Article migrations;
@@ -249,7 +262,7 @@ struct [[= Service() ]] KnowledgeService {
             migrations.status = ArticleStatus::Review;
             migrations.published_at = std::chrono::system_clock::now();
             migrations.metadata = ArticleMetadata{.reading_minutes = 4, .topics = {"schema", "migration"}};
-            migrations.contributors = {grace, linus};
+            migrations.contributors = novaboot::db::LazyCollection<Contributor>::loaded({grace, linus});
             articles.save(migrations);
 
             return dashboard();

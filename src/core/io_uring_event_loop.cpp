@@ -129,8 +129,8 @@ IoUringEventLoop::IoUringEventLoop() {
         [[maybe_unused]] auto n = ::read(wakeup_fd_, &val, sizeof(val));
     });
 
-    spdlog::info("io_uring initialized (sq_entries={}, cq_entries={}, features=0x{:08x})",
-                 params.sq_entries, params.cq_entries, params.features);
+    spdlog::debug("io_uring initialized (sq_entries={}, cq_entries={}, features=0x{:08x})",
+                  params.sq_entries, params.cq_entries, params.features);
 }
 
 IoUringEventLoop::~IoUringEventLoop() {

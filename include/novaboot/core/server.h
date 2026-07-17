@@ -4,6 +4,7 @@
 #include <atomic>
 #include <csignal>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -196,8 +197,14 @@ struct Invoker {
                 } else {
                     auto parser = std::make_shared<simdjson::dom::parser>();
                     auto doc = parser->parse(req.body());
-                    if (doc.error() == simdjson::SUCCESS) {
+                    if (doc.error() != simdjson::SUCCESS) {
+                        throw std::invalid_argument("Malformed JSON request body");
+                    }
+                    try {
                         novaboot::json::deserialize_elem(doc.value(), body_obj);
+                    } catch (const std::exception& error) {
+                        throw std::invalid_argument(
+                            std::string("Invalid JSON request body: ") + error.what());
                     }
                     ctx.set<std::shared_ptr<simdjson::dom::parser>>(parser);
                 }

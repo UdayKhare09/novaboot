@@ -11,8 +11,10 @@ namespace knowledge_hub::model {
 using novaboot::validation::Schema;
 
 struct ErrorResponse {
+    int status = 500;
     std::string error;
     std::string message;
+    std::vector<std::string> details;
 };
 
 struct ProjectRequest {

@@ -72,7 +72,7 @@ std::expected<TcpListener, TcpListener::Error> TcpListener::create(const Address
         return std::unexpected(Error::Listen);
     }
 
-    spdlog::info("TCP listener bound and listening on {} (fd={})", bind_addr.to_string(), fd);
+    spdlog::debug("TCP listener bound and listening on {} (fd={})", bind_addr.to_string(), fd);
     return TcpListener(fd);
 }
 

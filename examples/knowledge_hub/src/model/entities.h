@@ -1,6 +1,7 @@
 #pragma once
 
 #include "novaboot/annotations/stereotypes.h"
+#include "novaboot/db/lazy.h"
 
 #include <chrono>
 #include <string>
@@ -40,8 +41,8 @@ struct [[= Entity("kh_projects") ]] Project {
     [[= Json() ]]
     ProjectSettings settings;
 
-    [[= OneToMany("project", FetchType::Eager, CascadeType::All, true) ]]
-    std::vector<Article> articles;
+    [[= OneToMany("project", FetchType::Lazy, CascadeType::All, true) ]]
+    novaboot::db::LazyCollection<Article> articles;
 };
 
 struct [[= Entity("kh_contributors") ]] Contributor {
@@ -79,9 +80,9 @@ struct [[= Entity("kh_articles") ]] Article {
     [[= JoinColumn("project_id") ]]
     Project project;
 
-    [[= ManyToMany(FetchType::Eager) ]]
+    [[= ManyToMany(FetchType::Lazy) ]]
     [[= JoinTable("kh_article_contributors", "article_id", "contributor_id") ]]
-    std::vector<Contributor> contributors;
+    novaboot::db::LazyCollection<Contributor> contributors;
 };
 
 } // namespace knowledge_hub::model
