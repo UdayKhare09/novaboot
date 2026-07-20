@@ -18,6 +18,8 @@
 #include "novaboot/router/router.h"
 #include "novaboot/router/response_entity.h"
 #include "novaboot/router/json.h"
+#include "novaboot/websocket/websocket.h"
+#include "novaboot/messaging/stomp.h"
 #include "novaboot/validation/validation.h"
 #include "novaboot/db/transaction.h"
 #ifdef __cpp_impl_reflection
@@ -368,6 +370,19 @@ public:
 
     /// Register a route (fluent API)
     router::Router::RouteBuilder route(std::string_view path);
+
+    /// Register a raw WebSocket endpoint. HTTP/1.1 Upgrade is supported in
+    /// the initial implementation; the same handler contract will be used by
+    /// the HTTP/2 extended-CONNECT adapter.
+    Server& websocket(std::string_view path, websocket::Handler handler) {
+        router_.add_websocket(path, std::move(handler));
+        return *this;
+    }
+
+    /// Register a STOMP 1.2 endpoint on the raw WebSocket transport.
+    Server& stomp(std::string_view path, messaging::stomp::Endpoint& endpoint) {
+        return websocket(path, endpoint.websocket_handler());
+    }
 
     template<typename Ex, typename Handler>
     Server& on_exception(Handler&& handler) {

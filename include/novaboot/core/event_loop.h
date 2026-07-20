@@ -93,6 +93,10 @@ public:
     /// Get current time (may be cached per iteration for consistency)
     [[nodiscard]] virtual TimePoint now() const noexcept = 0;
 
+    /// Schedule work on this loop's owning thread. This is safe to call from
+    /// another thread; all other mutation APIs remain owner-thread only.
+    virtual void post(std::move_only_function<void()> task) = 0;
+
     // ─── Async Packet I/O (QUIC optimal) ──────────────────────────────
     /// Start asynchronous packet reception on the socket.
     virtual void start_packet_recv(int fd, std::move_only_function<void(net::IncomingPacket&&)> cb) = 0;

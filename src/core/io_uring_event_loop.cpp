@@ -126,7 +126,9 @@ IoUringEventLoop::IoUringEventLoop() {
 
     add_fd(wakeup_fd_, EventFlags::Readable, [this](std::uint32_t) {
         std::uint64_t val;
-        [[maybe_unused]] auto n = ::read(wakeup_fd_, &val, sizeof(val));
+        while (::read(wakeup_fd_, &val, sizeof(val)) == sizeof(val)) {
+        }
+        run_posted_tasks();
     });
 
     spdlog::debug("io_uring initialized (sq_entries={}, cq_entries={}, features=0x{:08x})",
@@ -134,6 +136,7 @@ IoUringEventLoop::IoUringEventLoop() {
 }
 
 IoUringEventLoop::~IoUringEventLoop() {
+    accepting_tasks_.store(false, std::memory_order_release);
     if (wakeup_fd_ >= 0) {
         ::close(wakeup_fd_);
     }
@@ -308,6 +311,28 @@ bool IoUringEventLoop::is_running() const noexcept {
 
 TimePoint IoUringEventLoop::now() const noexcept {
     return cached_now_;
+}
+
+void IoUringEventLoop::post(std::move_only_function<void()> task) {
+    if (!accepting_tasks_.load(std::memory_order_acquire)) return;
+    {
+        std::lock_guard lock(posted_tasks_mutex_);
+        if (!accepting_tasks_.load(std::memory_order_relaxed)) return;
+        posted_tasks_.push_back(std::move(task));
+    }
+    const std::uint64_t value = 1;
+    [[maybe_unused]] const auto written = ::write(wakeup_fd_, &value, sizeof(value));
+}
+
+void IoUringEventLoop::run_posted_tasks() {
+    std::deque<std::move_only_function<void()>> pending;
+    {
+        std::lock_guard lock(posted_tasks_mutex_);
+        pending.swap(posted_tasks_);
+    }
+    for (auto& task : pending) {
+        if (task) task();
+    }
 }
 
 // ─── Internal: SQE Submission ────────────────────────────────────────────────

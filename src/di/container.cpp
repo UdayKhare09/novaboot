@@ -324,7 +324,7 @@ ConnectionContainer::~ConnectionContainer() {
 
 void RootContainer::register_routes_and_advice(router::Router& router) {
     for (auto& registrar : route_registrars_) {
-        registrar(router);
+        registrar(router, *this);
     }
 }
 

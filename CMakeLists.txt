@@ -64,6 +64,8 @@ add_library(novaboot STATIC
     src/net/tcp_connection_manager.cpp
     src/http1/http1_session.cpp
     src/http2/http2_session.cpp
+    src/websocket/websocket.cpp
+    src/messaging/stomp.cpp
 
     # Core
     src/core/io_uring_event_loop.cpp

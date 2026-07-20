@@ -33,7 +33,12 @@ nghttp2_ssize h2_data_source_read_callback(
 
 } // anonymous namespace
 
-Http2Session::Http2Session(RequestHandler handler) : handler_(std::move(handler)) {
+Http2Session::Http2Session(RequestHandler handler,
+                           WebSocketConnectHandler websocket_handler,
+                           websocket::Wakeup websocket_wakeup)
+    : handler_(std::move(handler)),
+      websocket_handler_(std::move(websocket_handler)),
+      websocket_wakeup_(std::move(websocket_wakeup)) {
     nghttp2_session_callbacks* callbacks;
     nghttp2_session_callbacks_new(&callbacks);
 
@@ -47,10 +52,13 @@ Http2Session::Http2Session(RequestHandler handler) : handler_(std::move(handler)
     nghttp2_session_callbacks_del(callbacks);
 
     // Send SETTINGS frame at startup
-    nghttp2_settings_entry iv[1] = {
-        {NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS, 100}
+    nghttp2_settings_entry iv[2] = {
+        {NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS, 100},
+        // RFC 8441: advertise extended CONNECT before accepting WebSockets
+        // over an HTTP/2 stream.
+        {NGHTTP2_SETTINGS_ENABLE_CONNECT_PROTOCOL, 1}
     };
-    nghttp2_submit_settings(session_, NGHTTP2_FLAG_NONE, iv, 1);
+    nghttp2_submit_settings(session_, NGHTTP2_FLAG_NONE, iv, 2);
 }
 
 Http2Session::~Http2Session() {
@@ -62,6 +70,8 @@ Http2Session::~Http2Session() {
 Http2Session::Http2Session(Http2Session&& other) noexcept
     : session_(other.session_),
       handler_(std::move(other.handler_)),
+      websocket_handler_(std::move(other.websocket_handler_)),
+      websocket_wakeup_(std::move(other.websocket_wakeup_)),
       streams_(std::move(other.streams_)),
       keep_alive_(other.keep_alive_) {
     other.session_ = nullptr;
@@ -72,6 +82,8 @@ Http2Session& Http2Session::operator=(Http2Session&& other) noexcept {
         if (session_) nghttp2_session_del(session_);
         session_ = other.session_;
         handler_ = std::move(other.handler_);
+        websocket_handler_ = std::move(other.websocket_handler_);
+        websocket_wakeup_ = std::move(other.websocket_wakeup_);
         streams_ = std::move(other.streams_);
         keep_alive_ = other.keep_alive_;
         other.session_ = nullptr;
@@ -96,6 +108,15 @@ std::expected<std::vector<uint8_t>, int> Http2Session::feed_data(
     }
 
     return send_pending_frames(encrypt_callback);
+}
+
+std::vector<std::uint8_t> Http2Session::drain_websocket_outbound(
+    std::function<std::vector<std::uint8_t>(const std::vector<std::uint8_t>&)> encrypt_callback) {
+    for (auto& [_, stream] : streams_) {
+        if (!stream.websocket_active || !stream.websocket) continue;
+        queue_websocket_outbound(stream, stream.websocket->drain_external_outbound());
+    }
+    return send_pending_frames(std::move(encrypt_callback));
 }
 
 std::vector<uint8_t> Http2Session::send_pending_frames(
@@ -127,7 +148,9 @@ int Http2Session::on_begin_headers_cb(nghttp2_session* /*session*/,
     auto* self = static_cast<Http2Session*>(user_data);
     if (frame->hd.type == NGHTTP2_HEADERS && frame->headers.cat == NGHTTP2_HCAT_REQUEST) {
         int32_t stream_id = frame->hd.stream_id;
-        self->streams_[stream_id] = Http2Stream{stream_id, http3::Request(), http3::Response(), false};
+        Http2Stream stream{};
+        stream.stream_id = stream_id;
+        self->streams_[stream_id] = std::move(stream);
     }
     return 0;
 }
@@ -160,6 +183,8 @@ int Http2Session::on_header_cb(nghttp2_session* /*session*/,
             it->second.request.set_scheme(value_sv);
         } else if (name_sv == ":authority") {
             it->second.request.set_authority(value_sv);
+        } else if (name_sv == ":protocol" && value_sv == "websocket") {
+            it->second.extended_websocket_connect = true;
         }
     } else {
         it->second.request.headers().add(name_sv, value_sv);
@@ -174,7 +199,16 @@ int Http2Session::on_data_chunk_recv_cb(nghttp2_session* /*session*/, uint8_t /*
     auto* self = static_cast<Http2Session*>(user_data);
     auto it = self->streams_.find(stream_id);
     if (it != self->streams_.end()) {
-        it->second.request.append_body(data, len);
+        auto& stream = it->second;
+        if (stream.websocket_active && stream.websocket) {
+            const auto result = stream.websocket->feed({data, len});
+            // A protocol error queues its RFC 6455 close frame.  Keep the
+            // HTTP/2 stream alive long enough for nghttp2 to deliver it.
+            (void)result;
+            self->queue_websocket_outbound(stream, stream.websocket->take_outbound());
+        } else {
+            stream.request.append_body(data, len);
+        }
     }
     return 0;
 }
@@ -182,11 +216,27 @@ int Http2Session::on_data_chunk_recv_cb(nghttp2_session* /*session*/, uint8_t /*
 int Http2Session::on_frame_recv_cb(nghttp2_session* /*session*/,
                                   const nghttp2_frame* frame, void* user_data) {
     auto* self = static_cast<Http2Session*>(user_data);
+    if (frame->hd.type == NGHTTP2_HEADERS) {
+        const auto it = self->streams_.find(frame->hd.stream_id);
+        if (it != self->streams_.end() &&
+            (frame->hd.flags & NGHTTP2_FLAG_END_HEADERS) &&
+            it->second.extended_websocket_connect) {
+            if (frame->hd.flags & NGHTTP2_FLAG_END_STREAM) {
+                it->second.response.status(400).body("WebSocket CONNECT stream must remain open");
+                self->handle_stream_request(it->second);
+            } else {
+                self->handle_websocket_connect(it->second);
+            }
+            return 0;
+        }
+    }
+
     if (frame->hd.type == NGHTTP2_DATA || frame->hd.type == NGHTTP2_HEADERS) {
         if (frame->hd.flags & NGHTTP2_FLAG_END_STREAM) {
             int32_t stream_id = frame->hd.stream_id;
             auto it = self->streams_.find(stream_id);
             if (it != self->streams_.end()) {
+                if (it->second.websocket_active) return 0;
                 it->second.request.mark_headers_complete();
                 it->second.request.mark_body_complete();
                 it->second.request_complete = true;
@@ -242,6 +292,109 @@ void Http2Session::handle_stream_request(Http2Stream& stream) {
     if (rv != 0) {
         spdlog::error("nghttp2_submit_response2 failed on stream {}: {}", stream.stream_id, nghttp2_strerror(rv));
     }
+}
+
+void Http2Session::handle_websocket_connect(Http2Stream& stream) {
+    if (stream.request.method() != "CONNECT") {
+        stream.response.status(400).body("WebSocket extended CONNECT requires CONNECT");
+        handle_stream_request(stream);
+        return;
+    }
+
+    const auto result = websocket_handler_
+        ? websocket_handler_(stream.request)
+        : WebSocketConnectResult{};
+    if (!result.matched) {
+        stream.response.status(404).body("WebSocket endpoint not found");
+        handle_stream_request(stream);
+        return;
+    }
+    if (!result.accepted || !result.handler) {
+        stream.response.status(result.rejection_status).body(result.rejection_body);
+        handle_stream_request(stream);
+        return;
+    }
+
+    stream.websocket_backpressure = std::make_shared<websocket::TransportBackpressure>(
+        result.handler->limits.max_pending_send_bytes);
+    stream.websocket.emplace(*result.handler, result.principal, websocket_wakeup_,
+                             stream.websocket_backpressure);
+    stream.websocket_active = true;
+
+    const std::string status = "200";
+    nghttp2_nv header{};
+    header.name = const_cast<std::uint8_t*>(
+        reinterpret_cast<const std::uint8_t*>(":status"));
+    header.value = const_cast<std::uint8_t*>(
+        reinterpret_cast<const std::uint8_t*>(status.data()));
+    header.namelen = 7;
+    header.valuelen = status.size();
+    header.flags = NGHTTP2_NV_FLAG_NONE;
+    const int rv = nghttp2_submit_headers(
+        session_, NGHTTP2_FLAG_NONE, stream.stream_id, nullptr, &header, 1, nullptr);
+    if (rv != 0) {
+        spdlog::error("nghttp2_submit_headers failed for WebSocket stream {}: {}",
+                      stream.stream_id, nghttp2_strerror(rv));
+        stream.websocket.reset();
+        stream.websocket_active = false;
+        return;
+    }
+    queue_websocket_outbound(stream, stream.websocket->take_outbound());
+}
+
+void Http2Session::queue_websocket_outbound(Http2Stream& stream,
+                                             std::vector<std::uint8_t> data) {
+    if (data.empty() || !stream.websocket_active) return;
+    stream.websocket_outbound.push_back(std::move(data));
+    submit_websocket_data(stream);
+}
+
+void Http2Session::submit_websocket_data(Http2Stream& stream) {
+    if (!session_ || stream.websocket_data_submission_active ||
+        stream.websocket_outbound.empty()) {
+        return;
+    }
+    nghttp2_data_provider2 provider{};
+    provider.source.ptr = &stream;
+    provider.read_callback = websocket_data_source_read_callback;
+    const int rv = nghttp2_submit_data2(session_, NGHTTP2_FLAG_NONE,
+                                        stream.stream_id, &provider);
+    if (rv != 0) {
+        spdlog::error("nghttp2_submit_data failed for WebSocket stream {}: {}",
+                      stream.stream_id, nghttp2_strerror(rv));
+        return;
+    }
+    stream.websocket_data_submission_active = true;
+}
+
+nghttp2_ssize Http2Session::websocket_data_source_read_callback(
+    nghttp2_session* /*session*/, int32_t /*stream_id*/, std::uint8_t* buf,
+    std::size_t length, std::uint32_t* data_flags,
+    nghttp2_data_source* source, void* /*user_data*/) {
+    auto* stream = static_cast<Http2Stream*>(source->ptr);
+    if (!stream || stream->websocket_outbound.empty()) {
+        *data_flags |= NGHTTP2_DATA_FLAG_EOF | NGHTTP2_DATA_FLAG_NO_END_STREAM;
+        if (stream) stream->websocket_data_submission_active = false;
+        return 0;
+    }
+
+    auto& current = stream->websocket_outbound.front();
+    const auto available = current.size() - stream->websocket_outbound_offset;
+    const auto to_write = std::min(length, available);
+    std::memcpy(buf, current.data() + stream->websocket_outbound_offset, to_write);
+    stream->websocket_outbound_offset += to_write;
+    if (stream->websocket_backpressure) {
+        stream->websocket_backpressure->release(to_write);
+    }
+    if (stream->websocket_outbound_offset == current.size()) {
+        stream->websocket_outbound.pop_front();
+        stream->websocket_outbound_offset = 0;
+    }
+    if (stream->websocket_outbound.empty()) {
+        *data_flags |= NGHTTP2_DATA_FLAG_EOF | NGHTTP2_DATA_FLAG_NO_END_STREAM;
+        stream->websocket_data_submission_active = false;
+    }
+    return static_cast<nghttp2_ssize>(to_write);
 }
 
 } // namespace novaboot::http2

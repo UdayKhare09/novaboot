@@ -1,6 +1,7 @@
 #include "novaboot/http1/http1_session.h"
 #include <sstream>
 #include <algorithm>
+#include <utility>
 #include <spdlog/spdlog.h>
 
 namespace novaboot::http1 {
@@ -23,6 +24,7 @@ std::string get_status_text(int code) {
         case 301: return "Moved Permanently";
         case 302: return "Found";
         case 304: return "Not Modified";
+        case 101: return "Switching Protocols";
         case 400: return "Bad Request";
         case 401: return "Unauthorized";
         case 403: return "Forbidden";
@@ -32,6 +34,25 @@ std::string get_status_text(int code) {
         case 503: return "Service Unavailable";
         default: return "Unknown";
     }
+}
+
+std::vector<uint8_t> serialize_upgrade_response(std::string_view accept_key) {
+    const std::string response = "HTTP/1.1 101 Switching Protocols\r\n"
+                                 "Upgrade: websocket\r\n"
+                                 "Connection: Upgrade\r\n"
+                                 "Sec-WebSocket-Accept: " + std::string(accept_key) + "\r\n\r\n";
+    return {response.begin(), response.end()};
+}
+
+std::vector<uint8_t> serialize_rejection_response(int status, std::string_view body) {
+    std::ostringstream response;
+    response << "HTTP/1.1 " << status << " " << get_status_text(status) << "\r\n"
+             << "Connection: close\r\n"
+             << "Content-Type: text/plain\r\n"
+             << "Content-Length: " << body.size() << "\r\n\r\n"
+             << body;
+    const auto serialized = response.str();
+    return {serialized.begin(), serialized.end()};
 }
 
 // Attempts to read a line up to \r\n.
@@ -53,6 +74,24 @@ void Http1Session::reset() {
     state_ = ParseState::RequestLine;
     current_request_ = http3::Request();
     content_length_ = 0;
+}
+
+std::optional<Http1Session::AcceptedUpgrade> Http1Session::take_upgrade_handler() {
+    return std::exchange(upgraded_handler_, std::nullopt);
+}
+
+std::vector<uint8_t> Http1Session::take_remaining_data() {
+    if (parse_offset_ >= buffer_.size()) {
+        buffer_.clear();
+        parse_offset_ = 0;
+        return {};
+    }
+    std::vector<uint8_t> remaining(
+        buffer_.begin() + static_cast<std::vector<uint8_t>::difference_type>(parse_offset_),
+        buffer_.end());
+    buffer_.clear();
+    parse_offset_ = 0;
+    return remaining;
 }
 
 std::expected<std::vector<uint8_t>, int> Http1Session::feed_data(
@@ -103,6 +142,43 @@ std::expected<std::vector<uint8_t>, int> Http1Session::feed_data(
                 if (line.empty()) {
                     // Empty line marks end of headers
                     current_request_.mark_headers_complete();
+                    if (websocket::is_upgrade_attempt(current_request_) && upgrade_handler_) {
+                        auto upgrade_result = upgrade_handler_(current_request_);
+                        if (upgrade_result.kind == UpgradeResult::Kind::Rejected) {
+                            const auto raw = serialize_rejection_response(
+                                upgrade_result.rejection_status,
+                                upgrade_result.rejection_body);
+                            const auto encrypted = encrypt_callback(raw);
+                            pending_responses.insert(pending_responses.end(),
+                                                     encrypted.begin(), encrypted.end());
+                            keep_alive_ = false;
+                            reset();
+                            break;
+                        }
+                        if (upgrade_result.kind == UpgradeResult::Kind::Accepted &&
+                            upgrade_result.handler) {
+                            auto accept_key = websocket::validate_upgrade_request(current_request_);
+                            if (!accept_key) {
+                                const auto raw = serialize_rejection_response(
+                                    400, accept_key.error().message);
+                                const auto encrypted = encrypt_callback(raw);
+                                pending_responses.insert(pending_responses.end(), encrypted.begin(), encrypted.end());
+                                keep_alive_ = false;
+                                reset();
+                                break;
+                            }
+                            const auto raw = serialize_upgrade_response(*accept_key);
+                            const auto encrypted = encrypt_callback(raw);
+                            pending_responses.insert(pending_responses.end(), encrypted.begin(), encrypted.end());
+                            upgraded_handler_ = AcceptedUpgrade{
+                                .handler = std::move(*upgrade_result.handler),
+                                .principal = std::move(upgrade_result.principal),
+                            };
+                            upgraded_ = true;
+                            keep_alive_ = true;
+                            break;
+                        }
+                    }
                     state_ = (content_length_ > 0) ? ParseState::Body : ParseState::Complete;
                     break;
                 }
@@ -142,7 +218,10 @@ std::expected<std::vector<uint8_t>, int> Http1Session::feed_data(
                 }
             }
             if (done) break; // Need more data
+            if (upgraded_) break;
         }
+
+        if (upgraded_) break;
 
         if (state_ == ParseState::Body) {
             std::size_t available = buffer_.size() - parse_offset_;
@@ -196,7 +275,7 @@ std::expected<std::vector<uint8_t>, int> Http1Session::feed_data(
     }
 
     // Clean up consumed buffer bytes
-    if (parse_offset_ > 0) {
+    if (parse_offset_ > 0 && !upgraded_) {
         buffer_.erase(buffer_.begin(), buffer_.begin() + static_cast<std::vector<uint8_t>::difference_type>(parse_offset_));
         parse_offset_ = 0;
     }

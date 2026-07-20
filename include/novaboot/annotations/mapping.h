@@ -37,6 +37,19 @@ NOVABOOT_DECLARE_MAPPING(HeadMapping);
 /// Mark a controller method as mapping an OPTIONS request.
 NOVABOOT_DECLARE_MAPPING(OptionsMapping);
 
+/// Mark a singleton DI endpoint as a raw WebSocket endpoint. The annotated
+/// type may provide `on_open`, `on_message`, `on_close`, and `authorize`
+/// methods; see annotations/scanner.h for the supported signatures.
+NOVABOOT_DECLARE_MAPPING(WebSocket);
+
+/// Map a STOMP SEND destination (normally under /app) to an application
+/// handler. Used with SendTo by the STOMP messaging dispatcher.
+NOVABOOT_DECLARE_MAPPING(MessageMapping);
+
+/// Publish the value returned by a MessageMapping handler to this broker
+/// destination.
+NOVABOOT_DECLARE_MAPPING(SendTo);
+
 #undef NOVABOOT_DECLARE_MAPPING
 
 } // namespace novaboot::annotations

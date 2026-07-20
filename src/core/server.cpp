@@ -182,6 +182,9 @@ std::unique_ptr<Server> Server::Builder::build() {
     for (const auto& route : server->router_.routes()) {
         spdlog::info("  {} {}", router::method_to_string(route.method), route.pattern);
     }
+    for (const auto& path : server->router_.websocket_routes()) {
+        spdlog::info("  WS {}", path);
+    }
 
     return server;
 }

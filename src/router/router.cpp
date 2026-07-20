@@ -105,6 +105,16 @@ void Router::add_route(Method method, std::string_view pattern,
                   pattern);
 }
 
+void Router::add_websocket(std::string_view pattern, websocket::Handler handler) {
+    if (pattern.empty() || pattern[0] != '/') {
+        throw std::invalid_argument("WebSocket route pattern must start with '/'");
+    }
+
+    insert_websocket(root_.get(), pattern.substr(1), std::move(handler));
+    websocket_route_infos_.emplace_back(pattern);
+    spdlog::debug("WebSocket route registered: {}", pattern);
+}
+
 void Router::insert(Node* node, std::string_view remaining,
                     Method method, Handler handler) {
     // Base case: no more path to consume
@@ -164,6 +174,48 @@ void Router::insert(Node* node, std::string_view remaining,
     insert(child_ptr, rest, method, std::move(handler));
 }
 
+void Router::insert_websocket(Node* node, std::string_view remaining,
+                              websocket::Handler handler) {
+    if (remaining.empty()) {
+        node->websocket_handler = std::move(handler);
+        return;
+    }
+
+    const auto slash_pos = remaining.find('/');
+    const std::string_view segment = slash_pos == std::string_view::npos
+        ? remaining : remaining.substr(0, slash_pos);
+    const std::string_view rest = slash_pos == std::string_view::npos
+        ? std::string_view{} : remaining.substr(slash_pos + 1);
+
+    if (!segment.empty() && segment[0] == '*') {
+        if (!node->wildcard_child) {
+            node->wildcard_child = std::make_unique<Node>();
+            node->wildcard_name = std::string(segment.substr(1));
+        }
+        node->wildcard_child->websocket_handler = std::move(handler);
+        return;
+    }
+    if (!segment.empty() && segment[0] == ':') {
+        if (!node->param_child) {
+            node->param_child = std::make_unique<Node>();
+            node->param_name = std::string(segment.substr(1));
+        }
+        insert_websocket(node->param_child.get(), rest, std::move(handler));
+        return;
+    }
+    for (auto& child : node->children) {
+        if (child->segment == segment) {
+            insert_websocket(child.get(), rest, std::move(handler));
+            return;
+        }
+    }
+    auto child = std::make_unique<Node>();
+    child->segment = std::string(segment);
+    auto* child_ptr = child.get();
+    node->children.push_back(std::move(child));
+    insert_websocket(child_ptr, rest, std::move(handler));
+}
+
 Router::MatchResult Router::match(Method method,
                                   std::string_view path) const {
     const auto query_pos = path.find('?');
@@ -190,6 +242,18 @@ Router::MatchResult Router::match(Method method,
 Router::MatchResult Router::match(std::string_view method,
                                   std::string_view path) const {
     return match(method_from_string(method), path);
+}
+
+Router::WebSocketMatchResult Router::match_websocket(std::string_view path) const {
+    const auto query_pos = path.find('?');
+    if (query_pos != std::string_view::npos) path = path.substr(0, query_pos);
+    if (path.empty() || path[0] != '/') return {};
+
+    PathParams params;
+    if (auto* handler = search_websocket(root_.get(), path.substr(1), params)) {
+        return WebSocketMatchResult{handler, std::move(params)};
+    }
+    return {};
 }
 
 Handler* Router::search(const Node* node, std::string_view remaining,
@@ -237,6 +301,38 @@ Handler* Router::search(const Node* node, std::string_view remaining,
             ->get_handler(lookup_method_);
     }
 
+    return nullptr;
+}
+
+websocket::Handler* Router::search_websocket(const Node* node,
+                                             std::string_view remaining,
+                                             PathParams& params) const {
+    if (remaining.empty()) {
+        return node->websocket_handler
+            ? const_cast<websocket::Handler*>(&*node->websocket_handler)
+            : nullptr;
+    }
+
+    const auto slash_pos = remaining.find('/');
+    const std::string_view segment = slash_pos == std::string_view::npos
+        ? remaining : remaining.substr(0, slash_pos);
+    const std::string_view rest = slash_pos == std::string_view::npos
+        ? std::string_view{} : remaining.substr(slash_pos + 1);
+
+    for (const auto& child : node->children) {
+        if (child->segment == segment) {
+            if (auto* handler = search_websocket(child.get(), rest, params)) return handler;
+        }
+    }
+    if (node->param_child) {
+        params.set(node->param_name, std::string(segment));
+        if (auto* handler = search_websocket(node->param_child.get(), rest, params)) return handler;
+        params.remove(node->param_name);
+    }
+    if (node->wildcard_child && node->wildcard_child->websocket_handler) {
+        params.set(node->wildcard_name, std::string(remaining));
+        return const_cast<websocket::Handler*>(&*node->wildcard_child->websocket_handler);
+    }
     return nullptr;
 }
 

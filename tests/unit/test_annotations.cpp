@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <array>
 #include "novaboot/novaboot.h"
 #include "novaboot/db/transaction.h"
 
@@ -14,6 +15,10 @@ static int g_pre_destroy_calls = 0;
 static int g_controller_calls = 0;
 static int g_tx_controller_calls = 0;
 static int g_tx_proxy_calls = 0;
+static int g_websocket_open_calls = 0;
+static int g_websocket_message_calls = 0;
+static int g_websocket_close_calls = 0;
+static std::string g_websocket_principal;
 
 struct TxRouteState {
     int begins = 0;
@@ -137,11 +142,77 @@ struct [[= Service() ]] TxProxyService {
     }
 };
 
+struct [[= WebSocket("/ws/annotated") ]] AnnotatedWebSocket {
+    void on_open(websocket::Session& session) {
+        g_websocket_open_calls++;
+        g_websocket_principal = session.principal();
+    }
+
+    void on_message(websocket::Session&, const websocket::Message&) {
+        g_websocket_message_calls++;
+    }
+
+    void on_close(websocket::Session&, const websocket::CloseInfo&) {
+        g_websocket_close_calls++;
+    }
+
+    websocket::HandshakeDecision authorize(const http3::Request& request) {
+        if (const auto user = request.header("x-demo-user");
+            user && *user == "socket-user") {
+            return websocket::HandshakeDecision::allow("socket-user");
+        }
+        return websocket::HandshakeDecision::reject(401, "WebSocket authentication required");
+    }
+};
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 static_assert(has_annotation<Repository>(^^TestRepository), "TestRepository should have Repository annotation");
 static_assert(has_annotation<Service>(^^TestService), "TestService should have Service annotation");
 static_assert(has_annotation<RestController>(^^TestController), "TestController should have RestController annotation");
+static_assert(has_annotation<WebSocket>(^^AnnotatedWebSocket), "WebSocket endpoint should have WebSocket annotation");
+
+TEST(AnnotationsTest, WebSocketEndpointAutoRegistration) {
+    g_websocket_open_calls = 0;
+    g_websocket_message_calls = 0;
+    g_websocket_close_calls = 0;
+    g_websocket_principal.clear();
+
+    RootContainer di_root;
+    register_beans<AnnotatedWebSocket>(di_root);
+    di_root.build();
+
+    router::Router router;
+    di_root.register_routes_and_advice(router);
+    ASSERT_EQ(router.websocket_routes().size(), 1U);
+    EXPECT_EQ(router.websocket_routes()[0], "/ws/annotated");
+
+    auto match = router.match_websocket("/ws/annotated");
+    ASSERT_NE(match.handler, nullptr);
+    http3::Request request;
+    request.headers().add("x-demo-user", "socket-user");
+    const auto decision = match.handler->authorize(request);
+    ASSERT_TRUE(decision.accepted);
+    EXPECT_EQ(decision.principal, "socket-user");
+
+    websocket::Connection connection(*match.handler, decision.principal);
+    EXPECT_EQ(g_websocket_open_calls, 1);
+    EXPECT_EQ(g_websocket_principal, "socket-user");
+
+    const std::array<std::uint8_t, 8> frame{
+        0x81U, 0x82U, 0x11U, 0x22U, 0x33U, 0x44U,
+        static_cast<std::uint8_t>('o' ^ 0x11),
+        static_cast<std::uint8_t>('k' ^ 0x22),
+    };
+    ASSERT_TRUE(connection.feed(frame).has_value());
+    EXPECT_EQ(g_websocket_message_calls, 1);
+
+    auto rejected_request = http3::Request{};
+    const auto rejected = match.handler->authorize(rejected_request);
+    EXPECT_FALSE(rejected.accepted);
+    EXPECT_EQ(rejected.rejection_status, 401);
+    di_root.shutdown();
+}
 
 TEST(AnnotationsTest, FullLifecycleAndRouteScanning) {
     g_repository_calls = 0;

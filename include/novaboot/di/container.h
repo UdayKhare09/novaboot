@@ -263,13 +263,26 @@ class BindBuilder;
 
 class RootContainer : public ContainerBase {
 public:
+    /// Backward-compatible route registrar shape for application code that
+    /// does not need root singleton access at registration time.
     using RouteRegistrar = std::function<void(router::Router&)>;
+    /// DI-aware registrar used by annotated WebSocket endpoints.
+    using ContextualRouteRegistrar =
+        std::function<void(router::Router&, RootContainer&)>;
 
     RootContainer() = default;
     ~RootContainer() override;
 
-    void add_route_registrar(RouteRegistrar registrar) {
+    void add_route_registrar(ContextualRouteRegistrar registrar) {
         route_registrars_.push_back(std::move(registrar));
+    }
+
+    void add_route_registrar(RouteRegistrar registrar) {
+        add_route_registrar(
+            [registrar = std::move(registrar)](router::Router& router,
+                                               RootContainer&) mutable {
+                registrar(router);
+            });
     }
 
     void register_routes_and_advice(router::Router& router);
@@ -502,7 +515,7 @@ private:
     /// Storage for owned bean instances (for destruction)
     std::vector<std::pair<void*, std::function<void(void*)>>> owned_instances_;
 
-    std::vector<RouteRegistrar> route_registrars_;
+    std::vector<ContextualRouteRegistrar> route_registrars_;
 };
 
 template<typename... Args>

@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NovaBoot WebSocket Chat</title>
+  <style>
+    body { max-width: 46rem; margin: 3rem auto; padding: 0 1rem; font: 16px system-ui, sans-serif; color: #18212f; }
+    #messages { height: 20rem; overflow: auto; padding: 1rem; border: 1px solid #cbd5e1; border-radius: .5rem; background: #f8fafc; }
+    form { display: flex; gap: .5rem; margin-top: 1rem; }
+    input { flex: 1; padding: .65rem; }
+    button { padding: .65rem 1rem; }
+    .status { color: #475569; }
+  </style>
+</head>
+<body>
+  <h1>NovaBoot WebSocket Chat</h1>
+  <p><a href="/stomp.html">Open the STOMP 1.2 chat demo</a></p>
+  <p id="status" class="status">Connecting…</p>
+  <div id="messages" aria-live="polite"></div>
+  <form id="chat-form">
+    <input id="message" autocomplete="off" placeholder="Write a message" required>
+    <button>Send</button>
+  </form>
+  <script>
+    const status = document.querySelector('#status');
+    const messages = document.querySelector('#messages');
+    const form = document.querySelector('#chat-form');
+    const input = document.querySelector('#message');
+    const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const socket = new WebSocket(`${protocol}//${location.host}/ws/chat`);
+
+    function add(text) {
+      const line = document.createElement('p');
+      line.textContent = text;
+      messages.append(line);
+      messages.scrollTop = messages.scrollHeight;
+    }
+
+    socket.onopen = () => { status.textContent = 'Connected'; input.focus(); };
+    socket.onmessage = event => add(event.data);
+    socket.onclose = () => { status.textContent = 'Disconnected — refresh to reconnect'; };
+    socket.onerror = () => { status.textContent = 'Connection failed'; };
+    form.addEventListener('submit', event => {
+      event.preventDefault();
+      if (socket.readyState !== WebSocket.OPEN) return;
+      socket.send(input.value);
+      input.value = '';
+    });
+  </script>
+</body>
+</html>

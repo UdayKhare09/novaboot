@@ -1,7 +1,10 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cstdint>
+#include <deque>
+#include <mutex>
 #include <unordered_map>
 #include <vector>
 #include <netinet/in.h>
@@ -53,6 +56,7 @@ public:
 
     [[nodiscard]] bool is_running() const noexcept override;
     [[nodiscard]] TimePoint now() const noexcept override;
+    void post(std::move_only_function<void()> task) override;
 
     void start_packet_recv(int fd, std::move_only_function<void(net::IncomingPacket&&)> cb) override;
     void async_send(int fd, const net::OutgoingPacket& pkt) override;
@@ -83,13 +87,18 @@ private:
 
     /// Process a single completion queue entry
     void process_cqe(struct io_uring_cqe* cqe);
+    void run_posted_tasks();
 
     // ─── Ring state ──────────────────────────────────────────────────
     struct io_uring ring_{};
     int wakeup_fd_ = -1;
     bool ring_initialized_ = false;
     bool running_          = false;
+    std::atomic_bool accepting_tasks_ = true;
     TimePoint cached_now_;
+
+    std::mutex posted_tasks_mutex_;
+    std::deque<std::move_only_function<void()>> posted_tasks_;
 
     // ─── FD tracking ─────────────────────────────────────────────────
     struct FdEntry {

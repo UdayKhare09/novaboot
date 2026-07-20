@@ -10,8 +10,17 @@ namespace novaboot::net {
 
 // ─── TcpConnection ───────────────────────────────────────────────────────────
 
-TcpConnection::TcpConnection(int fd, SSL_CTX* ssl_ctx, std::function<void(http3::Request&, http3::Response&)> handler)
-    : tls_stream_(fd, ssl_ctx), handler_(std::move(handler)) {}
+TcpConnection::TcpConnection(
+    int fd, SSL_CTX* ssl_ctx,
+    std::function<void(http3::Request&, http3::Response&)> handler,
+    http1::Http1Session::UpgradeHandler upgrade_handler,
+    http2::Http2Session::WebSocketConnectHandler http2_websocket_handler,
+    websocket::Wakeup websocket_wakeup)
+    : tls_stream_(fd, ssl_ctx),
+      handler_(std::move(handler)),
+      upgrade_handler_(std::move(upgrade_handler)),
+      http2_websocket_handler_(std::move(http2_websocket_handler)),
+      websocket_wakeup_(std::move(websocket_wakeup)) {}
 
 bool TcpConnection::keep_alive() const noexcept {
     return std::visit([](const auto& active_session) -> bool {
@@ -20,6 +29,8 @@ bool TcpConnection::keep_alive() const noexcept {
             return active_session.keep_alive();
         } else if constexpr (std::is_same_v<T, http2::Http2Session>) {
             return active_session.keep_alive();
+        } else if constexpr (std::is_same_v<T, websocket::Connection>) {
+            return !active_session.closed();
         }
         return true;
     }, session_);
@@ -53,10 +64,11 @@ std::expected<std::vector<uint8_t>, int> TcpConnection::on_recv(std::span<const 
         
         std::string_view alpn = tls_stream_.negotiated_alpn();
         if (alpn == "h2") {
-            session_.emplace<http2::Http2Session>(handler_);
+            session_.emplace<http2::Http2Session>(
+                handler_, http2_websocket_handler_, websocket_wakeup_);
         } else {
             // Default/fallback to HTTP/1.1
-            session_.emplace<http1::Http1Session>(handler_);
+            session_.emplace<http1::Http1Session>(handler_, upgrade_handler_);
         }
     }
 
@@ -66,18 +78,51 @@ std::expected<std::vector<uint8_t>, int> TcpConnection::on_recv(std::span<const 
             return enc_opt ? *enc_opt : std::vector<uint8_t>{};
         };
 
-        std::expected<std::vector<uint8_t>, int> session_res;
-        std::visit([&](auto& active_session) {
-            using T = std::decay_t<decltype(active_session)>;
-            if constexpr (!std::is_same_v<T, std::monostate>) {
-                session_res = active_session.feed_data(tls_opt->decrypted_app_data, encrypt_cb);
-            }
-        }, session_);
-
-        if (session_res) {
+        if (auto* http1 = std::get_if<http1::Http1Session>(&session_)) {
+            auto session_res = http1->feed_data(tls_opt->decrypted_app_data, encrypt_cb);
+            if (!session_res) return std::unexpected(session_res.error());
             response_data.insert(response_data.end(), session_res->begin(), session_res->end());
-        } else if (session_res.error() != 0) {
-            return std::unexpected(session_res.error());
+
+            if (http1->upgraded()) {
+                auto handler = http1->take_upgrade_handler();
+                auto trailing_data = http1->take_remaining_data();
+                if (!handler) return std::unexpected(-2);
+                session_.emplace<websocket::Connection>(
+                    std::move(handler->handler), std::move(handler->principal), websocket_wakeup_);
+
+                auto* websocket = std::get_if<websocket::Connection>(&session_);
+                auto websocket_out = websocket->take_outbound();
+                if (!websocket_out.empty()) {
+                    auto encrypted = encrypt_cb(websocket_out);
+                    response_data.insert(response_data.end(), encrypted.begin(), encrypted.end());
+                }
+                if (!trailing_data.empty()) {
+                    const auto result = websocket->feed(trailing_data);
+                    auto trailing_out = websocket->take_outbound();
+                    if (!trailing_out.empty()) {
+                        auto encrypted = encrypt_cb(trailing_out);
+                        response_data.insert(response_data.end(), encrypted.begin(), encrypted.end());
+                    }
+                    // A WebSocket protocol error queues an RFC 6455 close
+                    // frame. Return the encrypted close frame and let the
+                    // manager drain it before closing the TCP connection.
+                    (void)result;
+                }
+            }
+        } else if (auto* http2 = std::get_if<http2::Http2Session>(&session_)) {
+            auto session_res = http2->feed_data(tls_opt->decrypted_app_data, encrypt_cb);
+            if (!session_res) return std::unexpected(session_res.error());
+            response_data.insert(response_data.end(), session_res->begin(), session_res->end());
+        } else if (auto* websocket = std::get_if<websocket::Connection>(&session_)) {
+            const auto result = websocket->feed(tls_opt->decrypted_app_data);
+            auto websocket_out = websocket->take_outbound();
+            if (!websocket_out.empty()) {
+                auto encrypted = encrypt_cb(websocket_out);
+                response_data.insert(response_data.end(), encrypted.begin(), encrypted.end());
+            }
+            // See the trailing-data case above: a protocol error is a clean
+            // WebSocket close, not a reason to drop its close frame.
+            (void)result;
         }
     }
 
@@ -86,6 +131,21 @@ std::expected<std::vector<uint8_t>, int> TcpConnection::on_recv(std::span<const 
     response_data.insert(response_data.end(), extra.begin(), extra.end());
 
     return response_data;
+}
+
+std::expected<std::vector<uint8_t>, int> TcpConnection::drain_websocket_outbound() {
+    auto encrypt = [this](const std::vector<uint8_t>& raw) -> std::vector<uint8_t> {
+        const auto encrypted = tls_stream_.encrypt_app_data(raw);
+        return encrypted ? *encrypted : std::vector<uint8_t>{};
+    };
+    if (auto* websocket = std::get_if<websocket::Connection>(&session_)) {
+        auto raw = websocket->drain_external_outbound();
+        return raw.empty() ? raw : tls_stream_.encrypt_app_data(raw);
+    }
+    if (auto* http2 = std::get_if<http2::Http2Session>(&session_)) {
+        return http2->drain_websocket_outbound(std::move(encrypt));
+    }
+    return std::vector<uint8_t>{};
 }
 
 // ─── TcpConnectionManager::ConnectionBuffer ──────────────────────────────────
@@ -136,7 +196,14 @@ void TcpConnectionManager::on_accept(int client_fd, core::EventLoop& loop, SSL_C
     auto [it, inserted] = connections_.emplace(
         std::piecewise_construct,
         std::forward_as_tuple(client_fd),
-        std::forward_as_tuple(client_fd, ssl_ctx, handler_)
+        std::forward_as_tuple(
+            client_fd, ssl_ctx, handler_, upgrade_handler_,
+            http2_websocket_handler_,
+            [this, client_fd, &loop] {
+                loop.post([this, client_fd, &loop] {
+                    drain_websocket_outbound(client_fd, loop);
+                });
+            })
     );
 
     if (!inserted) {
@@ -222,6 +289,21 @@ void TcpConnectionManager::on_recv(int client_fd, std::span<const uint8_t> data,
     if (!it->second.keep_alive() && !buf.has_pending_writes()) {
         close_connection(client_fd, loop);
     }
+}
+
+void TcpConnectionManager::drain_websocket_outbound(int client_fd, core::EventLoop& loop) {
+    auto it = connections_.find(client_fd);
+    if (it == connections_.end()) return;
+
+    auto encrypted = it->second.drain_websocket_outbound();
+    if (!encrypted || encrypted->empty()) return;
+
+    auto& buffer = connection_buffers_[client_fd];
+    if (buffer.send_data(client_fd, *encrypted) < 0) {
+        close_connection(client_fd, loop);
+        return;
+    }
+    loop.modify_fd(client_fd, core::EventFlags::Readable | core::EventFlags::Writable);
 }
 
 void TcpConnectionManager::close_connection(int client_fd, core::EventLoop& loop) {

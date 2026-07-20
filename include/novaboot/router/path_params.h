@@ -64,6 +64,9 @@ public:
     /// Clear all parameters
     void clear() noexcept { params_.clear(); }
 
+    /// Remove a parameter while a router backtracks to another branch.
+    void remove(std::string_view name) { params_.erase(std::string(name)); }
+
 private:
     std::unordered_map<std::string, std::string> params_;
 };

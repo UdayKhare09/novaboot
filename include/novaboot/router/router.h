@@ -2,6 +2,7 @@
 
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -12,6 +13,7 @@
 #include "novaboot/router/path_params.h"
 #include "novaboot/router/route.h"
 #include "novaboot/router/json.h"
+#include "novaboot/websocket/websocket.h"
 
 namespace novaboot::router {
 
@@ -114,6 +116,11 @@ public:
     void add_route(Method method, std::string_view pattern,
                    Handler handler);
 
+    /// Register a raw WebSocket endpoint. The opening handshake is currently
+    /// supported on HTTP/1.1; the route contract is shared with the planned
+    /// HTTP/2 extended-CONNECT adapter.
+    void add_websocket(std::string_view pattern, websocket::Handler handler);
+
     /// Look up a route for a given method and path.
     /// Returns the handler and populates path_params if found.
     /// Returns nullptr if no matching route.
@@ -148,10 +155,18 @@ public:
         std::string pattern;
     };
 
+    struct WebSocketMatchResult {
+        websocket::Handler* handler = nullptr;
+        PathParams params;
+    };
+
     MatchResult match(Method method, std::string_view path) const;
 
     /// Convenience: match from a string method name
     MatchResult match(std::string_view method, std::string_view path) const;
+
+    /// Look up a raw WebSocket endpoint and populate path parameters.
+    WebSocketMatchResult match_websocket(std::string_view path) const;
 
     /// Number of registered routes
     [[nodiscard]] std::size_t size() const noexcept { return route_count_; }
@@ -159,6 +174,10 @@ public:
     /// Registered route metadata for diagnostics.
     [[nodiscard]] const std::vector<RouteInfo>& routes() const noexcept {
         return route_infos_;
+    }
+
+    [[nodiscard]] const std::vector<std::string>& websocket_routes() const noexcept {
+        return websocket_route_infos_;
     }
 
     /// Number of registered exception handlers.
@@ -173,6 +192,7 @@ private:
 
         /// Handlers indexed by Method enum
         Handler handlers[static_cast<int>(Method::ANY) + 1] = {};
+        std::optional<websocket::Handler> websocket_handler;
 
         /// Child nodes
         std::vector<std::unique_ptr<Node>> children;
@@ -207,9 +227,16 @@ private:
     void insert(Node* node, std::string_view remaining,
                 Method method, Handler handler);
 
+    void insert_websocket(Node* node, std::string_view remaining,
+                          websocket::Handler handler);
+
     /// Search the radix tree for a matching path
     Handler* search(const Node* node, std::string_view remaining,
                     PathParams& params) const;
+
+    websocket::Handler* search_websocket(const Node* node,
+                                         std::string_view remaining,
+                                         PathParams& params) const;
 
     /// Get or create the root node for lookup
     [[nodiscard]] const Node* root() const noexcept {
@@ -219,6 +246,7 @@ private:
     std::unique_ptr<Node> root_ = std::make_unique<Node>();
     std::size_t           route_count_ = 0;
     std::vector<RouteInfo> route_infos_;
+    std::vector<std::string> websocket_route_infos_;
 
     /// Flat storage for method resolution during lookup
     Method current_method_ = Method::GET;

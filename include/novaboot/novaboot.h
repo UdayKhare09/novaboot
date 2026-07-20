@@ -21,6 +21,10 @@
 #include "novaboot/router/response_entity.h"
 #include "novaboot/router/json.h"
 
+// Real-time (raw WebSocket over HTTP/1.1 initially)
+#include "novaboot/websocket/websocket.h"
+#include "novaboot/messaging/stomp.h"
+
 // Validation
 #include "novaboot/validation/validation.h"
 

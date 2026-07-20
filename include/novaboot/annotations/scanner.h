@@ -4,8 +4,10 @@
 #include "novaboot/router/router.h"
 #include "novaboot/annotations/annotations.h"
 #include "novaboot/db/transaction.h"
+#include "novaboot/messaging/stomp.h"
 
 #include <meta>
+#include <concepts>
 #include <string>
 #include <string_view>
 #include <iostream>
@@ -19,14 +21,22 @@ template<typename... T>
 void register_advice(router::Router& router);
 
 template<typename T>
-void register_routes_for(router::Router& router) {
+void register_routes_for(router::Router& router, di::RootContainer&) {
     register_routes<T>(router);
 }
 
 template<typename T>
-void register_advice_for(router::Router& router) {
+void register_advice_for(router::Router& router, di::RootContainer&) {
     register_advice<T>(router);
 }
+
+template<typename T>
+void register_websocket_for(router::Router& router, di::RootContainer& container);
+
+template<typename T>
+void register_message_mappings(messaging::stomp::MessageDispatcher& dispatcher,
+                               messaging::stomp::MessagingTemplate& messaging,
+                               T& controller);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Consteval Reflection Helper Structures
@@ -278,6 +288,10 @@ void register_beans(di::RootContainer& container) {
             auto builder = container.template autowire<Type>(di::Scope::Singleton);
             wire_lifecycle<Type>(builder);
             container.add_route_registrar(&novaboot::annotations::register_routes_for<Type>);
+        } else if constexpr (has_annotation<WebSocket>(^^Type)) {
+            auto builder = container.template autowire<Type>(di::Scope::Singleton);
+            wire_lifecycle<Type>(builder);
+            container.add_route_registrar(&novaboot::annotations::register_websocket_for<Type>);
         } else if constexpr (has_annotation<ControllerAdvice>(^^Type)) {
             auto builder = container.template autowire<Type>(di::Scope::Singleton);
             wire_lifecycle<Type>(builder);
@@ -439,6 +453,112 @@ void register_routes(router::Router& router) {
             }
         }
     }(), ...);
+}
+
+/// Register a class-level [[= WebSocket("/path") ]] endpoint. Endpoint
+/// instances are singleton beans and callbacks are invoked on the owning
+/// network shard. Supported optional methods are:
+///   void on_open(websocket::Session&)
+///   void on_message(websocket::Session&, const websocket::Message&)
+///   void on_close(websocket::Session&, const websocket::CloseInfo&)
+///   websocket::HandshakeDecision authorize(const http3::Request&)
+template<typename T>
+void register_websocket_for(router::Router& router, di::RootContainer& container) {
+    static_assert(has_annotation<WebSocket>(^^T),
+                  "register_websocket_for requires [[= WebSocket(\"/path\") ]]");
+    constexpr auto endpoint_annotation = get_annotation<WebSocket>(^^T);
+    static_assert(endpoint_annotation.path[0] == '/',
+                  "WebSocket endpoint paths must start with '/'");
+
+    auto* endpoint = &container.template resolve<T>();
+    router.add_websocket(endpoint_annotation.path, websocket::Handler{
+        .on_open = [endpoint](websocket::Session& session) {
+            if constexpr (requires(T& instance, websocket::Session& socket) {
+                              instance.on_open(socket);
+                          }) {
+                endpoint->on_open(session);
+            }
+        },
+        .on_message = [endpoint](websocket::Session& session,
+                                 const websocket::Message& message) {
+            if constexpr (requires(T& instance, websocket::Session& socket,
+                                   const websocket::Message& incoming) {
+                              instance.on_message(socket, incoming);
+                          }) {
+                endpoint->on_message(session, message);
+            }
+        },
+        .on_close = [endpoint](websocket::Session& session,
+                               const websocket::CloseInfo& close) {
+            if constexpr (requires(T& instance, websocket::Session& socket,
+                                   const websocket::CloseInfo& info) {
+                              instance.on_close(socket, info);
+                          }) {
+                endpoint->on_close(session, close);
+            }
+        },
+        .authorize = [endpoint](const http3::Request& request) {
+            if constexpr (requires(T& instance, const http3::Request& handshake) {
+                              { instance.authorize(handshake) } ->
+                                  std::convertible_to<websocket::HandshakeDecision>;
+                          }) {
+                return static_cast<websocket::HandshakeDecision>(endpoint->authorize(request));
+            }
+            return websocket::HandshakeDecision::allow();
+        },
+    });
+}
+
+/// Register [[= MessageMapping("/path") ]] methods on an application
+/// controller. Endpoint strips its configurable application prefix (normally
+/// /app) from a client SEND destination before this lookup. Supported method
+/// forms are:
+///   void method(std::string_view payload)
+///   std::string method(std::string_view payload) [[= SendTo("/topic/path") ]]
+/// The latter publishes the returned payload through MessagingTemplate.
+template<typename T>
+void register_message_mappings(messaging::stomp::MessageDispatcher& dispatcher,
+                               messaging::stomp::MessagingTemplate& messaging,
+                               T& controller) {
+    static constexpr auto members = get_members<T>();
+    template for (constexpr auto m : members) {
+        constexpr bool has_id = std::meta::has_identifier(m);
+        if constexpr (has_id && std::meta::is_function(m) &&
+                      !std::meta::is_constructor(m) && !std::meta::is_destructor(m)) {
+            if constexpr (has_annotation<MessageMapping>(m)) {
+                constexpr auto mapping = get_annotation<MessageMapping>(m);
+                constexpr auto send_to = get_annotation<SendTo>(m);
+                constexpr auto pmf = get_member_ptr<m>();
+                static_assert(mapping.path[0] == '/',
+                              "MessageMapping destinations must start with '/'");
+                dispatcher.add_mapping(mapping.path,
+                    [&controller, &messaging, destination = std::string(send_to.path)](
+                        std::string_view payload) -> bool {
+                        if constexpr (requires(T& instance, std::string_view value) {
+                                          (instance.*pmf)(value);
+                                      }) {
+                            using Result = decltype((controller.*pmf)(payload));
+                            if constexpr (std::is_void_v<Result>) {
+                                (controller.*pmf)(payload);
+                                return true;
+                            } else if constexpr (std::is_same_v<std::remove_cvref_t<Result>, std::string>) {
+                                static_assert(send_to.path[0] != '\0',
+                                              "MessageMapping methods returning std::string require [[= SendTo(...) ]]");
+                                return messaging.convert_and_send(destination, (controller.*pmf)(payload)) > 0U;
+                            } else {
+                                static_assert(std::is_void_v<Result>,
+                                              "MessageMapping must return void or std::string");
+                            }
+                        } else {
+                            static_assert(requires(T& instance, std::string_view value) {
+                                              (instance.*pmf)(value);
+                                          },
+                                          "MessageMapping methods must accept std::string_view");
+                        }
+                    });
+            }
+        }
+    }
 }
 
 /// Scans each type in the pack for ControllerAdvice annotations and registers exception handlers.

@@ -139,3 +139,22 @@ TEST(RouterTest, ExposesRouteMetadataForDiagnostics) {
     EXPECT_EQ(router.routes()[1].method, Method::POST);
     EXPECT_EQ(router.routes()[1].pattern, "/api/diagnostics");
 }
+
+TEST(RouterTest, MatchesWebSocketRoutesIndependentlyFromHttpRoutes) {
+    Router router;
+    bool opened = false;
+    router.add_route(Method::GET, "/ws/:room", [](auto&, auto&, auto&) {});
+    router.add_websocket("/ws/:room", {
+        .on_open = [&](novaboot::websocket::Session&) { opened = true; },
+        .on_message = {},
+        .on_close = {},
+    });
+
+    auto match = router.match_websocket("/ws/general?token=demo");
+    ASSERT_NE(match.handler, nullptr);
+    EXPECT_EQ(match.params.get("room"), "general");
+    EXPECT_EQ(router.websocket_routes().size(), 1U);
+
+    novaboot::websocket::Connection connection(*match.handler);
+    EXPECT_TRUE(opened);
+}

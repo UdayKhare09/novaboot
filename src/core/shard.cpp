@@ -163,7 +163,44 @@ void Shard::run() {
         pipeline_.execute(req, res, ctx, final_handler);
     };
 
-    tcp_conn_mgr_ = std::make_unique<net::TcpConnectionManager>(std::move(tcp_req_handler));
+    auto websocket_upgrade_handler = [this](http3::Request& request)
+        -> http1::Http1Session::UpgradeResult {
+        auto match = router_.match_websocket(request.path());
+        if (!match.handler) return {};
+        request.path_params() = std::move(match.params);
+        auto handler = *match.handler;
+        if (handler.authorize) {
+            auto decision = handler.authorize(request);
+            if (!decision.accepted) {
+                return http1::Http1Session::UpgradeResult::reject(
+                    decision.rejection_status, std::move(decision.rejection_body));
+            }
+            return http1::Http1Session::UpgradeResult::accept(
+                std::move(handler), std::move(decision.principal));
+        }
+        return http1::Http1Session::UpgradeResult::accept(std::move(handler));
+    };
+
+    auto http2_websocket_handler = [this](http3::Request& request)
+        -> http2::Http2Session::WebSocketConnectResult {
+        auto match = router_.match_websocket(request.path());
+        if (!match.handler) return {};
+        request.path_params() = std::move(match.params);
+        auto handler = *match.handler;
+        if (handler.authorize) {
+            auto decision = handler.authorize(request);
+            if (!decision.accepted) {
+                return http2::Http2Session::WebSocketConnectResult::reject(
+                    decision.rejection_status, std::move(decision.rejection_body));
+            }
+            return http2::Http2Session::WebSocketConnectResult::accept(
+                std::move(handler), std::move(decision.principal));
+        }
+        return http2::Http2Session::WebSocketConnectResult::accept(std::move(handler));
+    };
+    tcp_conn_mgr_ = std::make_unique<net::TcpConnectionManager>(
+        std::move(tcp_req_handler), std::move(websocket_upgrade_handler),
+        std::move(http2_websocket_handler));
 
     event_loop_->add_fd(tcp_listener_->fd(), core::EventFlags::Readable, [this](uint32_t events) {
         if (events & core::EventFlags::Readable) {

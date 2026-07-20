@@ -13,6 +13,8 @@ endmacro()
 # ─── Phase 1 unit tests ──────────────────────────────────────────────────────
 novaboot_test(test_arena_allocator   unit/test_arena_allocator.cpp)
 novaboot_test(test_router            unit/test_router.cpp)
+novaboot_test(test_websocket         unit/test_websocket.cpp)
+novaboot_test(test_stomp             unit/test_stomp.cpp)
 novaboot_test(test_header_map        unit/test_header_map.cpp)
 novaboot_test(test_middleware_pipeline unit/test_middleware_pipeline.cpp)
 novaboot_test(test_middleware          unit/test_middleware.cpp)
