@@ -240,6 +240,40 @@ TEST(JwtMiddlewareTest, ValidHs256TokenStoresPrincipal) {
     EXPECT_EQ(principal.claims.string("role").value_or(""), "admin");
 }
 
+TEST(JwtMiddlewareTest, CreatesSelfContainedWebSocketJwtAuthorizer) {
+    auto cfg = hs_config();
+    JwtMiddleware middleware(cfg);
+    const auto authorize = middleware.websocket_authorizer();
+
+    http3::Request valid_request;
+    valid_request.headers().set("authorization",
+                                "Bearer " + token("HS256", valid_payload()));
+    const auto allowed = authorize(valid_request);
+    EXPECT_TRUE(allowed.accepted);
+    EXPECT_EQ(allowed.principal, "user-123");
+
+    http3::Request missing_token;
+    const auto rejected = authorize(missing_token);
+    EXPECT_FALSE(rejected.accepted);
+    EXPECT_EQ(rejected.rejection_status, 401);
+    EXPECT_EQ(rejected.rejection_body, cfg.unauthorized_body);
+}
+
+TEST(JwtMiddlewareTest, WebSocketAuthorizerCanUseAnOptInCookieToken) {
+    auto cfg = hs_config();
+    cfg.websocket_cookie_name = "nova_access";
+    JwtMiddleware middleware(cfg);
+    const auto authorize = middleware.websocket_authorizer();
+
+    http3::Request request;
+    request.headers().set("cookie", "theme=dark; nova_access=" +
+                                      token("HS256", valid_payload()));
+    const auto allowed = authorize(request);
+
+    EXPECT_TRUE(allowed.accepted);
+    EXPECT_EQ(allowed.principal, "user-123");
+}
+
 TEST(JwtMiddlewareTest, InvalidSignatureIsRejected) {
     JwtMiddleware mw(hs_config());
     http3::Request req;

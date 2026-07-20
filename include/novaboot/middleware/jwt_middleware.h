@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "novaboot/middleware/middleware.h"
+#include "novaboot/websocket/websocket.h"
 
 namespace novaboot::middleware {
 
@@ -153,6 +154,12 @@ public:
         std::string authorization_header = "authorization";
         std::string bearer_prefix = "Bearer ";
 
+        /// Optional Cookie name accepted only by websocket_authorizer().
+        /// Browser WebSocket APIs cannot set Authorization headers, so use a
+        /// Secure, HttpOnly cookie or a separate short-lived ticket endpoint.
+        /// Query-string JWTs are intentionally not supported.
+        std::optional<std::string> websocket_cookie_name;
+
         std::optional<std::string> required_issuer;
         std::vector<std::string> required_audiences = {};
         std::vector<std::string> required_scopes = {};
@@ -171,6 +178,14 @@ public:
 
     JwtMiddleware();
     explicit JwtMiddleware(Config cfg);
+
+    /// Validate the configured Bearer token policy (and optionally
+    /// websocket_cookie_name) for a WebSocket opening request. The returned
+    /// callback is self-contained: it copies this middleware's configuration,
+    /// so the middleware object need not outlive a registered endpoint. A
+    /// verified JWT subject becomes the WebSocket session principal.
+    [[nodiscard]] std::function<websocket::HandshakeDecision(const http3::Request&)>
+    websocket_authorizer() const;
 
     void handle(http3::Request& req,
                 http3::Response& res,

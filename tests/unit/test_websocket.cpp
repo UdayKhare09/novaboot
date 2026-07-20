@@ -2,12 +2,14 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 #include "novaboot/http1/http1_session.h"
 #include "novaboot/http2/http2_session.h"
+#include "novaboot/middleware/jwt_middleware.h"
 #include "novaboot/websocket/websocket.h"
 
 namespace {
@@ -482,4 +484,63 @@ TEST(Http1WebSocketUpgradeTest, RejectsUnauthorizedHandshakeBeforeSwitchingProto
     const std::string response(result->begin(), result->end());
     EXPECT_NE(response.find("401 Unauthorized"), std::string::npos);
     EXPECT_NE(response.find("Authentication required"), std::string::npos);
+}
+
+TEST(Http1WebSocketUpgradeTest, AcceptsVerifiedJwtAndExposesItsSubjectToTheSession) {
+    novaboot::middleware::JwtMiddleware::Config jwt_config;
+    jwt_config.allowed_algorithms = {novaboot::middleware::JwtAlgorithm::HS256};
+    jwt_config.hmac_secret = "websocket-test-secret";
+    novaboot::middleware::JwtMiddleware jwt(jwt_config);
+    const auto authorize = jwt.websocket_authorizer();
+
+    novaboot::middleware::JwtIssuer issuer({
+        .algorithm = novaboot::middleware::JwtAlgorithm::HS256,
+        .hmac_secret = "websocket-test-secret",
+        .rsa_private_key_pem = {},
+        .key_id = {},
+        .include_issued_at = false,
+    });
+    novaboot::middleware::JwtTokenBuilder claims;
+    claims.subject("socket-user").expires_in(std::chrono::hours{1});
+    const auto token = issuer.issue(claims);
+    ASSERT_TRUE(token.has_value());
+
+    std::string principal;
+    novaboot::websocket::Handler endpoint{
+        .on_open = [&](novaboot::websocket::Session& session) {
+            principal = session.principal();
+        },
+    };
+    novaboot::http1::Http1Session session(
+        [](auto&, auto&) {},
+        [authorize, endpoint](novaboot::http3::Request& request)
+            mutable -> novaboot::http1::Http1Session::UpgradeResult {
+            const auto decision = authorize(request);
+            if (!decision.accepted) {
+                return novaboot::http1::Http1Session::UpgradeResult::reject(
+                    decision.rejection_status, decision.rejection_body);
+            }
+            return novaboot::http1::Http1Session::UpgradeResult::accept(
+                std::move(endpoint), decision.principal);
+        });
+
+    const std::string request =
+        "GET /ws/private HTTP/1.1\r\n"
+        "Host: example.test\r\n"
+        "Upgrade: websocket\r\n"
+        "Connection: Upgrade\r\n"
+        "Sec-WebSocket-Version: 13\r\n"
+        "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+        "Authorization: Bearer " + *token + "\r\n\r\n";
+    const auto response = session.feed_data(
+        {request.begin(), request.end()},
+        [](const std::vector<std::uint8_t>& bytes) { return bytes; });
+
+    ASSERT_TRUE(response.has_value());
+    ASSERT_TRUE(session.upgraded());
+    auto accepted = session.take_upgrade_handler();
+    ASSERT_TRUE(accepted.has_value());
+    novaboot::websocket::Connection connection(
+        std::move(accepted->handler), std::move(accepted->principal));
+    EXPECT_EQ(principal, "socket-user");
 }

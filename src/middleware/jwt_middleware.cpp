@@ -649,12 +649,36 @@ verify_token(std::string_view token_text, const JwtMiddleware::Config& cfg) {
     };
 }
 
-std::optional<std::string_view> bearer_token(http3::Request& req,
+std::optional<std::string_view> bearer_token(const http3::Request& req,
                                              const JwtMiddleware::Config& cfg) {
     const auto header = req.header(cfg.authorization_header);
     if (!header) return std::nullopt;
     if (!header->starts_with(cfg.bearer_prefix)) return std::nullopt;
     return header->substr(cfg.bearer_prefix.size());
+}
+
+std::optional<std::string_view> cookie_token(const http3::Request& req,
+                                             std::string_view cookie_name) {
+    const auto header = req.header("cookie");
+    if (!header) return std::nullopt;
+
+    auto remaining = *header;
+    while (!remaining.empty()) {
+        const auto separator = remaining.find(';');
+        auto item = remaining.substr(0, separator);
+        const auto first = item.find_first_not_of(" \t");
+        if (first != std::string_view::npos) {
+            item.remove_prefix(first);
+            const auto equals = item.find('=');
+            if (equals != std::string_view::npos &&
+                item.substr(0, equals) == cookie_name) {
+                return item.substr(equals + 1U);
+            }
+        }
+        if (separator == std::string_view::npos) break;
+        remaining.remove_prefix(separator + 1U);
+    }
+    return std::nullopt;
 }
 
 void reject(http3::Response& res, const JwtMiddleware::Config& cfg) {
@@ -823,6 +847,28 @@ JwtMiddleware::JwtMiddleware()
 
 JwtMiddleware::JwtMiddleware(Config cfg)
     : cfg_(std::move(cfg)) {}
+
+std::function<websocket::HandshakeDecision(const http3::Request&)>
+JwtMiddleware::websocket_authorizer() const {
+    auto cfg = cfg_;
+    return [cfg = std::move(cfg)](const http3::Request& request) {
+        auto token = bearer_token(request, cfg);
+        if (!token && cfg.websocket_cookie_name) {
+            token = cookie_token(request, *cfg.websocket_cookie_name);
+        }
+        if (!token) {
+            return websocket::HandshakeDecision::reject(
+                cfg.unauthorized_status, cfg.unauthorized_body);
+        }
+
+        auto verified = verify_token(*token, cfg);
+        if (!verified || verified->principal.subject.empty()) {
+            return websocket::HandshakeDecision::reject(
+                cfg.unauthorized_status, cfg.unauthorized_body);
+        }
+        return websocket::HandshakeDecision::allow(std::move(verified->principal.subject));
+    };
+}
 
 void JwtMiddleware::handle(http3::Request& req,
                            http3::Response& res,

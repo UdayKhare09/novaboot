@@ -67,13 +67,25 @@ cookie, bearer token, or another credential in `Handler::authorize`; reject
 unknown origins explicitly in browser-facing deployments.
 
 ```cpp
-.authorize = [](const novaboot::http3::Request& request) {
-    if (request.header("origin") != "https://chat.example.com") {
-        return novaboot::websocket::HandshakeDecision::reject(403, "origin denied");
-    }
-    return novaboot::websocket::HandshakeDecision::allow("alice");
-},
+novaboot::middleware::JwtMiddleware jwt({
+    .allowed_algorithms = {novaboot::middleware::JwtAlgorithm::HS256},
+    .hmac_secret = "read-from-secret-storage",
+    .required_scopes = {"chat"},
+    .websocket_cookie_name = "nova_access", // optional browser credential
+});
+
+websocket::Handler chat{
+    .authorize = jwt.websocket_authorizer(),
+    // ...
+};
 ```
+
+`websocket_authorizer()` applies the same signature, expiry, issuer,
+audience, scope, and required-claim policy as HTTP JWT middleware. Its
+verified JWT `sub` becomes `Session::principal()`. Combine it with an origin
+check when browser connections must be restricted to known origins. The
+authorizer accepts a Bearer token and, only when configured,
+`websocket_cookie_name`. It never accepts a JWT in the query string.
 
 The accepted principal is exposed as `Session::principal()` and is used by
 STOMP `/user/{principal}/...` deliveries. Do not use `allowed_origins = {"*"}`
