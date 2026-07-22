@@ -3,6 +3,7 @@
 #include <chrono>
 #include <filesystem>
 #include <memory>
+#include <atomic>
 
 #include "novaboot/core/server.h"
 #include "novaboot/client/rest_client.h"
@@ -71,6 +72,18 @@ protected:
             channel->close();
             http::sse::open(res, std::move(channel));
         });
+
+        app->route("/api/trace").get([](auto& req, auto& res, auto&) {
+            res.status(200).body(std::string(req.header("traceparent").value_or("")));
+        });
+
+        app->route("/api/retry").get([](auto&, auto& res, auto&) {
+            if (retry_requests.fetch_add(1, std::memory_order_relaxed) == 0) {
+                res.status(503).body("retry me");
+            } else {
+                res.status(200).body("recovered");
+            }
+        });
         
         live_server = std::make_unique<novaboot::testing::LiveServer>(std::move(app));
     }
@@ -85,9 +98,11 @@ protected:
     
     std::unique_ptr<core::IoUringEventLoop> event_loop;
     static std::unique_ptr<novaboot::testing::LiveServer> live_server;
+    static std::atomic_int retry_requests;
 };
 
 std::unique_ptr<novaboot::testing::LiveServer> ClientProtocolsTest::live_server;
+std::atomic_int ClientProtocolsTest::retry_requests = 0;
 
 TEST_F(ClientProtocolsTest, HTTP11GetRequest) {
     RestClient::Config cfg;
@@ -158,6 +173,80 @@ TEST_F(ClientProtocolsTest, HTTP2GetRequest) {
     auto resp = client->get("/api/hello");
     EXPECT_EQ(resp.status_code, 200);
     EXPECT_EQ(resp.body, "Hello from server!");
+}
+
+TEST_F(ClientProtocolsTest, HTTP11InjectsW3CTraceContextUnlessCallerSuppliesOne) {
+    RestClient::Config cfg;
+    cfg.host = "localhost";
+    cfg.ip = "127.0.0.1";
+    cfg.port = 4437;
+    cfg.verify_ssl = false;
+    cfg.protocol = Protocol::HTTP1_1;
+
+    auto client = RestClient::create(cfg, *event_loop);
+    const auto generated = client->get("/api/trace");
+    ASSERT_EQ(generated.status_code, 200);
+    EXPECT_EQ(generated.body.size(), 55U);
+    EXPECT_TRUE(generated.body.starts_with("00-"));
+
+    http3::HeaderMap explicit_context;
+    explicit_context.set("traceparent",
+                         "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01");
+    const auto forwarded = client->get("/api/trace", explicit_context);
+    EXPECT_EQ(forwarded.status_code, 200);
+    EXPECT_EQ(forwarded.body,
+              "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01");
+}
+
+TEST_F(ClientProtocolsTest, HTTP2InjectsW3CTraceContext) {
+    RestClient::Config cfg;
+    cfg.host = "localhost";
+    cfg.ip = "127.0.0.1";
+    cfg.port = 4437;
+    cfg.verify_ssl = false;
+    cfg.protocol = Protocol::HTTP2;
+
+    auto client = RestClient::create(cfg, *event_loop);
+    const auto response = client->get("/api/trace");
+    ASSERT_EQ(response.status_code, 200);
+    EXPECT_EQ(response.body.size(), 55U);
+    EXPECT_TRUE(response.body.starts_with("00-"));
+}
+
+TEST_F(ClientProtocolsTest, HTTP3InjectsW3CTraceContext) {
+    RestClient::Config cfg;
+    cfg.host = "localhost";
+    cfg.ip = "127.0.0.1";
+    cfg.port = 4437;
+    cfg.verify_ssl = false;
+    cfg.protocol = Protocol::HTTP3;
+
+    auto client = RestClient::create(cfg, *event_loop);
+    const auto response = client->get("/api/trace");
+    ASSERT_EQ(response.status_code, 200);
+    EXPECT_EQ(response.body.size(), 55U);
+    EXPECT_TRUE(response.body.starts_with("00-"));
+}
+
+TEST_F(ClientProtocolsTest, RetryPolicyIsExplicitAndReusesOneTraceContext) {
+    retry_requests.store(0, std::memory_order_relaxed);
+    RestClient::Config cfg;
+    cfg.host = "localhost";
+    cfg.ip = "127.0.0.1";
+    cfg.port = 4437;
+    cfg.verify_ssl = false;
+    cfg.protocol = Protocol::HTTP1_1;
+    cfg.max_request_attempts = 2;
+    cfg.should_retry = [](std::string_view method, const http3::ClientResponse& response,
+                          int attempt) {
+        return method == "GET" && attempt == 1 && response.status_code == 503;
+    };
+
+    auto client = RestClient::create(cfg, *event_loop);
+    const auto response = client->get("/api/retry");
+    EXPECT_EQ(response.status_code, 200);
+    EXPECT_EQ(response.body, "recovered");
+    EXPECT_EQ(retry_requests.load(std::memory_order_relaxed), 2);
 }
 
 TEST_F(ClientProtocolsTest, HTTP2PostRequest) {

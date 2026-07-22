@@ -19,11 +19,13 @@ endfunction()
 
 # ─── Phase 1 unit tests ──────────────────────────────────────────────────────
 novaboot_test(test_arena_allocator   unit/test_arena_allocator.cpp)
+novaboot_test(test_async_task        unit/test_async_task.cpp)
 novaboot_test(test_shutdown_coordinator unit/test_shutdown_coordinator.cpp)
 novaboot_test(test_http_drain_gate unit/test_http_drain_gate.cpp)
 novaboot_test(test_error_response unit/test_error_response.cpp)
 novaboot_test(test_router            unit/test_router.cpp)
 novaboot_test(test_websocket         unit/test_websocket.cpp)
+novaboot_test(test_live_websocket    unit/test_live_websocket.cpp)
 novaboot_test(test_realtime_test_clients unit/test_realtime_test_clients.cpp)
 novaboot_test(test_stomp             unit/test_stomp.cpp)
 novaboot_test(test_header_map        unit/test_header_map.cpp)
@@ -130,7 +132,7 @@ novaboot_test_slice(config
     test_annotations)
 
 novaboot_test_slice(realtime
-    test_websocket test_realtime_test_clients test_stomp)
+    test_websocket test_live_websocket test_realtime_test_clients test_stomp)
 
 novaboot_test_slice(operations
     test_shutdown_coordinator test_http_drain_gate test_observability test_actuator

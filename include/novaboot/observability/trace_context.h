@@ -30,6 +30,16 @@ extract_trace_context(const http3::Request& request);
 /// supplied, and otherwise starts a new trace.
 [[nodiscard]] TraceContext begin_server_span(const http3::Request& request);
 
+/// Start a client span for an outbound request. When `parent` is supplied,
+/// the new span stays in that trace and records the supplied span as its
+/// parent; otherwise this starts a fresh trace.
+[[nodiscard]] TraceContext
+begin_client_span(const std::optional<TraceContext>& parent = std::nullopt);
+
+/// Add W3C propagation headers to an outbound request. Existing propagation
+/// headers are replaced so a request cannot carry conflicting contexts.
+void inject_trace_context(const TraceContext& trace, http3::HeaderMap& headers);
+
 /// Inject the response propagation headers and make the values discoverable to
 /// downstream route handlers through RequestContext string keys.
 void inject_trace_context(const TraceContext& trace, http3::Response& response,

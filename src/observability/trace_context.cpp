@@ -77,6 +77,29 @@ TraceContext begin_server_span(const http3::Request& request) {
     return context;
 }
 
+TraceContext begin_client_span(const std::optional<TraceContext>& parent) {
+    TraceContext context;
+    if (parent) {
+        context.trace_id = parent->trace_id;
+        context.parent_span_id = parent->span_id;
+        context.trace_flags = parent->trace_flags;
+        context.tracestate = parent->tracestate;
+    }
+    if (context.trace_id.empty()) context.trace_id = random_hex(16);
+    if (context.trace_flags.empty()) context.trace_flags = "01";
+    context.span_id = random_hex(8);
+    return context;
+}
+
+void inject_trace_context(const TraceContext& trace, http3::HeaderMap& headers) {
+    headers.set("traceparent", trace.traceparent());
+    if (trace.tracestate.empty()) {
+        headers.remove("tracestate");
+    } else {
+        headers.set("tracestate", trace.tracestate);
+    }
+}
+
 void inject_trace_context(const TraceContext& trace, http3::Response& response,
                           context::RequestContext& context) {
     response.header("traceparent", trace.traceparent());

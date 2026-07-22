@@ -33,21 +33,30 @@ public:
         std::variant<std::monostate, T, std::exception_ptr> result_;
         std::coroutine_handle<> continuation_;
 
+        struct FinalAwaiter {
+            bool await_ready() const noexcept { return false; }
+
+            std::coroutine_handle<> await_suspend(handle_type handle) const noexcept {
+                const auto continuation = handle.promise().continuation_;
+                return continuation ? continuation : std::noop_coroutine();
+            }
+
+            void await_resume() const noexcept {}
+        };
+
         Task get_return_object() {
             return Task{handle_type::from_promise(*this)};
         }
 
         std::suspend_never  initial_suspend() noexcept { return {}; }
-        std::suspend_always final_suspend()   noexcept { return {}; }
+        FinalAwaiter final_suspend() noexcept { return {}; }
 
         void return_value(T value) {
             result_ = std::move(value);
-            if (continuation_) continuation_.resume();
         }
 
         void unhandled_exception() {
             result_ = std::current_exception();
-            if (continuation_) continuation_.resume();
         }
     };
 
@@ -96,20 +105,28 @@ public:
         std::exception_ptr    exception_;
         std::coroutine_handle<> continuation_;
 
+        struct FinalAwaiter {
+            bool await_ready() const noexcept { return false; }
+
+            std::coroutine_handle<> await_suspend(handle_type handle) const noexcept {
+                const auto continuation = handle.promise().continuation_;
+                return continuation ? continuation : std::noop_coroutine();
+            }
+
+            void await_resume() const noexcept {}
+        };
+
         Task get_return_object() {
             return Task{handle_type::from_promise(*this)};
         }
 
         std::suspend_never  initial_suspend() noexcept { return {}; }
-        std::suspend_always final_suspend()   noexcept { return {}; }
+        FinalAwaiter final_suspend() noexcept { return {}; }
 
-        void return_void() {
-            if (continuation_) continuation_.resume();
-        }
+        void return_void() {}
 
         void unhandled_exception() {
             exception_ = std::current_exception();
-            if (continuation_) continuation_.resume();
         }
     };
 

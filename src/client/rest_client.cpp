@@ -740,7 +740,6 @@ async::Task<http3::ClientResponse> RestClient::async_request(
     std::string_view path,
     std::string_view body,
     const http3::HeaderMap& headers) {
-
     // Ensure we have a live connection — wait/handshake if not ready
     if (!is_connected()) {
         try {
@@ -921,34 +920,58 @@ async::Task<http3::ClientResponse> RestClient::async_request(
     throw ClientError("RestClient: response lost or connection dropped");
 }
 
+async::Task<http3::ClientResponse> RestClient::async_request_with_retry(
+    std::string_view method,
+    std::string_view path,
+    std::string_view body,
+    const http3::HeaderMap& headers) {
+    // A caller-supplied trace context is authoritative. Otherwise establish it
+    // once for the logical request so retries remain part of the same trace.
+    auto request_headers = headers;
+    if (cfg_.propagate_trace_context && !request_headers.has("traceparent")) {
+        observability::inject_trace_context(
+            observability::begin_client_span(), request_headers);
+    }
+
+    const int max_attempts = std::max(1, cfg_.max_request_attempts);
+    for (int attempt = 1; attempt <= max_attempts; ++attempt) {
+        auto response = co_await async_request(method, path, body, request_headers);
+        if (attempt == max_attempts || !cfg_.should_retry ||
+            !cfg_.should_retry(method, response, attempt)) {
+            co_return response;
+        }
+    }
+    throw ClientError("RestClient retry loop terminated unexpectedly");
+}
+
 // ─── Async API ────────────────────────────────────────────────────────────────
 
 async::Task<http3::ClientResponse> RestClient::async_get(
     std::string_view path, const http3::HeaderMap& headers) {
-    return async_request("GET", path, {}, headers);
+    return async_request_with_retry("GET", path, {}, headers);
 }
 
 async::Task<http3::ClientResponse> RestClient::async_post(
     std::string_view path, std::string_view body,
     const http3::HeaderMap& headers) {
-    return async_request("POST", path, body, headers);
+    return async_request_with_retry("POST", path, body, headers);
 }
 
 async::Task<http3::ClientResponse> RestClient::async_put(
     std::string_view path, std::string_view body,
     const http3::HeaderMap& headers) {
-    return async_request("PUT", path, body, headers);
+    return async_request_with_retry("PUT", path, body, headers);
 }
 
 async::Task<http3::ClientResponse> RestClient::async_del(
     std::string_view path, const http3::HeaderMap& headers) {
-    return async_request("DELETE", path, {}, headers);
+    return async_request_with_retry("DELETE", path, {}, headers);
 }
 
 async::Task<http3::ClientResponse> RestClient::async_patch(
     std::string_view path, std::string_view body,
     const http3::HeaderMap& headers) {
-    return async_request("PATCH", path, body, headers);
+    return async_request_with_retry("PATCH", path, body, headers);
 }
 
 // ─── Synchronous API ─────────────────────────────────────────────────────────

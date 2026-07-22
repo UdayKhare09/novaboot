@@ -18,6 +18,7 @@
 #include "novaboot/net/packet.h"
 #include "novaboot/net/udp_socket.h"
 #include "novaboot/net/tls_tcp_stream.h"
+#include "novaboot/observability/trace_context.h"
 #include "novaboot/quic/tls_context.h"
 #include <nghttp2/nghttp2.h>
 
@@ -49,6 +50,14 @@ public:
 /// Thread-safety: NOT thread-safe. Must be used from the EventLoop thread only.
 class RestClient {
 public:
+    /// An opt-in policy consulted after a completed response. `attempt` starts
+    /// at one for the initial request. Callers are responsible for allowing
+    /// retries only for idempotent requests or requests protected by their own
+    /// idempotency key.
+    using RetryPredicate = std::function<bool(std::string_view method,
+                                              const http3::ClientResponse& response,
+                                              int attempt)>;
+
     struct Config {
         std::string  host;                       ///< Hostname (for SNI + DNS)
         std::string  ip;                         ///< Pre-resolved IP (if empty, resolves host)
@@ -62,6 +71,13 @@ public:
         int          request_timeout_ms = 30000;
         int          max_reconnect_attempts = 5; ///< Max reconnect tries
         Protocol     protocol = Protocol::HTTP3; ///< HTTP protocol option
+        /// Add W3C Trace Context when the caller did not explicitly supply
+        /// `traceparent`. This keeps outbound propagation opt-out, not SDK-bound.
+        bool         propagate_trace_context = true;
+        /// Total attempts including the initial request. The default deliberately
+        /// performs no replay; configure `should_retry` to permit one.
+        int          max_request_attempts = 1;
+        RetryPredicate should_retry{};
     };
 
     class Builder {
@@ -79,6 +95,15 @@ public:
         Builder& request_timeout_ms(int ms) { cfg_.request_timeout_ms = ms; return *this; }
         Builder& max_reconnect_attempts(int attempts) { cfg_.max_reconnect_attempts = attempts; return *this; }
         Builder& protocol(Protocol proto) { cfg_.protocol = proto; return *this; }
+        Builder& propagate_trace_context(bool enabled) {
+            cfg_.propagate_trace_context = enabled;
+            return *this;
+        }
+        Builder& retry_policy(int max_attempts, RetryPredicate predicate) {
+            cfg_.max_request_attempts = max_attempts;
+            cfg_.should_retry = std::move(predicate);
+            return *this;
+        }
 
         std::unique_ptr<RestClient> build(core::EventLoop& event_loop) {
             return RestClient::create(cfg_, event_loop);
@@ -173,6 +198,11 @@ private:
 
     /// Submit a request and return a Task that resolves when the response arrives.
     async::Task<http3::ClientResponse> async_request(
+        std::string_view method,
+        std::string_view path,
+        std::string_view body,
+        const http3::HeaderMap& headers);
+    async::Task<http3::ClientResponse> async_request_with_retry(
         std::string_view method,
         std::string_view path,
         std::string_view body,
