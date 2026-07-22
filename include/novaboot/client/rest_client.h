@@ -11,6 +11,7 @@
 #include <unordered_map>
 
 #include "novaboot/async/task.h"
+#include "novaboot/async/cancellation.h"
 #include "novaboot/core/event_loop.h"
 #include "novaboot/http3/client_response.h"
 #include "novaboot/http3/header_map.h"
@@ -36,6 +37,12 @@ enum class Protocol {
 class ClientError : public std::runtime_error {
 public:
     explicit ClientError(const std::string& msg) : std::runtime_error(msg) {}
+};
+
+/// A caller cancelled a synchronous request through CancellationSource.
+class RequestCancelled final : public ClientError {
+public:
+    RequestCancelled() : ClientError("RestClient request cancelled") {}
 };
 
 /// High-level HTTP/3 REST client.
@@ -127,18 +134,23 @@ public:
 
     // ─── Synchronous API (blocks current thread until response/timeout) ──
     http3::ClientResponse get(std::string_view path,
-                              const http3::HeaderMap& headers = {});
+                              const http3::HeaderMap& headers = {},
+                              const async::CancellationToken& cancellation = {});
     http3::ClientResponse post(std::string_view path,
                                std::string_view body,
-                               const http3::HeaderMap& headers = {});
+                               const http3::HeaderMap& headers = {},
+                               const async::CancellationToken& cancellation = {});
     http3::ClientResponse put(std::string_view path,
                               std::string_view body,
-                              const http3::HeaderMap& headers = {});
+                              const http3::HeaderMap& headers = {},
+                              const async::CancellationToken& cancellation = {});
     http3::ClientResponse del(std::string_view path,
-                              const http3::HeaderMap& headers = {});
+                              const http3::HeaderMap& headers = {},
+                              const async::CancellationToken& cancellation = {});
     http3::ClientResponse patch(std::string_view path,
                                 std::string_view body,
-                                const http3::HeaderMap& headers = {});
+                                const http3::HeaderMap& headers = {},
+                                const async::CancellationToken& cancellation = {});
 
     // ─── Async / coroutine API ───────────────────────────────────────────
     /// Returns a Task<ClientResponse> that can be co_await-ed.
@@ -160,7 +172,7 @@ public:
     [[nodiscard]] bool is_connected() const noexcept;
 
     /// Block until QUIC+TLS handshake is complete or timeout fires.
-    void wait_for_connection();
+    void wait_for_connection(const async::CancellationToken& cancellation = {});
 
 private:
     struct H2PendingStream {
@@ -209,7 +221,8 @@ private:
         const http3::HeaderMap& headers);
 
     /// Blocking wrapper: runs the event loop until the Task resolves.
-    http3::ClientResponse sync_execute(async::Task<http3::ClientResponse> task);
+    http3::ClientResponse sync_execute(async::Task<http3::ClientResponse> task,
+                                       const async::CancellationToken& cancellation);
 
     void on_packet_received(net::IncomingPacket&& pkt);
     void send_packet(const net::OutgoingPacket& pkt);

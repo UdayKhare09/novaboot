@@ -6,6 +6,7 @@
 #include <unistd.h>
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
@@ -38,6 +39,10 @@ std::string find_fixture(std::string_view name) {
 
 class TlsSocket {
 public:
+    struct Frame {
+        std::uint8_t opcode = 0;
+        std::vector<std::uint8_t> payload;
+    };
     explicit TlsSocket(std::string_view alpn = {}, std::uint16_t port = 4438) {
         ctx_ = SSL_CTX_new(TLS_client_method());
         if (!ctx_) throw std::runtime_error("could not allocate TLS client context");
@@ -126,12 +131,12 @@ public:
         return headers;
     }
 
-    std::string read_text_frame() {
+    Frame read_frame() {
         while (received_.size() < 2) read_more();
         const auto first = static_cast<unsigned char>(received_[0]);
         const auto second = static_cast<unsigned char>(received_[1]);
-        if ((first & 0x0fU) != 0x1U || (second & 0x80U) != 0U) {
-            throw std::runtime_error("invalid server WebSocket text frame");
+        if ((second & 0x80U) != 0U) {
+            throw std::runtime_error("server WebSocket frame must not be masked");
         }
         std::size_t header_size = 2;
         std::size_t payload_size = second & 0x7fU;
@@ -142,9 +147,18 @@ public:
             header_size = 4;
         }
         while (received_.size() < header_size + payload_size) read_more();
-        auto payload = received_.substr(header_size, payload_size);
+        Frame frame;
+        frame.opcode = first & 0x0fU;
+        frame.payload.assign(received_.begin() + static_cast<std::ptrdiff_t>(header_size),
+                             received_.begin() + static_cast<std::ptrdiff_t>(header_size + payload_size));
         received_.erase(0, header_size + payload_size);
-        return payload;
+        return frame;
+    }
+
+    std::string read_text_frame() {
+        auto frame = read_frame();
+        if (frame.opcode != 0x1U) throw std::runtime_error("expected server WebSocket text frame");
+        return {frame.payload.begin(), frame.payload.end()};
     }
 
 private:
@@ -264,6 +278,23 @@ void flush(TlsSocket& socket, H2LivePeer& peer) {
     if (!bytes.empty()) socket.write_bytes(bytes);
 }
 
+void upgrade_http11(TlsSocket& socket, std::uint16_t port, std::string_view path,
+                    std::string_view extra_headers = {}) {
+    socket.write_all(
+        "GET " + std::string(path) + " HTTP/1.1\r\n"
+        "Host: localhost:" + std::to_string(port) + "\r\n"
+        "Upgrade: websocket\r\n"
+        "Connection: Upgrade\r\n"
+        "Sec-WebSocket-Version: 13\r\n"
+        "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" +
+        std::string(extra_headers) + "\r\n");
+    const auto headers = socket.read_headers();
+    if (!headers.starts_with("HTTP/1.1 101") ||
+        headers.find("Sec-WebSocket-Accept:") == std::string::npos) {
+        throw std::runtime_error("WebSocket HTTP/1.1 Upgrade was rejected");
+    }
+}
+
 } // namespace
 
 TEST(LiveWebSocketTest, AcceptsCookieJwtOverRealTlsHttp11Upgrade) {
@@ -303,18 +334,7 @@ TEST(LiveWebSocketTest, AcceptsCookieJwtOverRealTlsHttp11Upgrade) {
     novaboot::testing::LiveServer live(std::move(app));
 
     TlsSocket socket;
-    socket.write_all(
-        "GET /ws/private HTTP/1.1\r\n"
-        "Host: localhost:4438\r\n"
-        "Upgrade: websocket\r\n"
-        "Connection: Upgrade\r\n"
-        "Sec-WebSocket-Version: 13\r\n"
-        "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
-        "Cookie: nova_access=" + *token + "\r\n\r\n");
-
-    const auto headers = socket.read_headers();
-    EXPECT_TRUE(headers.starts_with("HTTP/1.1 101"));
-    EXPECT_NE(headers.find("Sec-WebSocket-Accept:"), std::string::npos);
+    upgrade_http11(socket, 4438, "/ws/private", "Cookie: nova_access=" + *token + "\r\n");
     EXPECT_EQ(socket.read_text_frame(), "welcome browser-user");
 }
 
@@ -375,4 +395,58 @@ TEST(LiveWebSocketTest, AcceptsCookieJwtOverRealTlsHttp2ExtendedConnect) {
     EXPECT_EQ(peer.data()[1], 23U);
     EXPECT_EQ(std::string(peer.data().begin() + 2, peer.data().end()),
               "welcome h2-browser-user");
+}
+
+TEST(LiveWebSocketTest, AcceptsARealTlsClientReconnect) {
+    using namespace novaboot;
+    std::atomic_int opens = 0;
+    auto app = Server::create()
+        .bind("127.0.0.1", 4440)
+        .tls(find_fixture("cert.pem"), find_fixture("key.pem"))
+        .workers(1)
+        .build();
+    app->websocket("/ws/reconnect", websocket::Handler{
+        .on_open = [&opens](websocket::Session& session) {
+            opens.fetch_add(1, std::memory_order_relaxed);
+            EXPECT_TRUE(session.send_text("connected"));
+        },
+    });
+    novaboot::testing::LiveServer live(std::move(app));
+
+    {
+        TlsSocket first{{}, 4440};
+        upgrade_http11(first, 4440, "/ws/reconnect");
+        EXPECT_EQ(first.read_text_frame(), "connected");
+    }
+    {
+        TlsSocket second{{}, 4440};
+        upgrade_http11(second, 4440, "/ws/reconnect");
+        EXPECT_EQ(second.read_text_frame(), "connected");
+    }
+    EXPECT_EQ(opens.load(std::memory_order_relaxed), 2);
+}
+
+TEST(LiveWebSocketTest, ClosesSlowConsumerWith1013OverRealTls) {
+    using namespace novaboot;
+    auto app = Server::create()
+        .bind("127.0.0.1", 4441)
+        .tls(find_fixture("cert.pem"), find_fixture("key.pem"))
+        .workers(1)
+        .build();
+    websocket::Handler handler;
+    handler.limits.max_pending_send_bytes = 8;
+    handler.on_open = [](websocket::Session& session) {
+        EXPECT_FALSE(session.send_text("this message cannot fit"));
+    };
+    app->websocket("/ws/slow", std::move(handler));
+    novaboot::testing::LiveServer live(std::move(app));
+
+    TlsSocket socket{{}, 4441};
+    upgrade_http11(socket, 4441, "/ws/slow");
+    const auto close = socket.read_frame();
+    ASSERT_EQ(close.opcode, 0x8U);
+    ASSERT_GE(close.payload.size(), 2U);
+    const auto close_code = (static_cast<std::uint16_t>(close.payload[0]) << 8U) |
+                            static_cast<std::uint16_t>(close.payload[1]);
+    EXPECT_EQ(close_code, 1013U);
 }

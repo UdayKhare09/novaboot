@@ -37,5 +37,21 @@ auto client = RestClient::builder()
 
 The predicate is called only after a completed response. It must allow only
 safe requests—normally idempotent methods, or writes guarded by an application
-idempotency key. Streaming request bodies and per-request cancellation handles
-are not implemented yet, so retries do not claim those semantics.
+idempotency key. Streaming request bodies are not implemented yet, so retries
+do not claim streaming replay semantics.
+
+## Cancellation
+
+Pass an `async::CancellationToken` to a synchronous request when another
+thread or shutdown path may stop waiting for it:
+
+```cpp
+novaboot::async::CancellationSource cancellation;
+auto response = client->get("/inventory", {}, cancellation.token());
+```
+
+Cancellation causes `RequestCancelled` and safely completes pending callbacks
+before the request task is destroyed. A `RestClient` owns one transport, so
+cancelling one active request closes that transport and invalidates any other
+active streams on the same client; use one client per independently cancellable
+operation until stream-scoped cancellation is available.

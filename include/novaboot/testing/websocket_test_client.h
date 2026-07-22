@@ -52,7 +52,10 @@ public:
     }
 
     [[nodiscard]] std::vector<WebSocketTestFrame> take_frames() {
-        return decode(connection_.take_outbound());
+        // Background producers (for example STOMP heartbeats) enqueue through
+        // SessionHandle, just as they do on a real shard. Drain those commands
+        // before inspecting endpoint-owned outbound bytes.
+        return decode(connection_.drain_external_outbound());
     }
     [[nodiscard]] bool closed() const noexcept { return connection_.closed(); }
 

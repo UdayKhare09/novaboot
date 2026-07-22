@@ -26,3 +26,19 @@ The current reflected validation API is runtime `Schema<T>` code rather than
 field annotations, so validator constraints and request/response DTO schemas
 cannot yet be inferred safely. Add explicit API/validation metadata before
 claiming schema-level OpenAPI generation.
+
+## Validation schemas
+
+NovaBoot validators retain the constraint metadata that OpenAPI needs. Route
+callbacks are type-erased intentionally, so attach a validated DTO explicitly
+to the generated operation rather than relying on unsafe handler inference:
+
+```cpp
+novaboot::openapi::Document document(server.router());
+document.schema("CreateArticle", CreateArticle::validator)
+    .request_body("/articles", novaboot::router::Method::POST, "CreateArticle");
+```
+
+This emits an OpenAPI component schema with scalar/array types, required fields,
+numeric bounds, string-length bounds, and the `email` format. Custom validation
+rules remain runtime-only because they do not have a portable JSON Schema form.

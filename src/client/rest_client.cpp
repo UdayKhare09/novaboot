@@ -707,10 +707,11 @@ bool RestClient::is_connected() const noexcept {
            !conn_->is_closed() && !conn_->is_draining();
 }
 
-void RestClient::wait_for_connection() {
+void RestClient::wait_for_connection(const async::CancellationToken& cancellation) {
     auto deadline = std::chrono::steady_clock::now() +
                     std::chrono::milliseconds(cfg_.connect_timeout_ms);
     while (!is_connected()) {
+        if (cancellation.cancelled()) throw RequestCancelled();
         if (cfg_.protocol == Protocol::HTTP1_1 || cfg_.protocol == Protocol::HTTP2) {
             if (tcp_fd_ == -1) {
                 throw ClientError(
@@ -977,13 +978,28 @@ async::Task<http3::ClientResponse> RestClient::async_patch(
 // ─── Synchronous API ─────────────────────────────────────────────────────────
 
 http3::ClientResponse RestClient::sync_execute(
-    async::Task<http3::ClientResponse> task) {
+    async::Task<http3::ClientResponse> task,
+    const async::CancellationToken& cancellation) {
 
     auto deadline = std::chrono::steady_clock::now() +
                     std::chrono::milliseconds(cfg_.request_timeout_ms);
 
     while (!task.is_ready()) {
+        if (cancellation.cancelled()) {
+            // Completing all pending callbacks before `task` is destroyed
+            // prevents a later socket callback from resuming its coroutine.
+            // RestClient owns one transport, so this also invalidates any
+            // other active streams on this client instance.
+            on_disconnect();
+            throw RequestCancelled();
+        }
         event_loop_->run_once();
+        // An event-loop iteration may wait for I/O. Check again before
+        // accepting a response that arrived after another thread cancelled.
+        if (cancellation.cancelled()) {
+            on_disconnect();
+            throw RequestCancelled();
+        }
         if (std::chrono::steady_clock::now() >= deadline) {
             // Completing the suspended request before task destruction keeps
             // protocol callbacks from later resuming a dangling coroutine.
@@ -998,36 +1014,41 @@ http3::ClientResponse RestClient::sync_execute(
 }
 
 http3::ClientResponse RestClient::get(std::string_view path,
-                                      const http3::HeaderMap& headers) {
-    wait_for_connection();
-    return sync_execute(async_get(path, headers));
+                                      const http3::HeaderMap& headers,
+                                      const async::CancellationToken& cancellation) {
+    wait_for_connection(cancellation);
+    return sync_execute(async_get(path, headers), cancellation);
 }
 
 http3::ClientResponse RestClient::post(std::string_view path,
                                        std::string_view body,
-                                       const http3::HeaderMap& headers) {
-    wait_for_connection();
-    return sync_execute(async_post(path, body, headers));
+                                       const http3::HeaderMap& headers,
+                                       const async::CancellationToken& cancellation) {
+    wait_for_connection(cancellation);
+    return sync_execute(async_post(path, body, headers), cancellation);
 }
 
 http3::ClientResponse RestClient::put(std::string_view path,
                                       std::string_view body,
-                                      const http3::HeaderMap& headers) {
-    wait_for_connection();
-    return sync_execute(async_put(path, body, headers));
+                                      const http3::HeaderMap& headers,
+                                      const async::CancellationToken& cancellation) {
+    wait_for_connection(cancellation);
+    return sync_execute(async_put(path, body, headers), cancellation);
 }
 
 http3::ClientResponse RestClient::del(std::string_view path,
-                                      const http3::HeaderMap& headers) {
-    wait_for_connection();
-    return sync_execute(async_del(path, headers));
+                                      const http3::HeaderMap& headers,
+                                      const async::CancellationToken& cancellation) {
+    wait_for_connection(cancellation);
+    return sync_execute(async_del(path, headers), cancellation);
 }
 
 http3::ClientResponse RestClient::patch(std::string_view path,
                                         std::string_view body,
-                                        const http3::HeaderMap& headers) {
-    wait_for_connection();
-    return sync_execute(async_patch(path, body, headers));
+                                        const http3::HeaderMap& headers,
+                                        const async::CancellationToken& cancellation) {
+    wait_for_connection(cancellation);
+    return sync_execute(async_patch(path, body, headers), cancellation);
 }
 
 } // namespace novaboot::client

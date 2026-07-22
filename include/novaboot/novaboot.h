@@ -77,6 +77,7 @@
 
 // Client (HTTP/3 REST client)
 #include "novaboot/http3/client_response.h"
+#include "novaboot/async/cancellation.h"
 #include "novaboot/async/task.h"
 #include "novaboot/client/rest_client.h"
 

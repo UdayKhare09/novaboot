@@ -2,11 +2,14 @@
 
 #include <map>
 #include <memory>
+#include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #include "novaboot/router/router.h"
+#include "novaboot/validation/validation.h"
 
 namespace novaboot::openapi {
 
@@ -30,8 +33,36 @@ public:
         for (const auto& route : router.routes()) {
             const auto method = router::method_to_string(route.method);
             if (method == "*") continue; // OpenAPI does not define an ANY verb.
-            operations_[openapi_path(route.pattern)][std::string(method)] = route.pattern;
+            Operation operation;
+            operation.source_pattern = route.pattern;
+            operations_[openapi_path(route.pattern)][std::string(method)] = std::move(operation);
         }
+    }
+
+    /// Register a JSON Schema generated from a NovaBoot validation schema.
+    /// The router stores type-erased handlers, so request/response schemas are
+    /// attached explicitly below rather than guessed from a callback.
+    template<typename T>
+    Document& schema(std::string name, const validation::Schema<T>& validation) {
+        schemas_.insert_or_assign(std::move(name), schema_json(validation.fields()));
+        return *this;
+    }
+
+    /// Attach a registered JSON request schema to a route operation.
+    /// `path` uses the route syntax (`:id`) or OpenAPI syntax (`{id}`).
+    Document& request_body(std::string_view path, router::Method method,
+                           std::string schema_name) {
+        const auto method_name = router::method_to_string(method);
+        const auto path_it = operations_.find(openapi_path(path));
+        if (path_it == operations_.end() || method_name == "*" ||
+            !path_it->second.contains(std::string(method_name))) {
+            throw std::invalid_argument("OpenAPI request body refers to an unregistered route operation");
+        }
+        if (!schemas_.contains(schema_name)) {
+            throw std::invalid_argument("OpenAPI request body refers to an unknown schema");
+        }
+        path_it->second.at(std::string(method_name)).request_schema = std::move(schema_name);
+        return *this;
     }
 
     [[nodiscard]] std::string json() const {
@@ -58,12 +89,12 @@ public:
             first_path = false;
             output += '"' + quote(path) + R"(":{)";
             bool first_method = true;
-            for (const auto& [method, source_pattern] : methods) {
+            for (const auto& [method, operation] : methods) {
                 if (!first_method) output += ',';
                 first_method = false;
                 output += '"' + lowercase(method) + R"(":{)";
-                output += R"("operationId":")" + quote(operation_id(method, source_pattern)) + '"';
-                const auto parameters = path_parameters(source_pattern);
+                output += R"("operationId":")" + quote(operation_id(method, operation.source_pattern)) + '"';
+                const auto parameters = path_parameters(operation.source_pattern);
                 if (!parameters.empty()) {
                     output += R"(,"parameters":[)";
                     for (std::size_t index = 0; index < parameters.size(); ++index) {
@@ -73,16 +104,69 @@ public:
                     }
                     output += ']';
                 }
+                if (operation.request_schema) {
+                    output += R"(,"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/)" +
+                        quote(*operation.request_schema) + R"("}}}})";
+                }
                 output += R"(,"responses":{"200":{"description":"Successful response"}}})";
             }
             output += '}';
         }
-        return output + "}}";
+        output += "}";
+        if (!schemas_.empty()) {
+            output += R"(,"components":{"schemas":{)";
+            bool first_schema = true;
+            for (const auto& [name, schema] : schemas_) {
+                if (!first_schema) output += ',';
+                first_schema = false;
+                output += '"' + quote(name) + R"(":)" + schema;
+            }
+            output += "}}";
+        }
+        return output + "}";
     }
 
 private:
     Config config_;
-    std::map<std::string, std::map<std::string, std::string>> operations_;
+    struct Operation {
+        std::string source_pattern;
+        std::optional<std::string> request_schema;
+    };
+
+    std::map<std::string, std::map<std::string, Operation>> operations_;
+    std::map<std::string, std::string> schemas_;
+
+    template<typename Field>
+    static std::string schema_json(const std::vector<Field>& fields) {
+        std::string output = R"({"type":"object","properties":{)";
+        bool first = true;
+        std::vector<std::string_view> required;
+        for (const auto& field : fields) {
+            if (!first) output += ',';
+            first = false;
+            output += '"' + quote(field.name) + R"(":{"type":")" + quote(field.json_type) + '"';
+            if (field.item_json_type) {
+                output += R"(,"items":{"type":")" + quote(*field.item_json_type) + R"("})";
+            }
+            if (field.minimum) output += R"(,"minimum":)" + std::to_string(*field.minimum);
+            if (field.maximum) output += R"(,"maximum":)" + std::to_string(*field.maximum);
+            if (field.min_length) output += R"(,"minLength":)" + std::to_string(*field.min_length);
+            if (field.max_length) output += R"(,"maxLength":)" + std::to_string(*field.max_length);
+            if (field.format) output += R"(,"format":")" + quote(*field.format) + '"';
+            output += '}';
+            if (field.required) required.push_back(field.name);
+        }
+        output += '}';
+        if (!required.empty()) {
+            output += R"(,"required":[)";
+            for (std::size_t index = 0; index < required.size(); ++index) {
+                if (index) output += ',';
+                output += '"' + quote(required[index]) + '"';
+            }
+            output += ']';
+        }
+        return output + '}';
+    }
 
     [[nodiscard]] static std::string quote(std::string_view value) {
         std::string escaped;

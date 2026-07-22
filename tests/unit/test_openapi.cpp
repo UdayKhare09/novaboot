@@ -2,6 +2,22 @@
 
 #include "novaboot/openapi/openapi.h"
 
+namespace {
+
+struct CreateArticle {
+    std::string title;
+    int priority = 0;
+    std::vector<std::string> tags;
+
+    inline static const novaboot::validation::Schema<CreateArticle> validator =
+        novaboot::validation::Schema<CreateArticle>()
+            .field<&CreateArticle::title>("title").not_empty().size(3, 120)
+            .field<&CreateArticle::priority>("priority").min(1).max(5)
+            .field<&CreateArticle::tags>("tags").size(0, 10);
+};
+
+} // namespace
+
 TEST(OpenApiDocumentTest, DescribesRegisteredRoutesAndPathParameters) {
     novaboot::router::Router router;
     router.route("/articles/:article_id").get([](auto&, auto&, auto&) {});
@@ -37,4 +53,26 @@ TEST(OpenApiDocumentTest, AddsAJsonEndpointSnapshot) {
     EXPECT_EQ(response.headers().get("content-type").value_or(""),
               "application/vnd.oai.openapi+json;version=3.1");
     EXPECT_NE(response.body_str().find(R"("/health")"), std::string::npos);
+}
+
+TEST(OpenApiDocumentTest, EmitsValidationSchemaAndOperationRequestBody) {
+    novaboot::router::Router router;
+    router.route("/articles").post([](auto&, auto&, auto&) {});
+
+    novaboot::openapi::Document document(router);
+    document.schema("CreateArticle", CreateArticle::validator)
+        .request_body("/articles", novaboot::router::Method::POST, "CreateArticle");
+    const auto json = document.json();
+    SCOPED_TRACE(json);
+
+    EXPECT_NE(json.find(R"("components":{"schemas":{"CreateArticle":{)"), std::string::npos);
+    EXPECT_NE(json.find(R"("title":{"type":"string","minLength":3,"maxLength":120})"),
+              std::string::npos);
+    EXPECT_NE(json.find(R"("priority":{"type":"integer","minimum":1,"maximum":5})"),
+              std::string::npos);
+    EXPECT_NE(json.find(R"("tags":{"type":"array","items":{"type":"string"})"),
+              std::string::npos);
+    EXPECT_NE(json.find(R"("required":["title"])"), std::string::npos);
+    EXPECT_NE(json.find(R"("requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/CreateArticle"})"),
+              std::string::npos);
 }

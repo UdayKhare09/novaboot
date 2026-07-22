@@ -249,6 +249,25 @@ TEST_F(ClientProtocolsTest, RetryPolicyIsExplicitAndReusesOneTraceContext) {
     EXPECT_EQ(retry_requests.load(std::memory_order_relaxed), 2);
 }
 
+TEST_F(ClientProtocolsTest, CancellationTokenSafelyStopsASynchronousRequest) {
+    RestClient::Config cfg;
+    cfg.host = "localhost";
+    cfg.ip = "127.0.0.1";
+    cfg.port = 4437;
+    cfg.verify_ssl = false;
+    cfg.protocol = Protocol::HTTP1_1;
+
+    auto client = RestClient::create(cfg, *event_loop);
+    novaboot::async::CancellationSource cancellation;
+    std::jthread canceller([&cancellation] {
+        std::this_thread::sleep_for(std::chrono::milliseconds{20});
+        cancellation.cancel();
+    });
+
+    EXPECT_THROW((void)client->get("/api/slow", {}, cancellation.token()),
+                 RequestCancelled);
+}
+
 TEST_F(ClientProtocolsTest, HTTP2PostRequest) {
     RestClient::Config cfg;
     cfg.host = "localhost";
