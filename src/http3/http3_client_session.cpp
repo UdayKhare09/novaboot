@@ -97,6 +97,25 @@ int64_t Http3ClientSession::submit_request(
     std::string_view body,
     const HeaderMap& extra_headers) {
 
+    BodyChunkProvider provider;
+    if (!body.empty()) {
+        auto emitted = std::make_shared<bool>(false);
+        provider = [data = std::string(body), emitted]() mutable -> std::optional<std::string> {
+            if (*emitted) return std::nullopt;
+            *emitted = true;
+            return std::move(data);
+        };
+    }
+    return submit_streaming_request(method, path, authority, std::move(provider), extra_headers);
+}
+
+int64_t Http3ClientSession::submit_streaming_request(
+    std::string_view method,
+    std::string_view path,
+    std::string_view authority,
+    BodyChunkProvider body,
+    const HeaderMap& extra_headers) {
+
     // Open a new bidirectional stream
     int64_t stream_id = -1;
     int rv = ngtcp2_conn_open_bidi_stream(quic_conn_, &stream_id, nullptr);
@@ -122,21 +141,16 @@ int64_t Http3ClientSession::submit_request(
     push_nv(":scheme",    "https");
     push_nv(":authority", authority);
 
-    // Content-length for bodies
-    std::string content_length_str;
-    if (!body.empty()) {
-        content_length_str = std::to_string(body.size());
-        push_nv("content-length", content_length_str);
-    }
-
     // Extra headers
     for (const auto& entry : extra_headers.entries()) {
         push_nv(entry.name, entry.value);
     }
 
     // Store request body if any
-    if (!body.empty()) {
-        request_bodies_[stream_id] = RequestBody{std::string(body), 0};
+    if (body) {
+        RequestBody request_body;
+        request_body.provider = std::move(body);
+        request_bodies_[stream_id] = std::move(request_body);
     }
 
     // Data provider
@@ -146,7 +160,7 @@ int64_t Http3ClientSession::submit_request(
     rv = nghttp3_conn_submit_request(
         conn_, stream_id,
         nva.data(), nva.size(),
-        body.empty() ? nullptr : &dr,
+        request_bodies_.contains(stream_id) ? &dr : nullptr,
         nullptr); // stream user data
 
     if (rv != 0) {
@@ -157,6 +171,18 @@ int64_t Http3ClientSession::submit_request(
 
     spdlog::debug("HTTP/3 request submitted: {} {} (stream {})", method, path, stream_id);
     return stream_id;
+}
+
+void Http3ClientSession::cancel_stream(int64_t stream_id) {
+    nghttp3_conn_shutdown_stream_write(conn_, stream_id);
+    const int rv = nghttp3_conn_shutdown_stream_read(conn_, stream_id);
+    if (rv != 0 && rv != NGHTTP3_ERR_STREAM_NOT_FOUND) {
+        spdlog::debug("nghttp3_conn_shutdown_stream_read (client) error: {}",
+                      nghttp3_strerror(rv));
+    }
+    streams_.erase(stream_id);
+    stream_read_offsets_.erase(stream_id);
+    request_bodies_.erase(stream_id);
 }
 
 // ─── Forwarding methods (called by QuicClientConnection) ─────────────────────
@@ -355,6 +381,19 @@ nghttp3_ssize Http3ClientSession::on_read_data(
     }
 
     auto& rb      = it->second;
+    if (rb.provided >= rb.data.size() && !rb.finished) {
+        rb.data.clear();
+        rb.provided = 0;
+        if (rb.provider) {
+            if (auto chunk = rb.provider(); chunk && !chunk->empty()) {
+                rb.data = std::move(*chunk);
+            } else {
+                rb.finished = true;
+            }
+        } else {
+            rb.finished = true;
+        }
+    }
     size_t remain = rb.data.size() - rb.provided;
     if (remain > 0) {
         vec[0].base = reinterpret_cast<uint8_t*>(rb.data.data() + rb.provided);
@@ -362,7 +401,7 @@ nghttp3_ssize Http3ClientSession::on_read_data(
         rb.provided += remain;
     }
 
-    *pflags = NGHTTP3_DATA_FLAG_EOF;
+    *pflags = rb.finished ? NGHTTP3_DATA_FLAG_EOF : NGHTTP3_DATA_FLAG_NONE;
     return remain > 0 ? 1 : 0;
 }
 

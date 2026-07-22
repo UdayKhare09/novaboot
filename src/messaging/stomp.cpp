@@ -1,11 +1,17 @@
 #include "novaboot/messaging/stomp.h"
 
+#include <arpa/inet.h>
 #include <charconv>
 #include <cctype>
 #include <chrono>
+#include <deque>
+#include <netdb.h>
 #include <limits>
+#include <sys/socket.h>
+#include <sys/types.h>
 #include <stdexcept>
 #include <thread>
+#include <unistd.h>
 
 namespace novaboot::messaging::stomp {
 
@@ -701,6 +707,255 @@ void Endpoint::send(websocket::Session& session, Frame frame) {
 void Endpoint::protocol_error(websocket::Session& session, std::string message) {
     send(session, Frame{.command = "ERROR", .headers = {{"message", message}}, .body = message});
     (void)session.close(1002, "Invalid STOMP frame");
+}
+
+// ─── External broker relay ─────────────────────────────────────────────────
+
+struct RelayEndpoint::ConnectionState {
+    websocket::SessionHandle handle;
+    Decoder browser_decoder;
+    std::mutex mutex;
+    std::condition_variable_any wakeup;
+    std::deque<std::string> outbound;
+    std::optional<std::string> connect_frame;
+    std::unordered_map<std::string, std::string> subscriptions;
+    std::jthread worker;
+};
+
+RelayEndpoint::RelayEndpoint(Config config) : config_(std::move(config)) {
+    if (config_.host.empty()) {
+        throw std::invalid_argument("STOMP relay requires a broker host");
+    }
+    if (config_.port == 0) {
+        throw std::invalid_argument("STOMP relay requires a broker port");
+    }
+}
+
+RelayEndpoint::~RelayEndpoint() { force_shutdown(); }
+
+websocket::Handler RelayEndpoint::websocket_handler() {
+    return websocket::Handler{
+        .on_open = [this](websocket::Session& session) { on_open(session); },
+        .on_message = [this](websocket::Session& session, const websocket::Message& message) {
+            on_message(session, message);
+        },
+        .on_close = [this](websocket::Session& session, const websocket::CloseInfo& close) {
+            on_close(session, close);
+        },
+        .authorize = [this](const http3::Request&) {
+            return accepting_.load(std::memory_order_relaxed)
+                ? websocket::HandshakeDecision::allow()
+                : websocket::HandshakeDecision::reject(503, "STOMP relay is shutting down");
+        },
+    };
+}
+
+void RelayEndpoint::on_open(websocket::Session& session) {
+    if (!accepting_.load(std::memory_order_relaxed)) {
+        (void)session.close(1001, "Server shutting down");
+        return;
+    }
+    auto state = std::make_shared<ConnectionState>();
+    state->handle = session.handle();
+    const auto id = state->handle.id();
+    {
+        std::lock_guard lock(mutex_);
+        connections_.emplace(id, state);
+    }
+    state->worker = std::jthread([this, state](std::stop_token stop) {
+        relay_loop(state, stop);
+    });
+}
+
+void RelayEndpoint::on_message(websocket::Session& session,
+                               const websocket::Message& message) {
+    if (!message.is_text()) {
+        (void)session.close(1003, "STOMP requires text WebSocket messages");
+        return;
+    }
+    std::shared_ptr<ConnectionState> state;
+    {
+        std::lock_guard lock(mutex_);
+        const auto it = connections_.find(session.handle().id());
+        if (it == connections_.end()) return;
+        state = it->second;
+    }
+    const auto frames = state->browser_decoder.feed(message.text());
+    if (!frames) {
+        (void)session.send_text(serialize(Frame{.command = "ERROR", .headers = {
+            {"message", frames.error().message}}, .body = frames.error().message}));
+        (void)session.close(1002, "Invalid STOMP frame");
+        return;
+    }
+    std::lock_guard lock(state->mutex);
+    for (const auto& frame : *frames) {
+        if (config_.interceptor && !config_.interceptor(session, frame)) {
+            (void)session.close(1008, "STOMP frame rejected");
+            return;
+        }
+        const auto wire = serialize(frame);
+        if (frame.command == "CONNECT" || frame.command == "STOMP") {
+            state->connect_frame = wire;
+            continue;
+        }
+        if (frame.command == "SUBSCRIBE") {
+            if (const auto id = frame.header("id"); !id.empty()) {
+                state->subscriptions[std::string(id)] = wire;
+            }
+        } else if (frame.command == "UNSUBSCRIBE") {
+            if (const auto id = frame.header("id"); !id.empty()) {
+                state->subscriptions.erase(std::string(id));
+            }
+        }
+        if (state->outbound.size() >= config_.max_queued_frames) {
+            (void)session.close(1013, "STOMP relay queue is full");
+            return;
+        }
+        state->outbound.push_back(wire);
+    }
+    state->wakeup.notify_all();
+}
+
+void RelayEndpoint::on_close(websocket::Session& session, const websocket::CloseInfo&) {
+    std::shared_ptr<ConnectionState> state;
+    {
+        std::lock_guard lock(mutex_);
+        const auto it = connections_.find(session.handle().id());
+        if (it == connections_.end()) return;
+        state = std::move(it->second);
+        connections_.erase(it);
+    }
+    state->worker.request_stop();
+    state->wakeup.notify_all();
+    if (state->worker.joinable()) state->worker.join();
+}
+
+void RelayEndpoint::begin_shutdown() {
+    accepting_.store(false, std::memory_order_relaxed);
+    std::vector<websocket::SessionHandle> handles;
+    {
+        std::lock_guard lock(mutex_);
+        for (const auto& [_, state] : connections_) handles.push_back(state->handle);
+    }
+    for (const auto& handle : handles) (void)handle.close(1001, "Server shutting down");
+}
+
+bool RelayEndpoint::drained() const {
+    std::lock_guard lock(mutex_);
+    return connections_.empty();
+}
+
+void RelayEndpoint::force_shutdown() {
+    accepting_.store(false, std::memory_order_relaxed);
+    std::vector<std::shared_ptr<ConnectionState>> states;
+    {
+        std::lock_guard lock(mutex_);
+        for (auto& [_, state] : connections_) states.push_back(std::move(state));
+        connections_.clear();
+    }
+    for (const auto& state : states) {
+        state->worker.request_stop();
+        state->wakeup.notify_all();
+        if (state->worker.joinable()) state->worker.join();
+        (void)state->handle.close(1001, "Server shutdown");
+    }
+}
+
+void RelayEndpoint::relay_loop(const std::shared_ptr<ConnectionState>& state,
+                               std::stop_token stop) {
+    const auto connect_broker = [this]() -> int {
+        addrinfo hints{};
+        hints.ai_socktype = SOCK_STREAM;
+        hints.ai_family = AF_UNSPEC;
+        addrinfo* results = nullptr;
+        const auto port = std::to_string(config_.port);
+        if (::getaddrinfo(config_.host.c_str(), port.c_str(), &hints, &results) != 0) return -1;
+        int fd = -1;
+        for (auto* item = results; item; item = item->ai_next) {
+            fd = ::socket(item->ai_family, item->ai_socktype | SOCK_CLOEXEC, item->ai_protocol);
+            if (fd >= 0 && ::connect(fd, item->ai_addr, item->ai_addrlen) == 0) break;
+            if (fd >= 0) ::close(fd);
+            fd = -1;
+        }
+        ::freeaddrinfo(results);
+        return fd;
+    };
+    const auto send_all = [](int fd, std::string_view bytes) {
+        while (!bytes.empty()) {
+            const auto sent = ::send(fd, bytes.data(), bytes.size(), MSG_NOSIGNAL);
+            if (sent <= 0) return false;
+            bytes.remove_prefix(static_cast<std::size_t>(sent));
+        }
+        return true;
+    };
+
+    Decoder broker_decoder;
+    while (!stop.stop_requested() && state->handle.active()) {
+        const int fd = connect_broker();
+        if (fd < 0) {
+            std::unique_lock lock(state->mutex);
+            state->wakeup.wait_for(lock, stop, config_.reconnect_delay, [] { return false; });
+            continue;
+        }
+
+        std::optional<std::string> connect;
+        std::vector<std::string> subscriptions;
+        std::deque<std::string> outbound;
+        {
+            std::lock_guard lock(state->mutex);
+            connect = state->connect_frame;
+            for (const auto& [_, frame] : state->subscriptions) subscriptions.push_back(frame);
+            // CONNECT/SUBSCRIBE/UNSUBSCRIBE are represented by replay state;
+            // preserve SEND, ACK/NACK, receipts and DISCONNECT exactly once.
+            for (auto& frame : state->outbound) {
+                const auto decoded = Decoder{}.feed(frame);
+                if (decoded && !decoded->empty() && ((*decoded)[0].command == "SUBSCRIBE" ||
+                    (*decoded)[0].command == "UNSUBSCRIBE")) continue;
+                outbound.push_back(std::move(frame));
+            }
+            state->outbound.clear();
+        }
+        if (!connect || !send_all(fd, *connect)) {
+            ::close(fd);
+            std::unique_lock lock(state->mutex);
+            state->wakeup.wait_for(lock, stop, config_.reconnect_delay, [] { return false; });
+            continue;
+        }
+        broker_decoder = Decoder{};
+        bool connected = true;
+        for (const auto& frame : subscriptions) connected = connected && send_all(fd, frame);
+        for (const auto& frame : outbound) connected = connected && send_all(fd, frame);
+
+        while (connected && !stop.stop_requested() && state->handle.active()) {
+            {
+                std::deque<std::string> pending;
+                {
+                    std::lock_guard lock(state->mutex);
+                    pending.swap(state->outbound);
+                }
+                for (const auto& frame : pending) {
+                    if (!send_all(fd, frame)) { connected = false; break; }
+                }
+            }
+            if (!connected) break;
+            fd_set readable;
+            FD_ZERO(&readable);
+            FD_SET(fd, &readable);
+            timeval timeout{.tv_sec = 0, .tv_usec = 100'000};
+            const int ready = ::select(fd + 1, &readable, nullptr, nullptr, &timeout);
+            if (ready < 0) { connected = false; break; }
+            if (ready == 0) continue;
+            char buffer[8192];
+            const auto read = ::recv(fd, buffer, sizeof(buffer), 0);
+            if (read <= 0) { connected = false; break; }
+            const auto frames = broker_decoder.feed(std::string_view(buffer, static_cast<std::size_t>(read)));
+            if (!frames) { connected = false; break; }
+            for (const auto& frame : *frames) {
+                if (!state->handle.send_text(serialize(frame))) { connected = false; break; }
+            }
+        }
+        ::close(fd);
+    }
 }
 
 } // namespace novaboot::messaging::stomp

@@ -420,6 +420,17 @@ public:
         return websocket(path, endpoint.websocket_handler());
     }
 
+    /// Register an optional external STOMP broker relay on WebSocket.
+    Server& stomp(std::string_view path, messaging::stomp::RelayEndpoint& endpoint) {
+        shutdown_coordinator_.add(core::ShutdownParticipant{
+            .name = "stomp-relay:" + std::string(path),
+            .stop_accepting = [&endpoint] { endpoint.begin_shutdown(); },
+            .drained = [&endpoint] { return endpoint.drained(); },
+            .force_close = [&endpoint] { endpoint.force_shutdown(); },
+        });
+        return websocket(path, endpoint.websocket_handler());
+    }
+
     template<typename Ex, typename Handler>
     Server& on_exception(Handler&& handler) {
         router_.on_exception<Ex>(std::forward<Handler>(handler));

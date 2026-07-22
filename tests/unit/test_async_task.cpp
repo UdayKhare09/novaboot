@@ -3,6 +3,7 @@
 #include <stdexcept>
 
 #include "novaboot/async/task.h"
+#include "novaboot/async/cancellation.h"
 
 namespace {
 
@@ -58,4 +59,18 @@ TEST(AsyncTaskTest, NestedExceptionsPropagateAfterChildFinalSuspension) {
     auto task = nested_failure();
     ASSERT_TRUE(task.is_ready());
     EXPECT_THROW((void)task.await_resume(), std::runtime_error);
+}
+
+TEST(AsyncCancellationTest, CallbackRunsOnceAndRegistrationCanBeRemoved) {
+    novaboot::async::CancellationSource source;
+    int calls = 0;
+    auto active = source.token().on_cancel([&] { ++calls; });
+    auto removed = source.token().on_cancel([&] { ++calls; });
+    removed.reset();
+
+    source.cancel();
+    source.cancel();
+
+    EXPECT_TRUE(source.token().cancelled());
+    EXPECT_EQ(calls, 1);
 }

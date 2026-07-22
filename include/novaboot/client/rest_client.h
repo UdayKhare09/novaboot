@@ -57,6 +57,10 @@ public:
 /// Thread-safety: NOT thread-safe. Must be used from the EventLoop thread only.
 class RestClient {
 public:
+    /// Pull-based request body producer. Each invocation returns the next
+    /// non-empty chunk; `std::nullopt` marks end-of-body. The producer runs on
+    /// the client's EventLoop thread, so it must be non-blocking.
+    using BodyChunkProvider = std::function<std::optional<std::string>()>;
     /// An opt-in policy consulted after a completed response. `attempt` starts
     /// at one for the initial request. Callers are responsible for allowing
     /// retries only for idempotent requests or requests protected by their own
@@ -151,22 +155,45 @@ public:
                                 std::string_view body,
                                 const http3::HeaderMap& headers = {},
                                 const async::CancellationToken& cancellation = {});
+    http3::ClientResponse post_stream(std::string_view path, BodyChunkProvider body,
+                                      const http3::HeaderMap& headers = {},
+                                      const async::CancellationToken& cancellation = {});
+    http3::ClientResponse put_stream(std::string_view path, BodyChunkProvider body,
+                                     const http3::HeaderMap& headers = {},
+                                     const async::CancellationToken& cancellation = {});
 
     // ─── Async / coroutine API ───────────────────────────────────────────
     /// Returns a Task<ClientResponse> that can be co_await-ed.
     async::Task<http3::ClientResponse> async_get(
-        std::string_view path, const http3::HeaderMap& headers = {});
+        std::string_view path, const http3::HeaderMap& headers = {},
+        const async::CancellationToken& cancellation = {});
     async::Task<http3::ClientResponse> async_post(
         std::string_view path, std::string_view body,
-        const http3::HeaderMap& headers = {});
+        const http3::HeaderMap& headers = {},
+        const async::CancellationToken& cancellation = {});
     async::Task<http3::ClientResponse> async_put(
         std::string_view path, std::string_view body,
-        const http3::HeaderMap& headers = {});
+        const http3::HeaderMap& headers = {},
+        const async::CancellationToken& cancellation = {});
     async::Task<http3::ClientResponse> async_del(
-        std::string_view path, const http3::HeaderMap& headers = {});
+        std::string_view path, const http3::HeaderMap& headers = {},
+        const async::CancellationToken& cancellation = {});
     async::Task<http3::ClientResponse> async_patch(
         std::string_view path, std::string_view body,
-        const http3::HeaderMap& headers = {});
+        const http3::HeaderMap& headers = {},
+        const async::CancellationToken& cancellation = {});
+
+    /// Stream a request body without first materialising it as one string.
+    /// HTTP/1.1 uses chunked transfer encoding; HTTP/2 and HTTP/3 feed the
+    /// provider to their native data providers.
+    async::Task<http3::ClientResponse> async_post_stream(
+        std::string_view path, BodyChunkProvider body,
+        const http3::HeaderMap& headers = {},
+        const async::CancellationToken& cancellation = {});
+    async::Task<http3::ClientResponse> async_put_stream(
+        std::string_view path, BodyChunkProvider body,
+        const http3::HeaderMap& headers = {},
+        const async::CancellationToken& cancellation = {});
 
     /// True if the QUIC connection is established and ready
     [[nodiscard]] bool is_connected() const noexcept;
@@ -175,10 +202,20 @@ public:
     void wait_for_connection(const async::CancellationToken& cancellation = {});
 
 private:
+    struct CancellationDispatch;
     struct H2PendingStream {
         http3::ClientResponse response;
         std::coroutine_handle<> coroutine;
+        std::shared_ptr<void> body_source;
+        async::CancellationRegistration cancellation_registration;
         bool complete = false;
+        bool cancelled = false;
+    };
+    struct H3PendingStream {
+        std::optional<http3::ClientResponse> response;
+        std::coroutine_handle<> coroutine;
+        async::CancellationRegistration cancellation_registration;
+        bool cancelled = false;
     };
 
     RestClient();
@@ -213,12 +250,19 @@ private:
         std::string_view method,
         std::string_view path,
         std::string_view body,
-        const http3::HeaderMap& headers);
+        const http3::HeaderMap& headers,
+        const async::CancellationToken& cancellation = {},
+        BodyChunkProvider body_stream = {});
     async::Task<http3::ClientResponse> async_request_with_retry(
         std::string_view method,
         std::string_view path,
         std::string_view body,
-        const http3::HeaderMap& headers);
+        const http3::HeaderMap& headers,
+        const async::CancellationToken& cancellation = {},
+        BodyChunkProvider body_stream = {});
+
+    void cancel_h2_stream(int32_t stream_id);
+    void cancel_h3_stream(int64_t stream_id);
 
     /// Blocking wrapper: runs the event loop until the Task resolves.
     http3::ClientResponse sync_execute(async::Task<http3::ClientResponse> task,
@@ -231,14 +275,13 @@ private:
 
     Config            cfg_;
     core::EventLoop*  event_loop_ = nullptr;
+    std::shared_ptr<CancellationDispatch> cancellation_dispatcher_;
     std::optional<quic::TlsContext>  tls_ctx_;
 
     // HTTP/3 (QUIC) variables
     std::unique_ptr<net::UdpSocket>              socket_;
     std::unique_ptr<quic::QuicClientConnection>  conn_;
-    std::unordered_map<int64_t,
-        std::pair<std::optional<http3::ClientResponse>,
-                  std::coroutine_handle<>>> pending_;
+    std::unordered_map<int64_t, H3PendingStream> pending_;
 
     // HTTP/1.1 and HTTP/2 (TCP/TLS) variables
     int                                          tcp_fd_ = -1;

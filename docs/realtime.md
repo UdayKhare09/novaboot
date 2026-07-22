@@ -178,9 +178,29 @@ When TLS is terminated by a proxy or load balancer, configure it to:
 - use sticky routing if application state is held only in a process-local
   `SessionRegistry` or `SimpleBroker`.
 
-The in-process broker does not span server processes. Use an external relay
-only when a deployment needs cross-process broker state; that relay is not
-part of NovaBoot yet.
+### External broker relay
+
+`stomp::RelayEndpoint` is the optional bridge for a STOMP 1.2 TCP broker such
+as a broker running on an internal Docker network. It creates one upstream
+connection per browser WebSocket session, preserves STOMP headers, receipts,
+and ACK/NACK frames, and reconnects with the configured delay. After a lost
+upstream connection it replays the client CONNECT frame and its active
+subscriptions; it does not replay `SEND`, because a broker may have processed
+it before the disconnect.
+
+```cpp
+stomp::RelayEndpoint relay({
+    .host = "rabbitmq",
+    .port = 61613,
+    .reconnect_delay = std::chrono::seconds{1},
+});
+app->stomp("/ws/stomp", relay);
+```
+
+This baseline deliberately uses plain broker TCP so it adds no client TLS
+dependency. Put the broker leg on a private network or terminate TLS with a
+broker-facing proxy. A relay is transport-only: it does not implement local
+topics, persistence, transactions, or destination rewriting.
 
 The runnable reference is `examples/websocket_chat`: `/` is raw WebSocket
 chat and `/stomp.html` is STOMP chat using `/app/chat.send`.

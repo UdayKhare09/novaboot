@@ -283,6 +283,18 @@ int QuicClientConnection::on_write() {
     return 0;
 }
 
+int QuicClientConnection::cancel_stream(int64_t stream_id, uint64_t app_error_code) {
+    if (!conn_ || is_closed() || is_draining()) return 0;
+    if (http3_session_) http3_session_->cancel_stream(stream_id);
+    const int rv = ngtcp2_conn_shutdown_stream(conn_, 0, stream_id, app_error_code);
+    if (rv != 0) {
+        spdlog::debug("ngtcp2_conn_shutdown_stream (client) error: {}",
+                      ngtcp2_strerror(rv));
+        return rv;
+    }
+    return on_write();
+}
+
 int QuicClientConnection::handle_expiry(ngtcp2_tstamp timestamp) {
     int rv = ngtcp2_conn_handle_expiry(conn_, timestamp);
     if (rv != 0) {

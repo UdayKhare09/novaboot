@@ -90,6 +90,7 @@ void Http1Session::reset() {
     current_request_ = http3::Request();
     current_request_.set_peer_address(peer_address_);
     content_length_ = 0;
+    chunked_body_ = false;
 }
 
 std::optional<Http1Session::AcceptedUpgrade> Http1Session::take_upgrade_handler() {
@@ -209,7 +210,8 @@ std::expected<std::vector<uint8_t>, int> Http1Session::feed_data(
                             break;
                         }
                     }
-                    state_ = (content_length_ > 0) ? ParseState::Body : ParseState::Complete;
+                    state_ = (content_length_ > 0 || chunked_body_)
+                        ? ParseState::Body : ParseState::Complete;
                     break;
                 }
 
@@ -235,6 +237,10 @@ std::expected<std::vector<uint8_t>, int> Http1Session::feed_data(
                         state_ = ParseState::Error;
                         return std::unexpected(-3);
                     }
+                } else if (name_lower == "transfer-encoding") {
+                    std::string value_lower(value);
+                    std::transform(value_lower.begin(), value_lower.end(), value_lower.begin(), ::tolower);
+                    if (value_lower == "chunked") chunked_body_ = true;
                 } else if (name_lower == "connection") {
                     std::string value_lower(value);
                     std::transform(value_lower.begin(), value_lower.end(), value_lower.begin(), ::tolower);
@@ -254,6 +260,56 @@ std::expected<std::vector<uint8_t>, int> Http1Session::feed_data(
         if (upgraded_) break;
 
         if (state_ == ParseState::Body) {
+            if (chunked_body_) {
+                bool complete = false;
+                while (parse_offset_ < buffer_.size()) {
+                    const auto line = std::search(
+                        buffer_.begin() + static_cast<std::vector<uint8_t>::difference_type>(parse_offset_),
+                        buffer_.end(), "\r\n", "\r\n" + 2);
+                    if (line == buffer_.end()) break;
+                    const auto line_end = static_cast<std::size_t>(line - buffer_.begin());
+                    std::string size_text(reinterpret_cast<const char*>(buffer_.data() + parse_offset_),
+                                          line_end - parse_offset_);
+                    if (const auto extension = size_text.find(';'); extension != std::string::npos) {
+                        size_text.resize(extension);
+                    }
+                    std::size_t chunk_size = 0;
+                    try {
+                        chunk_size = std::stoull(size_text, nullptr, 16);
+                    } catch (...) {
+                        spdlog::warn("Invalid HTTP/1.1 chunk size");
+                        state_ = ParseState::Error;
+                        return std::unexpected(-4);
+                    }
+                    const auto data_start = line_end + 2U;
+                    if (chunk_size == 0U) {
+                        parse_offset_ = data_start;
+                        // Consume zero or more trailer fields, ending with an
+                        // empty line. Trailer fields are intentionally not
+                        // promoted into ordinary request headers.
+                        while (true) {
+                            const auto trailer = get_line(buffer_, parse_offset_);
+                            if (!trailer) break;
+                            if (trailer->empty()) {
+                                current_request_.mark_body_complete();
+                                state_ = ParseState::Complete;
+                                complete = true;
+                                break;
+                            }
+                        }
+                        break;
+                    }
+                    if (buffer_.size() < data_start + chunk_size + 2U) break;
+                    if (buffer_[data_start + chunk_size] != '\r' ||
+                        buffer_[data_start + chunk_size + 1U] != '\n') {
+                        state_ = ParseState::Error;
+                        return std::unexpected(-5);
+                    }
+                    current_request_.append_body(buffer_.data() + data_start, chunk_size);
+                    parse_offset_ = data_start + chunk_size + 2U;
+                }
+                if (!complete) break;
+            } else {
             std::size_t available = buffer_.size() - parse_offset_;
             if (available < content_length_) {
                 break; // Need more body data
@@ -263,6 +319,7 @@ std::expected<std::vector<uint8_t>, int> Http1Session::feed_data(
             parse_offset_ += content_length_;
             current_request_.mark_body_complete();
             state_ = ParseState::Complete;
+            }
         }
 
         if (state_ == ParseState::Complete) {

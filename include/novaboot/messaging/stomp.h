@@ -3,6 +3,7 @@
 #include <expected>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -206,6 +207,45 @@ private:
     std::shared_ptr<observability::MeterRegistry> meters_;
     std::atomic_bool accepting_{true};
     std::jthread heartbeat_thread_;
+};
+
+/// Optional STOMP 1.2 broker relay. Each browser WebSocket session gets one
+/// upstream TCP connection; frames, receipts and acknowledgements are passed
+/// through unchanged. On a dropped upstream connection the relay reconnects
+/// and replays the client's CONNECT and active SUBSCRIBE frames. TLS belongs
+/// at the broker-facing proxy for this intentionally dependency-free baseline.
+class RelayEndpoint {
+public:
+    struct Config {
+        std::string host;
+        std::uint16_t port = 61613;
+        std::chrono::milliseconds reconnect_delay{1'000};
+        std::size_t max_queued_frames = 256;
+        std::function<bool(const websocket::Session&, const Frame&)> interceptor;
+    };
+
+    explicit RelayEndpoint(Config config);
+    ~RelayEndpoint();
+    RelayEndpoint(const RelayEndpoint&) = delete;
+    RelayEndpoint& operator=(const RelayEndpoint&) = delete;
+
+    [[nodiscard]] websocket::Handler websocket_handler();
+    void begin_shutdown();
+    [[nodiscard]] bool drained() const;
+    void force_shutdown();
+
+private:
+    struct ConnectionState;
+    void on_open(websocket::Session& session);
+    void on_message(websocket::Session& session, const websocket::Message& message);
+    void on_close(websocket::Session& session, const websocket::CloseInfo& close);
+    void relay_loop(const std::shared_ptr<ConnectionState>& state,
+                    std::stop_token stop);
+
+    Config config_;
+    mutable std::mutex mutex_;
+    std::unordered_map<websocket::SessionHandle::Id, std::shared_ptr<ConnectionState>> connections_;
+    std::atomic_bool accepting_{true};
 };
 
 } // namespace novaboot::messaging::stomp

@@ -117,6 +117,7 @@ private:
     // Currently parsing request
     http3::Request current_request_;
     std::size_t content_length_ = 0;
+    bool chunked_body_ = false;
     bool keep_alive_ = true;
     bool upgraded_ = false;
     std::optional<AcceptedUpgrade> upgraded_handler_;

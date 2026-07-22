@@ -141,6 +141,26 @@ TEST_F(ClientProtocolsTest, HTTP11PostRequest) {
     EXPECT_EQ(*header_val, "novaboot-test");
 }
 
+TEST_F(ClientProtocolsTest, HTTP11StreamsChunkedRequestBody) {
+    RestClient::Config cfg;
+    cfg.host = "localhost";
+    cfg.ip = "127.0.0.1";
+    cfg.port = 4437;
+    cfg.verify_ssl = false;
+    cfg.protocol = Protocol::HTTP1_1;
+
+    auto client = RestClient::create(cfg, *event_loop);
+    std::vector<std::string> chunks{"chunked ", "upload"};
+    const auto response = client->post_stream("/api/echo",
+        [chunks = std::move(chunks), index = std::size_t{0}]() mutable
+            -> std::optional<std::string> {
+            return index < chunks.size() ? std::optional{chunks[index++]}
+                                         : std::nullopt;
+        });
+    EXPECT_EQ(response.status_code, 200);
+    EXPECT_EQ(response.body, "chunked upload");
+}
+
 TEST_F(ClientProtocolsTest, HTTP11ClientReusesAConnectionForSequentialRequests) {
     RestClient::Config cfg;
     cfg.host = "localhost";
@@ -264,8 +284,10 @@ TEST_F(ClientProtocolsTest, CancellationTokenSafelyStopsASynchronousRequest) {
         cancellation.cancel();
     });
 
+    const auto started = std::chrono::steady_clock::now();
     EXPECT_THROW((void)client->get("/api/slow", {}, cancellation.token()),
                  RequestCancelled);
+    EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::milliseconds{100});
 }
 
 TEST_F(ClientProtocolsTest, HTTP2PostRequest) {

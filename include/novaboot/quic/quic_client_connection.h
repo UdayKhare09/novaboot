@@ -79,6 +79,10 @@ public:
 
     void close(uint64_t app_error_code = 0);
 
+    /// Reset one bidirectional application stream without disturbing other
+    /// requests sharing this QUIC connection.
+    int cancel_stream(int64_t stream_id, uint64_t app_error_code = 0x010c);
+
     [[nodiscard]] ngtcp2_tstamp get_expiry() const noexcept;
     static ngtcp2_tstamp        timestamp_now() noexcept;
 

@@ -37,8 +37,25 @@ auto client = RestClient::builder()
 
 The predicate is called only after a completed response. It must allow only
 safe requests—normally idempotent methods, or writes guarded by an application
-idempotency key. Streaming request bodies are not implemented yet, so retries
-do not claim streaming replay semantics.
+idempotency key. Pull-based streaming bodies are deliberately not replayed:
+the producer may already have consumed a non-repeatable upload.
+
+## Streaming uploads
+
+`async_post_stream` and `async_put_stream` pull non-empty chunks on the
+client EventLoop thread; return `std::nullopt` to finish the body. HTTP/1.1
+uses chunked transfer encoding, while HTTP/2 and HTTP/3 feed their native
+stream data providers without first joining chunks into one request string.
+
+```cpp
+std::vector<std::string> chunks{"first ", "second"};
+auto next = [chunks = std::move(chunks), index = std::size_t{0}]() mutable
+    -> std::optional<std::string> {
+    return index < chunks.size() ? std::optional{chunks[index++]}
+                                 : std::nullopt;
+};
+auto response = co_await client->async_post_stream("/import", std::move(next));
+```
 
 ## Cancellation
 
@@ -51,7 +68,7 @@ auto response = client->get("/inventory", {}, cancellation.token());
 ```
 
 Cancellation causes `RequestCancelled` and safely completes pending callbacks
-before the request task is destroyed. A `RestClient` owns one transport, so
-cancelling one active request closes that transport and invalidates any other
-active streams on the same client; use one client per independently cancellable
-operation until stream-scoped cancellation is available.
+before the request task is destroyed. HTTP/2 sends `RST_STREAM(CANCEL)` and
+HTTP/3 resets only the affected QUIC stream; other multiplexed requests remain
+connected. HTTP/1.1 has no stream reset, so it closes and reconnects its single
+connection. The same token can be passed to any async request overload.

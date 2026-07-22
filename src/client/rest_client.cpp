@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <chrono>
 #include <format>
+#include <mutex>
 #include <stdexcept>
 #include <thread>
 
@@ -25,6 +26,11 @@
 #include "novaboot/router/json.h"
 
 namespace novaboot::client {
+
+struct RestClient::CancellationDispatch {
+    std::mutex mutex;
+    RestClient* client = nullptr;
+};
 
 namespace {
 
@@ -58,9 +64,16 @@ std::string resolve_host(const std::string& host, uint16_t port) {
 
 } // anonymous namespace
 
-RestClient::RestClient() = default;
+RestClient::RestClient()
+    : cancellation_dispatcher_(std::make_shared<CancellationDispatch>()) {
+    cancellation_dispatcher_->client = this;
+}
 
 RestClient::~RestClient() {
+    if (cancellation_dispatcher_) {
+        std::lock_guard lock(cancellation_dispatcher_->mutex);
+        cancellation_dispatcher_->client = nullptr;
+    }
     if (event_loop_ && reconnect_timer_) {
         event_loop_->cancel_timer(reconnect_timer_);
     }
@@ -155,8 +168,8 @@ void RestClient::do_connect() {
                 // Response arrived — find the waiting coroutine
                 auto it = pending_.find(stream_id);
                 if (it != pending_.end()) {
-                    it->second.first = std::move(resp);
-                    auto handle = it->second.second;
+                    it->second.response = std::move(resp);
+                    auto handle = it->second.coroutine;
                     if (handle) handle.resume(); // wake up the co_await
                 }
             });
@@ -572,6 +585,38 @@ int RestClient::h2_on_stream_close_cb(nghttp2_session* /*session*/, int32_t stre
     return 0;
 }
 
+void RestClient::cancel_h2_stream(int32_t stream_id) {
+    const auto it = h2_pending_.find(stream_id);
+    if (it == h2_pending_.end() || it->second.complete) return;
+
+    it->second.cancelled = true;
+    it->second.complete = true;
+    nghttp2_submit_rst_stream(h2_session_, NGHTTP2_FLAG_NONE, stream_id,
+                              NGHTTP2_CANCEL);
+    const uint8_t* out_data = nullptr;
+    while (h2_session_) {
+        const ssize_t send_rv = nghttp2_session_mem_send2(h2_session_, &out_data);
+        if (send_rv <= 0) break;
+        auto enc = tls_stream_->encrypt_app_data(
+            std::span<const uint8_t>(out_data,
+                static_cast<size_t>(send_rv)));
+        if (enc) tcp_write_buf_.insert(tcp_write_buf_.end(), enc->begin(), enc->end());
+    }
+    write_pending_tcp_data();
+    const auto handle = it->second.coroutine;
+    if (handle) handle.resume();
+}
+
+void RestClient::cancel_h3_stream(int64_t stream_id) {
+    const auto it = pending_.find(stream_id);
+    if (it == pending_.end() || it->second.response) return;
+    it->second.cancelled = true;
+    it->second.response = http3::ClientResponse{0, {}, "cancelled"};
+    if (conn_) conn_->cancel_stream(stream_id);
+    const auto handle = it->second.coroutine;
+    if (handle) handle.resume();
+}
+
 void RestClient::on_packet_received(net::IncomingPacket&& pkt) {
     if (!conn_) return;
     conn_->on_read(pkt, quic::QuicClientConnection::timestamp_now());
@@ -640,8 +685,8 @@ void RestClient::complete_pending_with_error(std::string_view message) {
     pending_handles.reserve(pending_.size() + h2_pending_.size());
     for (auto& [stream_id, entry] : pending_) {
         static_cast<void>(stream_id);
-        entry.first = http3::ClientResponse{0, {}, std::string(message)};
-        if (entry.second) pending_handles.push_back(entry.second);
+        entry.response = http3::ClientResponse{0, {}, std::string(message)};
+        if (entry.coroutine) pending_handles.push_back(entry.coroutine);
     }
 
     for (auto& [stream_id, entry] : h2_pending_) {
@@ -740,7 +785,10 @@ async::Task<http3::ClientResponse> RestClient::async_request(
     std::string_view method,
     std::string_view path,
     std::string_view body,
-    const http3::HeaderMap& headers) {
+    const http3::HeaderMap& headers,
+    const async::CancellationToken& cancellation,
+    BodyChunkProvider body_stream) {
+    if (cancellation.cancelled()) throw RequestCancelled();
     // Ensure we have a live connection — wait/handshake if not ready
     if (!is_connected()) {
         try {
@@ -765,12 +813,23 @@ async::Task<http3::ClientResponse> RestClient::async_request(
             }
         }
 
+        const bool is_streaming_body = static_cast<bool>(body_stream);
         if (!body.empty() && !has_content_length) {
             req += std::format("Content-Length: {}\r\n", body.size());
+        } else if (is_streaming_body && !has_content_length) {
+            req += "Transfer-Encoding: chunked\r\n";
         }
         req += "Connection: keep-alive\r\n\r\n";
         if (!body.empty()) {
             req += body;
+        } else if (is_streaming_body) {
+            while (auto chunk = body_stream()) {
+                if (chunk->empty()) continue;
+                req += std::format("{:X}\r\n", chunk->size());
+                req += *chunk;
+                req += "\r\n";
+            }
+            req += "0\r\n\r\n";
         }
 
         auto enc_opt = tls_stream_->encrypt_app_data(std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(req.data()), req.size()));
@@ -789,6 +848,16 @@ async::Task<http3::ClientResponse> RestClient::async_request(
             event_loop_->modify_fd(tcp_fd_, flags);
         }
 
+        const auto dispatch = std::weak_ptr<CancellationDispatch>(cancellation_dispatcher_);
+        auto cancellation_registration = cancellation.on_cancel([loop = event_loop_, dispatch] {
+            if (!loop) return;
+            loop->post([dispatch] {
+                if (const auto owner = dispatch.lock()) {
+                    std::lock_guard lock(owner->mutex);
+                    if (owner->client) owner->client->on_disconnect();
+                }
+            });
+        });
         co_await async::EventLoopSuspend{&pending_tcp_handle_};
 
         if (tcp_response_) {
@@ -826,9 +895,15 @@ async::Task<http3::ClientResponse> RestClient::async_request(
         }
 
         struct RequestBodySource {
-            std::string_view body;
+            std::string data;
             size_t offset = 0;
-        } body_source{body, 0};
+            BodyChunkProvider provider;
+            bool finished = false;
+        };
+        auto body_source = std::make_shared<RequestBodySource>();
+        body_source->data = std::string(body);
+        body_source->provider = std::move(body_stream);
+        body_source->finished = !body_source->provider;
 
         nghttp2_data_provider2 data_prd;
 
@@ -836,24 +911,33 @@ async::Task<http3::ClientResponse> RestClient::async_request(
                                     uint8_t* buf, size_t length, uint32_t* data_flags,
                                     nghttp2_data_source* source, void* /*user_data*/) -> nghttp2_ssize {
             auto* src = static_cast<RequestBodySource*>(source->ptr);
-            size_t available = src->body.size() - src->offset;
+            if (src->offset >= src->data.size() && !src->finished) {
+                src->data.clear();
+                src->offset = 0;
+                if (auto chunk = src->provider(); chunk && !chunk->empty()) {
+                    src->data = std::move(*chunk);
+                } else {
+                    src->finished = true;
+                }
+            }
+            size_t available = src->data.size() - src->offset;
             size_t to_write = std::min(length, available);
             if (to_write > 0) {
-                std::memcpy(buf, src->body.data() + src->offset, to_write);
+                std::memcpy(buf, src->data.data() + src->offset, to_write);
                 src->offset += to_write;
             }
-            if (src->offset >= src->body.size()) {
+            if (src->offset >= src->data.size() && src->finished) {
                 *data_flags |= NGHTTP2_DATA_FLAG_EOF;
             }
             return static_cast<nghttp2_ssize>(to_write);
         };
 
-        data_prd.source.ptr = &body_source;
+        data_prd.source.ptr = body_source.get();
         data_prd.read_callback = h2_client_read_cb;
 
         int32_t stream_id = nghttp2_submit_request2(
             h2_session_, nullptr, nvs.data(), nvs.size(),
-            body.empty() ? nullptr : &data_prd, nullptr);
+            (body.empty() && !body_source->provider) ? nullptr : &data_prd, nullptr);
 
         if (stream_id < 0) {
             throw ClientError(std::format("RestClient: failed to submit H2 request: {}", nghttp2_strerror(stream_id)));
@@ -882,12 +966,26 @@ async::Task<http3::ClientResponse> RestClient::async_request(
             event_loop_->modify_fd(tcp_fd_, flags);
         }
 
-        co_await async::EventLoopSuspend{&h2_pending_[stream_id].coroutine};
+        auto& pending = h2_pending_[stream_id];
+        pending.body_source = body_source;
+        const auto dispatch = std::weak_ptr<CancellationDispatch>(cancellation_dispatcher_);
+        pending.cancellation_registration = cancellation.on_cancel([loop = event_loop_, dispatch, stream_id] {
+            if (!loop) return;
+            loop->post([dispatch, stream_id] {
+                if (const auto owner = dispatch.lock()) {
+                    std::lock_guard lock(owner->mutex);
+                    if (owner->client) owner->client->cancel_h2_stream(stream_id);
+                }
+            });
+        });
+        co_await async::EventLoopSuspend{&pending.coroutine};
 
         auto it = h2_pending_.find(stream_id);
         if (it != h2_pending_.end() && it->second.complete) {
+            const bool cancelled = it->second.cancelled;
             auto resp = std::move(it->second.response);
             h2_pending_.erase(it);
+            if (cancelled) throw RequestCancelled();
             co_return resp;
         }
 
@@ -901,7 +999,9 @@ async::Task<http3::ClientResponse> RestClient::async_request(
     }
 
     std::string authority = cfg_.host + ":" + std::to_string(cfg_.port);
-    int64_t stream_id = h3->submit_request(method, path, authority, body, headers);
+    int64_t stream_id = body_stream
+        ? h3->submit_streaming_request(method, path, authority, std::move(body_stream), headers)
+        : h3->submit_request(method, path, authority, body, headers);
     if (stream_id < 0) {
         throw ClientError(
             std::format("RestClient: failed to submit {} {}", method, path));
@@ -909,12 +1009,25 @@ async::Task<http3::ClientResponse> RestClient::async_request(
 
     conn_->on_write();
 
-    co_await async::EventLoopSuspend{&pending_[stream_id].second};
+    auto& pending = pending_[stream_id];
+    const auto dispatch = std::weak_ptr<CancellationDispatch>(cancellation_dispatcher_);
+    pending.cancellation_registration = cancellation.on_cancel([loop = event_loop_, dispatch, stream_id] {
+        if (!loop) return;
+        loop->post([dispatch, stream_id] {
+            if (const auto owner = dispatch.lock()) {
+                std::lock_guard lock(owner->mutex);
+                if (owner->client) owner->client->cancel_h3_stream(stream_id);
+            }
+        });
+    });
+    co_await async::EventLoopSuspend{&pending.coroutine};
 
     auto it = pending_.find(stream_id);
-    if (it != pending_.end() && it->second.first) {
-        auto resp = std::move(*it->second.first);
+    if (it != pending_.end() && it->second.response) {
+        const bool cancelled = it->second.cancelled;
+        auto resp = std::move(*it->second.response);
         pending_.erase(it);
+        if (cancelled) throw RequestCancelled();
         co_return resp;
     }
 
@@ -925,7 +1038,9 @@ async::Task<http3::ClientResponse> RestClient::async_request_with_retry(
     std::string_view method,
     std::string_view path,
     std::string_view body,
-    const http3::HeaderMap& headers) {
+    const http3::HeaderMap& headers,
+    const async::CancellationToken& cancellation,
+    BodyChunkProvider body_stream) {
     // A caller-supplied trace context is authoritative. Otherwise establish it
     // once for the logical request so retries remain part of the same trace.
     auto request_headers = headers;
@@ -936,7 +1051,14 @@ async::Task<http3::ClientResponse> RestClient::async_request_with_retry(
 
     const int max_attempts = std::max(1, cfg_.max_request_attempts);
     for (int attempt = 1; attempt <= max_attempts; ++attempt) {
-        auto response = co_await async_request(method, path, body, request_headers);
+        // A pull producer is intentionally never replayed: retrying it could
+        // duplicate an already consumed upload. String bodies remain safe for
+        // a caller-approved retry policy.
+        auto response = co_await async_request(method, path, body, request_headers,
+                                               cancellation,
+                                               attempt == 1 ? std::move(body_stream)
+                                                            : BodyChunkProvider{});
+        if (cancellation.cancelled()) throw RequestCancelled();
         if (attempt == max_attempts || !cfg_.should_retry ||
             !cfg_.should_retry(method, response, attempt)) {
             co_return response;
@@ -948,31 +1070,47 @@ async::Task<http3::ClientResponse> RestClient::async_request_with_retry(
 // ─── Async API ────────────────────────────────────────────────────────────────
 
 async::Task<http3::ClientResponse> RestClient::async_get(
-    std::string_view path, const http3::HeaderMap& headers) {
-    return async_request_with_retry("GET", path, {}, headers);
+    std::string_view path, const http3::HeaderMap& headers,
+    const async::CancellationToken& cancellation) {
+    return async_request_with_retry("GET", path, {}, headers, cancellation);
 }
 
 async::Task<http3::ClientResponse> RestClient::async_post(
     std::string_view path, std::string_view body,
-    const http3::HeaderMap& headers) {
-    return async_request_with_retry("POST", path, body, headers);
+    const http3::HeaderMap& headers, const async::CancellationToken& cancellation) {
+    return async_request_with_retry("POST", path, body, headers, cancellation);
 }
 
 async::Task<http3::ClientResponse> RestClient::async_put(
     std::string_view path, std::string_view body,
-    const http3::HeaderMap& headers) {
-    return async_request_with_retry("PUT", path, body, headers);
+    const http3::HeaderMap& headers, const async::CancellationToken& cancellation) {
+    return async_request_with_retry("PUT", path, body, headers, cancellation);
 }
 
 async::Task<http3::ClientResponse> RestClient::async_del(
-    std::string_view path, const http3::HeaderMap& headers) {
-    return async_request_with_retry("DELETE", path, {}, headers);
+    std::string_view path, const http3::HeaderMap& headers,
+    const async::CancellationToken& cancellation) {
+    return async_request_with_retry("DELETE", path, {}, headers, cancellation);
 }
 
 async::Task<http3::ClientResponse> RestClient::async_patch(
     std::string_view path, std::string_view body,
-    const http3::HeaderMap& headers) {
-    return async_request_with_retry("PATCH", path, body, headers);
+    const http3::HeaderMap& headers, const async::CancellationToken& cancellation) {
+    return async_request_with_retry("PATCH", path, body, headers, cancellation);
+}
+
+async::Task<http3::ClientResponse> RestClient::async_post_stream(
+    std::string_view path, BodyChunkProvider body, const http3::HeaderMap& headers,
+    const async::CancellationToken& cancellation) {
+    return async_request_with_retry("POST", path, {}, headers, cancellation,
+                                    std::move(body));
+}
+
+async::Task<http3::ClientResponse> RestClient::async_put_stream(
+    std::string_view path, BodyChunkProvider body, const http3::HeaderMap& headers,
+    const async::CancellationToken& cancellation) {
+    return async_request_with_retry("PUT", path, {}, headers, cancellation,
+                                    std::move(body));
 }
 
 // ─── Synchronous API ─────────────────────────────────────────────────────────
@@ -981,25 +1119,13 @@ http3::ClientResponse RestClient::sync_execute(
     async::Task<http3::ClientResponse> task,
     const async::CancellationToken& cancellation) {
 
+    static_cast<void>(cancellation); // request-level subscriptions own cancellation
+
     auto deadline = std::chrono::steady_clock::now() +
                     std::chrono::milliseconds(cfg_.request_timeout_ms);
 
     while (!task.is_ready()) {
-        if (cancellation.cancelled()) {
-            // Completing all pending callbacks before `task` is destroyed
-            // prevents a later socket callback from resuming its coroutine.
-            // RestClient owns one transport, so this also invalidates any
-            // other active streams on this client instance.
-            on_disconnect();
-            throw RequestCancelled();
-        }
         event_loop_->run_once();
-        // An event-loop iteration may wait for I/O. Check again before
-        // accepting a response that arrived after another thread cancelled.
-        if (cancellation.cancelled()) {
-            on_disconnect();
-            throw RequestCancelled();
-        }
         if (std::chrono::steady_clock::now() >= deadline) {
             // Completing the suspended request before task destruction keeps
             // protocol callbacks from later resuming a dangling coroutine.
@@ -1017,7 +1143,7 @@ http3::ClientResponse RestClient::get(std::string_view path,
                                       const http3::HeaderMap& headers,
                                       const async::CancellationToken& cancellation) {
     wait_for_connection(cancellation);
-    return sync_execute(async_get(path, headers), cancellation);
+    return sync_execute(async_get(path, headers, cancellation), cancellation);
 }
 
 http3::ClientResponse RestClient::post(std::string_view path,
@@ -1025,7 +1151,7 @@ http3::ClientResponse RestClient::post(std::string_view path,
                                        const http3::HeaderMap& headers,
                                        const async::CancellationToken& cancellation) {
     wait_for_connection(cancellation);
-    return sync_execute(async_post(path, body, headers), cancellation);
+    return sync_execute(async_post(path, body, headers, cancellation), cancellation);
 }
 
 http3::ClientResponse RestClient::put(std::string_view path,
@@ -1033,14 +1159,14 @@ http3::ClientResponse RestClient::put(std::string_view path,
                                       const http3::HeaderMap& headers,
                                       const async::CancellationToken& cancellation) {
     wait_for_connection(cancellation);
-    return sync_execute(async_put(path, body, headers), cancellation);
+    return sync_execute(async_put(path, body, headers, cancellation), cancellation);
 }
 
 http3::ClientResponse RestClient::del(std::string_view path,
                                       const http3::HeaderMap& headers,
                                       const async::CancellationToken& cancellation) {
     wait_for_connection(cancellation);
-    return sync_execute(async_del(path, headers), cancellation);
+    return sync_execute(async_del(path, headers, cancellation), cancellation);
 }
 
 http3::ClientResponse RestClient::patch(std::string_view path,
@@ -1048,7 +1174,21 @@ http3::ClientResponse RestClient::patch(std::string_view path,
                                         const http3::HeaderMap& headers,
                                         const async::CancellationToken& cancellation) {
     wait_for_connection(cancellation);
-    return sync_execute(async_patch(path, body, headers), cancellation);
+    return sync_execute(async_patch(path, body, headers, cancellation), cancellation);
+}
+
+http3::ClientResponse RestClient::post_stream(
+    std::string_view path, BodyChunkProvider body, const http3::HeaderMap& headers,
+    const async::CancellationToken& cancellation) {
+    wait_for_connection(cancellation);
+    return sync_execute(async_post_stream(path, std::move(body), headers, cancellation), cancellation);
+}
+
+http3::ClientResponse RestClient::put_stream(
+    std::string_view path, BodyChunkProvider body, const http3::HeaderMap& headers,
+    const async::CancellationToken& cancellation) {
+    wait_for_connection(cancellation);
+    return sync_execute(async_put_stream(path, std::move(body), headers, cancellation), cancellation);
 }
 
 } // namespace novaboot::client

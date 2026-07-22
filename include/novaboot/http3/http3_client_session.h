@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -24,6 +25,8 @@ using ResponseHandler = std::function<void(int64_t stream_id, ClientResponse)>;
 /// Thread-safety: NOT thread-safe. Owned by a single QuicClientConnection.
 class Http3ClientSession {
 public:
+    /// Pull-based body source. Returning nullopt closes the request body.
+    using BodyChunkProvider = std::function<std::optional<std::string>()>;
     ~Http3ClientSession();
 
     Http3ClientSession(const Http3ClientSession&) = delete;
@@ -43,6 +46,14 @@ public:
                            std::string_view authority,
                            std::string_view body     = {},
                            const HeaderMap& headers  = {});
+    int64_t submit_streaming_request(std::string_view method,
+                                     std::string_view path,
+                                     std::string_view authority,
+                                     BodyChunkProvider body,
+                                     const HeaderMap& headers = {});
+
+    /// Forget local HTTP/3 state after the QUIC owner resets this stream.
+    void cancel_stream(int64_t stream_id);
 
     // ─── Called by QuicClientConnection ─────────────────────────────
     int on_stream_data(int64_t stream_id, uint64_t offset,
@@ -107,6 +118,8 @@ private:
     struct RequestBody {
         std::string data;
         size_t      provided = 0;
+        BodyChunkProvider provider;
+        bool finished = false;
     };
     std::unordered_map<int64_t, RequestBody> request_bodies_;
 };
