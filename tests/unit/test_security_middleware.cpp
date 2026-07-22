@@ -57,6 +57,7 @@ TEST(SecurityHeadersMiddlewareTest, AddsDefaultHeadersAfterHandler) {
     http3::Request req;
     http3::Response res;
     context::RequestContext ctx;
+    req.set_scheme("https");
 
     run_one(mw, req, res, ctx,
         [](http3::Request&, http3::Response& r, context::RequestContext&) {
@@ -66,8 +67,32 @@ TEST(SecurityHeadersMiddlewareTest, AddsDefaultHeadersAfterHandler) {
     EXPECT_EQ(res.headers().get("Strict-Transport-Security").value_or(""), "max-age=31536000; includeSubDomains");
     EXPECT_EQ(res.headers().get("X-Content-Type-Options").value_or(""), "nosniff");
     EXPECT_EQ(res.headers().get("X-Frame-Options").value_or(""), "DENY");
+    EXPECT_EQ(res.headers().get("X-XSS-Protection").value_or(""), "0");
     EXPECT_EQ(res.headers().get("Referrer-Policy").value_or(""), "no-referrer");
     EXPECT_TRUE(res.headers().get("Permissions-Policy").has_value());
+}
+
+TEST(SecurityHeadersMiddlewareTest, DoesNotEmitHstsOnAnInsecureOrUnknownScheme) {
+    SecurityHeadersMiddleware mw;
+    http3::Request req;
+    req.set_scheme("http");
+    http3::Response res;
+    context::RequestContext ctx;
+
+    run_one(mw, req, res, ctx,
+        [](http3::Request&, http3::Response&, context::RequestContext&) {});
+
+    EXPECT_FALSE(res.headers().get("Strict-Transport-Security").has_value());
+}
+
+TEST(SecurityHeadersMiddlewareTest, RejectsUnsafeConfiguredHeaderValues) {
+    auto invalid_value = SecurityHeadersMiddleware::Config{};
+    invalid_value.content_security_policy = "default-src 'self'\r\nX-Evil: true";
+    EXPECT_THROW(SecurityHeadersMiddleware(std::move(invalid_value)), std::invalid_argument);
+
+    auto invalid_name = SecurityHeadersMiddleware::Config{};
+    invalid_name.custom_headers.emplace("X-Good\nBad", "value");
+    EXPECT_THROW(SecurityHeadersMiddleware(std::move(invalid_name)), std::invalid_argument);
 }
 
 TEST(SecurityHeadersMiddlewareTest, DoesNotOverwriteHandlerHeader) {

@@ -255,12 +255,13 @@ int QuicConnection::on_write() {
                 if (nwrite == NGTCP2_ERR_WRITE_MORE) {
                     // Tell nghttp3 how much data was consumed
                     // ngtcp2 wants more data in the same packet
-                    http3_session_->add_write_offset(stream_id, static_cast<size_t>(pdatalen));
+                    if (stream_id >= 0 && pdatalen >= 0) {
+                        http3_session_->add_write_offset(stream_id, static_cast<size_t>(pdatalen));
+                    }
                     continue;
                 }
                 if (nwrite == NGTCP2_ERR_STREAM_NOT_FOUND ||
                     nwrite == NGTCP2_ERR_STREAM_SHUT_WR) {
-                    http3_session_->add_write_offset(stream_id, static_cast<size_t>(pdatalen));
                     continue;
                 }
                 spdlog::debug("ngtcp2_conn_writev_stream error: {}",
@@ -274,7 +275,10 @@ int QuicConnection::on_write() {
             }
 
             // Tell nghttp3 about written data
-            if (stream_id >= 0 && pdatalen > 0) {
+            // nghttp3 must also be told about a successful zero-byte FIN.
+            // Passing a negative pdatalen (which means no stream bytes were
+            // accepted) would corrupt nghttp3's output offset accounting.
+            if (stream_id >= 0 && pdatalen >= 0) {
                 http3_session_->add_write_offset(stream_id, static_cast<size_t>(pdatalen));
             }
 

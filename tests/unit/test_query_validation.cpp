@@ -222,4 +222,34 @@ TEST(QueryValidationTest, MalformedJsonBodyThrowsBadRequestError) {
         std::invalid_argument);
     EXPECT_FALSE(controller.called);
 }
+
+TEST(QueryValidationTest, JsonBindingErrorsNameTheNestedFieldPath) {
+    RichBodyController controller;
+    http3::Request req;
+    req.set_method("POST");
+    const char* payload = R"({
+        "title": "nested",
+        "settings": { "enabled": true, "levels": [1, "wrong"] },
+        "tags": ["json"]
+    })";
+    req.append_body(reinterpret_cast<const uint8_t*>(payload), strlen(payload));
+
+    http3::Response res;
+    context::RequestContext ctx;
+    using InvokerType = detail::Invoker<
+        RichBodyController,
+        ^^RichBodyController::post_rich,
+        void,
+        RichBodyDto
+    >;
+
+    try {
+        InvokerType::invoke(controller, &RichBodyController::post_rich, req, res, ctx);
+        FAIL() << "Expected JSON binding failure";
+    } catch (const novaboot::json::BindingException& error) {
+        ASSERT_EQ(error.errors().size(), 1U);
+        EXPECT_EQ(error.errors().front(), "$.settings.levels[1]: expected integer");
+    }
+    EXPECT_FALSE(controller.called);
+}
 #endif

@@ -71,7 +71,7 @@ novaboot::middleware::JwtMiddleware jwt({
     .allowed_algorithms = {novaboot::middleware::JwtAlgorithm::HS256},
     .hmac_secret = "read-from-secret-storage",
     .required_scopes = {"chat"},
-    .websocket_cookie_name = "nova_access", // optional browser credential
+    .jwt_cookie_name = "nova_access", // shared HTTP/WebSocket browser credential
 });
 
 websocket::Handler chat{
@@ -84,8 +84,9 @@ websocket::Handler chat{
 audience, scope, and required-claim policy as HTTP JWT middleware. Its
 verified JWT `sub` becomes `Session::principal()`. Combine it with an origin
 check when browser connections must be restricted to known origins. The
-authorizer accepts a Bearer token and, only when configured,
-`websocket_cookie_name`. It never accepts a JWT in the query string.
+authorizer accepts a Bearer token and, only when configured, a cookie: it uses
+`websocket_cookie_name` when present, otherwise `jwt_cookie_name`. It never
+accepts a JWT in the query string.
 
 The accepted principal is exposed as `Session::principal()` and is used by
 STOMP `/user/{principal}/...` deliveries. Do not use `allowed_origins = {"*"}`
@@ -131,6 +132,27 @@ supports STOMP `CONNECT`/`STOMP`, `SUBSCRIBE`, `SEND`, `UNSUBSCRIBE`, `ACK`,
 in-memory at-least-once delivery; they do not provide persistence,
 dead-lettering, delayed retries, or database transaction coupling.
 
+### STOMP authorization and errors
+
+Authenticate the WebSocket handshake first, then attach a local broker policy
+to the endpoint. `frame_authorizer` can require a handshake principal and
+restrict `SEND`/`SUBSCRIBE` destinations by prefix:
+
+```cpp
+stomp::Endpoint endpoint(broker, {
+    .interceptor = stomp::frame_authorizer({
+        .require_authenticated_principal = true,
+        .allowed_send_destinations = {"/app"},
+        .allowed_subscribe_destinations = {"/topic/public", "/user"},
+    }),
+});
+```
+
+A rejected frame sends STOMP `ERROR` and closes the session with WebSocket code
+`1002`. The local broker has no dead-letter queue, persistent delivery,
+delayed retry, or transactional broker/database coordination. Treat an ERROR
+or lost connection as an application-level delivery failure.
+
 ## Browser and proxy deployment
 
 Use `wss://` in production. The browser chooses the underlying HTTP version:
@@ -162,3 +184,37 @@ part of NovaBoot yet.
 
 The runnable reference is `examples/websocket_chat`: `/` is raw WebSocket
 chat and `/stomp.html` is STOMP chat using `/app/chat.send`.
+# WebSocket origin policy
+
+Browser-facing endpoints should set an explicit `Origin` policy before
+registration. It is separate from JWT authentication and uses exact origin
+matches:
+
+```cpp
+auto endpoint = novaboot::websocket::Handler{
+    .authorize = novaboot::websocket::origin_authorizer({"https://app.example.test"}),
+};
+app->websocket("/ws/chat", std::move(endpoint));
+```
+
+Missing `Origin` is rejected by default. Pass `true` as the second argument
+only when non-browser clients without an Origin header are intentionally
+supported.
+
+## Subprotocol negotiation
+
+An endpoint can declare server-preferred WebSocket subprotocols. NovaBoot
+selects the first server entry offered by the client and returns it in the
+HTTP/1.1 Upgrade or HTTP/2 extended-CONNECT response:
+
+```cpp
+novaboot::websocket::Handler endpoint{
+    .subprotocols = {"chat.v2", "chat.v1"},
+    .require_subprotocol = true,
+    .on_message = [](auto&, const auto&) {},
+};
+```
+
+With `require_subprotocol`, a client that does not offer a supported protocol
+receives `400`; otherwise the connection succeeds without a selected protocol.
+Selection is exact and server-preferred, rather than trusting client order.

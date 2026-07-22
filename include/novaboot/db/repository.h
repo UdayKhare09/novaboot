@@ -723,6 +723,16 @@ public:
         return saved;
     }
 
+    /// Establish an explicit persistence boundary.
+    ///
+    /// Repository writes are eager, unlike Hibernate's persistence context, so
+    /// this currently delegates to Connection::flush(), which is a no-op for
+    /// the synchronous SQLite and PostgreSQL drivers.  It exists so callers do
+    /// not need to change their repository API when a buffered driver is used.
+    void flush() {
+        acquire_connection()->flush();
+    }
+
     /// Dynamic derived query shortcut helper
     template<auto... FieldPtrs, typename... Args>
     QueryBuilder<Entity> find_by(const Args&... args) {

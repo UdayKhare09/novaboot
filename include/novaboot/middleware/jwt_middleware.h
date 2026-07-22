@@ -128,9 +128,10 @@ private:
 
 /// JWT authentication middleware.
 ///
-/// Supports HS256 and RS256 compact JWTs from an Authorization: Bearer header,
-/// validates standard temporal claims, optional issuer/audience/scope policy,
-/// and stores a JwtPrincipal in the request context for route handlers.
+/// Supports HS256 and RS256 compact JWTs from an Authorization: Bearer header
+/// and an explicitly configured HttpOnly cookie. It validates standard temporal
+/// claims, optional issuer/audience/scope policy, and stores a JwtPrincipal in
+/// the request context for route handlers.
 class JwtMiddleware : public Middleware {
 public:
     using Algorithm = JwtAlgorithm;
@@ -154,10 +155,17 @@ public:
         std::string authorization_header = "authorization";
         std::string bearer_prefix = "Bearer ";
 
-        /// Optional Cookie name accepted only by websocket_authorizer().
-        /// Browser WebSocket APIs cannot set Authorization headers, so use a
-        /// Secure, HttpOnly cookie or a separate short-lived ticket endpoint.
-        /// Query-string JWTs are intentionally not supported.
+        /// Optional cookie name accepted by HTTP authentication when no Bearer
+        /// token is supplied. The application must issue this as Secure and
+        /// HttpOnly; pair cookie-authenticated unsafe browser routes with
+        /// CsrfMiddleware. Query-string JWTs are never supported.
+        std::optional<std::string> jwt_cookie_name;
+
+        /// Optional cookie name used only for WebSocket handshakes. When this
+        /// is unset, websocket_authorizer() also uses jwt_cookie_name so a
+        /// browser session can share one JWT cookie across HTTP and WebSocket.
+        /// Retained as an explicit override for applications using a separate
+        /// short-lived socket credential.
         std::optional<std::string> websocket_cookie_name;
 
         std::optional<std::string> required_issuer;
@@ -179,11 +187,11 @@ public:
     JwtMiddleware();
     explicit JwtMiddleware(Config cfg);
 
-    /// Validate the configured Bearer token policy (and optionally
-    /// websocket_cookie_name) for a WebSocket opening request. The returned
-    /// callback is self-contained: it copies this middleware's configuration,
-    /// so the middleware object need not outlive a registered endpoint. A
-    /// verified JWT subject becomes the WebSocket session principal.
+    /// Validate the configured Bearer token policy and configured cookie policy
+    /// for a WebSocket opening request. The returned callback is self-contained:
+    /// it copies this middleware's configuration, so the middleware object need
+    /// not outlive a registered endpoint. A verified JWT subject becomes the
+    /// WebSocket session principal.
     [[nodiscard]] std::function<websocket::HandshakeDecision(const http3::Request&)>
     websocket_authorizer() const;
 

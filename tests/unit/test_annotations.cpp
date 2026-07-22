@@ -15,6 +15,7 @@ static int g_pre_destroy_calls = 0;
 static int g_controller_calls = 0;
 static int g_tx_controller_calls = 0;
 static int g_tx_proxy_calls = 0;
+static int g_authorized_service_calls = 0;
 static int g_websocket_open_calls = 0;
 static int g_websocket_message_calls = 0;
 static int g_websocket_close_calls = 0;
@@ -24,6 +25,16 @@ struct TxRouteState {
     int begins = 0;
     int commits = 0;
     int rollbacks = 0;
+};
+
+struct [[= Service() ]] AuthorizedService {
+    [[= Authorize("admin", "orders:write") ]]
+    int place_order(int quantity) {
+        ++g_authorized_service_calls;
+        return quantity * 2;
+    }
+
+    int health_probe() const { return 1; }
 };
 
 class TxRouteConnection : public novaboot::db::Connection {
@@ -126,6 +137,7 @@ struct [[= RestController("/api/tx") ]] TxRouteController {
 };
 
 struct [[= Service() ]] TxProxyService {
+    [[= Authorize("admin") ]]
     [[= Transactional() ]]
     void committed() {
         g_tx_proxy_calls++;
@@ -359,5 +371,50 @@ TEST(AnnotationsTest, ScannerRegistersTransactionalServiceProxy) {
     EXPECT_EQ(state->commits, 1);
     EXPECT_EQ(state->rollbacks, 1);
 
+    using AuthorizedProxy = novaboot::middleware::AuthorizationProxy<TxProxyService>;
+    ASSERT_TRUE(di_root.has<AuthorizedProxy>());
+    auto& authorized_proxy = di_root.resolve<AuthorizedProxy>();
+    context::RequestContext request_context;
+    middleware::JwtPrincipal principal;
+    principal.subject = "admin";
+    principal.claims.string_array_claims["roles"] = {"admin"};
+    request_context.set(principal);
+    {
+        context::RequestContext::Scope scope(request_context);
+        authorized_proxy.invoke<&TxProxyService::committed>();
+    }
+    EXPECT_EQ(g_tx_proxy_calls, 4);
+    EXPECT_EQ(state->begins, 3);
+    EXPECT_EQ(state->commits, 2);
+    EXPECT_EQ(state->rollbacks, 1);
+
+    di_root.shutdown();
+}
+
+TEST(AnnotationsTest, AuthorizationServiceProxyRequiresRequestIdentity) {
+    g_authorized_service_calls = 0;
+    RootContainer di_root;
+    register_beans<AuthorizedService>(di_root);
+    di_root.build();
+
+    using Proxy = novaboot::middleware::AuthorizationProxy<AuthorizedService>;
+    ASSERT_TRUE(di_root.has<Proxy>());
+    auto& proxy = di_root.resolve<Proxy>();
+
+    EXPECT_THROW(proxy.invoke<&AuthorizedService::place_order>(2),
+                 novaboot::middleware::AccessDeniedException);
+
+    context::RequestContext request_context;
+    middleware::JwtPrincipal principal;
+    principal.subject = "admin";
+    principal.claims.string_array_claims["roles"] = {"admin"};
+    principal.scopes = {"orders:write"};
+    request_context.set(principal);
+    {
+        context::RequestContext::Scope scope(request_context);
+        EXPECT_EQ(proxy.invoke<&AuthorizedService::place_order>(2), 4);
+        EXPECT_EQ(proxy.invoke<&AuthorizedService::health_probe>(), 1);
+    }
+    EXPECT_EQ(g_authorized_service_calls, 1);
     di_root.shutdown();
 }

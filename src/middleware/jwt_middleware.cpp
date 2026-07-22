@@ -18,6 +18,8 @@
 #include <openssl/pem.h>
 #include <simdjson.h>
 
+#include "novaboot/http3/cookie.h"
+
 namespace novaboot::middleware {
 namespace {
 
@@ -659,26 +661,7 @@ std::optional<std::string_view> bearer_token(const http3::Request& req,
 
 std::optional<std::string_view> cookie_token(const http3::Request& req,
                                              std::string_view cookie_name) {
-    const auto header = req.header("cookie");
-    if (!header) return std::nullopt;
-
-    auto remaining = *header;
-    while (!remaining.empty()) {
-        const auto separator = remaining.find(';');
-        auto item = remaining.substr(0, separator);
-        const auto first = item.find_first_not_of(" \t");
-        if (first != std::string_view::npos) {
-            item.remove_prefix(first);
-            const auto equals = item.find('=');
-            if (equals != std::string_view::npos &&
-                item.substr(0, equals) == cookie_name) {
-                return item.substr(equals + 1U);
-            }
-        }
-        if (separator == std::string_view::npos) break;
-        remaining.remove_prefix(separator + 1U);
-    }
-    return std::nullopt;
+    return http::request_cookie(req, cookie_name);
 }
 
 void reject(http3::Response& res, const JwtMiddleware::Config& cfg) {
@@ -853,8 +836,11 @@ JwtMiddleware::websocket_authorizer() const {
     auto cfg = cfg_;
     return [cfg = std::move(cfg)](const http3::Request& request) {
         auto token = bearer_token(request, cfg);
-        if (!token && cfg.websocket_cookie_name) {
-            token = cookie_token(request, *cfg.websocket_cookie_name);
+        if (!token) {
+            const auto& cookie_name = cfg.websocket_cookie_name
+                ? cfg.websocket_cookie_name
+                : cfg.jwt_cookie_name;
+            if (cookie_name) token = cookie_token(request, *cookie_name);
         }
         if (!token) {
             return websocket::HandshakeDecision::reject(
@@ -880,7 +866,10 @@ void JwtMiddleware::handle(http3::Request& req,
         return;
     }
 
-    const auto token = bearer_token(req, cfg_);
+    auto token = bearer_token(req, cfg_);
+    if (!token && cfg_.jwt_cookie_name) {
+        token = cookie_token(req, *cfg_.jwt_cookie_name);
+    }
     if (!token) {
         reject(res, cfg_);
         return;

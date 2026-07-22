@@ -12,6 +12,7 @@
 #include <spdlog/spdlog.h>
 
 #include "novaboot/di/di.h"
+#include "novaboot/actuator/actuator.h"
 #include "novaboot/middleware/middleware.h"
 
 namespace novaboot {
@@ -80,6 +81,31 @@ Server::Builder& Server::Builder::static_resources(std::string_view path) {
     return *this;
 }
 
+Server::Builder& Server::Builder::expose_error_details(bool enabled) {
+    expose_error_details_ = enabled;
+    return *this;
+}
+
+Server::Builder& Server::Builder::shutdown_timeout(std::chrono::milliseconds timeout) {
+    if (timeout.count() < 0) throw std::invalid_argument("Shutdown timeout must not be negative");
+    shutdown_timeout_ = timeout;
+    return *this;
+}
+
+Server::Builder& Server::Builder::shutdown_participant(core::ShutdownParticipant participant) {
+    if (participant.name.empty()) throw std::invalid_argument("Shutdown participant name must not be empty");
+    shutdown_participants_.push_back(std::move(participant));
+    return *this;
+}
+
+Server::Builder& Server::Builder::actuator(std::shared_ptr<actuator::Actuator> actuator) {
+    if (!actuator) {
+        throw std::invalid_argument("Actuator must not be null");
+    }
+    actuators_.push_back(std::move(actuator));
+    return *this;
+}
+
 Server::Builder& Server::Builder::di_container(di::RootContainer& root) {
     di_root_ = &root;
     return *this;
@@ -99,6 +125,7 @@ std::unique_ptr<Server> Server::Builder::build() {
     }
 
     auto server = std::unique_ptr<Server>(new Server());
+    server->pipeline_.add(server->http_drain_);
 
     // Resolve bind address
     server->bind_address_ = net::Address::from_string(
@@ -158,32 +185,55 @@ std::unique_ptr<Server> Server::Builder::build() {
         server->pipeline_.add(std::move(mw));
     }
 
+    server->actuators_ = std::move(actuators_);
+    server->shutdown_timeout_ = shutdown_timeout_;
+    for (auto& participant : shutdown_participants_) {
+        server->shutdown_coordinator_.add(std::move(participant));
+    }
+    server->shutdown_coordinator_.add(core::ShutdownParticipant{
+        .name = "http-requests",
+        .stop_accepting = [gate = server->http_drain_] { gate->stop_accepting(); },
+        .drained = [gate = server->http_drain_] { return gate->drained(); },
+        .force_close = {},
+    });
+    server->shutdown_coordinator_.add(core::ShutdownParticipant{
+        .name = "websocket-sessions",
+        .stop_accepting = [sessions = server->websocket_sessions_] { sessions->close_all(1001, "Server shutting down"); },
+        .drained = [sessions = server->websocket_sessions_] { return sessions->size() == 0; },
+        .force_close = [sessions = server->websocket_sessions_] { sessions->close_all(1001, "Server shutdown deadline exceeded"); },
+    });
+    for (const auto& actuator : server->actuators_) {
+        actuator->register_routes(server->router_);
+        server->pipeline_.add(actuator->observation_middleware());
+    }
+
     // Set backend
     server->backend_ = backend_;
     server->static_resources_dir_ = static_resources_dir_;
+    server->expose_error_details_ = expose_error_details_;
 
-    spdlog::info("NovaBoot configured: bind={}, workers={}, backend=io_uring, tls={} / {}",
-                 server->bind_address_.to_string(),
-                 server->worker_count_,
-                 cert_path_,
-                 key_path_);
+    spdlog::debug("NovaBoot configured: bind={}, workers={}, backend=io_uring, tls={} / {}",
+                  server->bind_address_.to_string(),
+                  server->worker_count_,
+                  cert_path_,
+                  key_path_);
     if (!static_resources_dir_.empty()) {
-        spdlog::info("Static resources: {}", static_resources_dir_);
+        spdlog::debug("Static resources: {}", static_resources_dir_);
     }
     if (di_root_) {
-        spdlog::info("DI: {} registrations, {} singleton(s), {} route registrar(s)",
-                     di_root_->registration_count(),
-                     di_root_->singleton_count(),
-                     di_root_->route_registrar_count());
+        spdlog::debug("DI: {} registrations, {} singleton(s), {} route registrar(s)",
+                      di_root_->registration_count(),
+                      di_root_->singleton_count(),
+                      di_root_->route_registrar_count());
     }
-    spdlog::info("Routes: {} route(s), {} exception handler(s)",
-                 server->router_.size(),
-                 server->router_.exception_handler_count());
+    spdlog::debug("Routes: {} route(s), {} exception handler(s)",
+                  server->router_.size(),
+                  server->router_.exception_handler_count());
     for (const auto& route : server->router_.routes()) {
-        spdlog::info("  {} {}", router::method_to_string(route.method), route.pattern);
+        spdlog::debug("  {} {}", router::method_to_string(route.method), route.pattern);
     }
     for (const auto& path : server->router_.websocket_routes()) {
-        spdlog::info("  WS {}", path);
+        spdlog::debug("  WS {}", path);
     }
 
     return server;
@@ -207,6 +257,7 @@ void Server::run() {
     bool expected = false;
     if (!running_.compare_exchange_strong(expected, true)) return;
     stopping_ = false;
+    ready_ = false;
 
     // Initialize ngtcp2 crypto library
     if (ngtcp2_crypto_ossl_init() != 0) {
@@ -217,8 +268,8 @@ void Server::run() {
     // Install signal handlers
     install_signal_handlers();
 
-    spdlog::info("Starting NovaBoot: {} shard(s) on {}",
-                 worker_count_, bind_address_.to_string());
+    spdlog::debug("Starting NovaBoot: {} shard(s) on {}",
+                  worker_count_, bind_address_.to_string());
 
     // Create and start shards
     shards_.reserve(static_cast<std::size_t>(worker_count_));
@@ -230,6 +281,7 @@ void Server::run() {
         shard_config.bind_address = bind_address_;
         shard_config.backend      = backend_;
         shard_config.static_resources_dir = static_resources_dir_;
+        shard_config.expose_error_details = expose_error_details_;
 
         auto shard = std::make_unique<core::Shard>(
             shard_config, *tls_ctx_, router_, pipeline_);
@@ -237,7 +289,24 @@ void Server::run() {
         shards_.push_back(std::move(shard));
     }
 
-    spdlog::info("NovaBoot server running. Press Ctrl+C to stop.");
+    // Do not report readiness until every shard has bound both UDP and TCP
+    // listeners. This is also the lifecycle contract used by LiveServer tests.
+    while (!stopping_) {
+        bool all_ready = !shards_.empty();
+        for (const auto& shard : shards_) all_ready = all_ready && shard->is_ready();
+        if (all_ready) {
+            ready_ = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    for (const auto& actuator : actuators_) {
+        actuator->set_availability(actuator::Availability::Ready);
+    }
+
+    spdlog::info("NovaBoot running on {} ({} worker{}). Press Ctrl+C to stop.",
+                 bind_address_.to_string(), worker_count_, worker_count_ == 1 ? "" : "s");
 
     // Wait for all shards to finish
     for (auto& shard : shards_) {
@@ -246,6 +315,10 @@ void Server::run() {
 
     running_ = false;
     stopping_ = false;
+    ready_ = false;
+    for (const auto& actuator : actuators_) {
+        actuator->set_availability(actuator::Availability::Stopped);
+    }
     stop_signal_thread();
     ngtcp2_crypto_ossl_free();
     spdlog::info("NovaBoot server stopped.");
@@ -259,8 +332,19 @@ void Server::stop() {
 
     bool expected = false;
     if (!stopping_.compare_exchange_strong(expected, true)) return;
+    ready_ = false;
 
     spdlog::info("Shutting down NovaBoot server...");
+
+    for (const auto& actuator : actuators_) {
+        actuator->set_availability(actuator::Availability::RefusingTraffic);
+    }
+
+    const auto drain = shutdown_coordinator_.drain_for(shutdown_timeout_);
+    if (!drain.drained) {
+        spdlog::warn("Forced shutdown of {} participant(s) after {}ms",
+                     drain.forced_participants.size(), shutdown_timeout_.count());
+    }
 
     for (auto& shard : shards_) {
         shard->stop();

@@ -3,6 +3,8 @@
 #include "novaboot/db/repository.h"
 #include "novaboot/db/schema.h"
 #include "novaboot/db/transaction.h"
+#include "novaboot/db/drivers/postgres/postgres_session_store.h"
+#include "support/postgres_test_database.h"
 #include <vector>
 #include <string>
 #include <iostream>
@@ -52,17 +54,16 @@ struct VersionedPostgresRepository : public CrudRepository<VersionedPostgresEnti
 };
 
 TEST(PostgresCrudTest, LifecycleAndQuery) {
-    std::string conn_info = "host=localhost dbname=postgres user=postgres password=postgres connect_timeout=2";
-    
-    std::shared_ptr<PostgresDataSource> ds;
+    std::unique_ptr<novaboot::testing::PostgresTestDatabase> database;
     try {
-        ds = std::make_shared<PostgresDataSource>(conn_info, 2);
+        database = std::make_unique<novaboot::testing::PostgresTestDatabase>();
     } catch (const std::exception& e) {
         std::cout << "[WARNING] PostgreSQL not available: " << e.what() << "\n";
         std::cout << "[INFO] Skipping PostgreSQL CRUD integration tests.\n";
         GTEST_SKIP() << "PostgreSQL server not available.";
         return;
     }
+    auto ds = database->datasource();
     
     auto conn = ds->get_connection();
     try {
@@ -125,14 +126,13 @@ TEST(PostgresCrudTest, LifecycleAndQuery) {
 }
 
 TEST(PostgresCrudTest, MapsConstraintViolationsToPortableExceptions) {
-    std::string conn_info = "host=localhost dbname=postgres user=postgres password=postgres connect_timeout=2";
-
-    std::shared_ptr<PostgresDataSource> ds;
+    std::unique_ptr<novaboot::testing::PostgresTestDatabase> database;
     try {
-        ds = std::make_shared<PostgresDataSource>(conn_info, 1);
+        database = std::make_unique<novaboot::testing::PostgresTestDatabase>();
     } catch (const std::exception& e) {
         GTEST_SKIP() << "PostgreSQL server not available: " << e.what();
     }
+    auto ds = database->datasource();
 
     auto conn = ds->get_connection();
     conn->execute("DROP TABLE IF EXISTS test_pg_constraint_children;");
@@ -164,14 +164,91 @@ TEST(PostgresCrudTest, MapsConstraintViolationsToPortableExceptions) {
     conn->execute("DROP TABLE IF EXISTS test_pg_constraint_parents;");
 }
 
-TEST(PostgresTransactionTest, OptimisticLockAcrossTransactions) {
-    std::string conn_info = "host=localhost dbname=postgres user=postgres password=postgres connect_timeout=2";
-    std::shared_ptr<PostgresDataSource> ds;
+TEST(PostgresCrudTest, ExecutesUniformSqlAsOnePreparedPipelineBatch) {
+    std::unique_ptr<novaboot::testing::PostgresTestDatabase> database;
     try {
-        ds = std::make_shared<PostgresDataSource>(conn_info, 3);
+        database = std::make_unique<novaboot::testing::PostgresTestDatabase>();
     } catch (const std::exception& e) {
         GTEST_SKIP() << "PostgreSQL server not available: " << e.what();
     }
+    auto ds = database->datasource();
+
+    auto conn = ds->get_connection();
+    conn->execute("DROP TABLE IF EXISTS test_pg_batch_values;");
+    conn->execute("CREATE TABLE test_pg_batch_values (id INTEGER PRIMARY KEY, value TEXT NOT NULL)");
+
+    const auto affected = conn->execute_batch(
+        "INSERT INTO test_pg_batch_values (id, value) VALUES (?, ?)",
+        {{Parameter{std::int64_t{1}}, Parameter{std::string{"one"}}},
+         {Parameter{std::int64_t{2}}, Parameter{std::string{"two"}}},
+         {Parameter{std::int64_t{3}}, Parameter{std::string{"three"}}}});
+    EXPECT_EQ(affected, (std::vector<std::int64_t>{1, 1, 1}));
+
+    auto count = conn->query("SELECT COUNT(*) FROM test_pg_batch_values");
+    ASSERT_TRUE(count->next());
+    EXPECT_EQ(count->get_int(0), 3);
+
+    conn->begin_transaction();
+    EXPECT_THROW(
+        conn->execute_batch(
+            "INSERT INTO test_pg_batch_values (id, value) VALUES (?, ?)",
+            {{Parameter{std::int64_t{4}}, Parameter{std::string{"four"}}},
+             {Parameter{std::int64_t{1}}, Parameter{std::string{"duplicate"}}}}),
+        UniqueConstraintViolationException);
+    conn->rollback();
+
+    auto after_rollback = conn->query("SELECT COUNT(*) FROM test_pg_batch_values");
+    ASSERT_TRUE(after_rollback->next());
+    EXPECT_EQ(after_rollback->get_int(0), 3);
+    conn->execute("DROP TABLE IF EXISTS test_pg_batch_values;");
+}
+
+TEST(PostgresSessionStoreTest, PersistsAndExpiresSharedSessions) {
+    std::unique_ptr<novaboot::testing::PostgresTestDatabase> database;
+    try {
+        database = std::make_unique<novaboot::testing::PostgresTestDatabase>();
+    } catch (const std::exception& e) {
+        GTEST_SKIP() << "PostgreSQL server not available: " << e.what();
+    }
+    auto datasource = database->datasource();
+    auto connection = datasource->get_connection();
+    connection->execute(novaboot::db::postgres::PostgresSessionStore::schema_ddl());
+    connection.reset();
+
+    novaboot::db::postgres::PostgresSessionStore store(datasource);
+    const auto now = std::chrono::system_clock::now();
+    store.put({
+        .id = "shared-session",
+        .principal = {.subject = "alice", .roles = {"admin", "editor"}, .scopes = {"articles:write"}},
+        .expires_at = now + std::chrono::hours{1},
+    });
+
+    const auto found = store.find("shared-session", now);
+    ASSERT_TRUE(found.has_value());
+    EXPECT_EQ(found->principal.subject, "alice");
+    EXPECT_EQ(found->principal.roles, (std::vector<std::string>{"admin", "editor"}));
+    EXPECT_EQ(found->principal.scopes, (std::vector<std::string>{"articles:write"}));
+
+    store.erase("shared-session");
+    EXPECT_FALSE(store.find("shared-session", now).has_value());
+
+    store.put({
+        .id = "expired-session",
+        .principal = {.subject = "bob", .roles = {}, .scopes = {}},
+        .expires_at = now - std::chrono::hours{1},
+    });
+    EXPECT_EQ(store.erase_expired(now), 1);
+    EXPECT_FALSE(store.find("expired-session", now).has_value());
+}
+
+TEST(PostgresTransactionTest, OptimisticLockAcrossTransactions) {
+    std::unique_ptr<novaboot::testing::PostgresTestDatabase> database;
+    try {
+        database = std::make_unique<novaboot::testing::PostgresTestDatabase>();
+    } catch (const std::exception& e) {
+        GTEST_SKIP() << "PostgreSQL server not available: " << e.what();
+    }
+    auto ds = database->datasource();
 
     {
         auto conn = ds->get_connection();

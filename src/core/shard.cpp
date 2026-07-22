@@ -1,11 +1,11 @@
 #include "novaboot/core/shard.h"
+#include "novaboot/core/error_response.h"
 #include "novaboot/core/io_uring_event_loop.h"
+#include "novaboot/http/static_resource.h"
 #include "novaboot/http3/http3_session.h"
 #include "novaboot/validation/validation.h"
 
 #include <format>
-#include <filesystem>
-#include <fstream>
 
 #include <pthread.h>
 #include <sched.h>
@@ -93,11 +93,20 @@ void Shard::run() {
                 conn.native_handle(),
                 [this](http3::Http3Stream& stream) {
                     on_request(stream);
+                },
+                [this, &conn](int64_t stream_id) {
+                    event_loop_->post([&conn, stream_id] {
+                        if (auto* session = conn.http3_session()) {
+                            session->resume_sse_stream(stream_id);
+                            conn.on_write();
+                        }
+                    });
                 });
             if (!h3_session) {
                 spdlog::error("Closing QUIC connection due to HTTP/3 session creation failure");
                 conn.close();
             } else {
+                h3_session->set_peer_address(conn.remote_addr().ip_string());
                 conn.set_http3_session(std::move(h3_session));
             }
         });
@@ -125,7 +134,7 @@ void Shard::run() {
                 auto result = router_.match(rq.method(), rq.path());
                 if (!result.handler) {
                     if (rq.method() == "GET" || rq.method() == "HEAD") {
-                        if (serve_static_file(rq.path(), rs,
+                        if (serve_static_file(rq, rs,
                                               rq.method() == "HEAD")) {
                             return;
                         }
@@ -138,6 +147,16 @@ void Shard::run() {
                 rq.path_params() = std::move(result.params);
                 try {
                     (*result.handler)(rq, rs, ctx);
+                } catch (const novaboot::json::BindingException& binding_error) {
+                    rs.status(400).header("content-type", "application/json");
+                    std::string err_json = R"({"error":"Bad Request","message":"Invalid JSON request body","errors":[)";
+                    bool first = true;
+                    for (const auto& err : binding_error.errors()) {
+                        if (!first) err_json += ',';
+                        first = false;
+                        err_json += "\"" + json_escape(err) + "\"";
+                    }
+                    rs.body(err_json + "]}");
                 } catch (const novaboot::validation::ValidationException& val_ex) {
                     rs.status(400)
                       .header("content-type", "application/json");
@@ -146,16 +165,18 @@ void Shard::run() {
                     for (const auto& err : val_ex.errors()) {
                         if (!first) err_json += ",";
                         first = false;
-                        err_json += "\"" + err + "\"";
+                        err_json += "\"" + json_escape(err) + "\"";
                     }
                     err_json += "]}";
                     rs.body(err_json);
                 } catch (const std::exception& ex) {
                     if (!router_.handle_exception(ex, rs, ctx)) {
-                        rs.status(500)
-                          .header("content-type", "application/json")
-                          .body(R"({"error":"Internal Server Error","message":")" + std::string(ex.what()) + R"("})");
+                        spdlog::error("Unhandled route exception: {}", ex.what());
+                        write_unhandled_error(rs, ex, config_.expose_error_details);
                     }
+                } catch (...) {
+                    spdlog::error("Unhandled non-standard route exception");
+                    write_unknown_error(rs);
                 }
             };
 
@@ -169,6 +190,11 @@ void Shard::run() {
         if (!match.handler) return {};
         request.path_params() = std::move(match.params);
         auto handler = *match.handler;
+        const auto subprotocol = websocket::select_subprotocol(request, handler.subprotocols);
+        if (handler.require_subprotocol && !subprotocol) {
+            return http1::Http1Session::UpgradeResult::reject(
+                400, "Required WebSocket subprotocol was not offered");
+        }
         if (handler.authorize) {
             auto decision = handler.authorize(request);
             if (!decision.accepted) {
@@ -176,9 +202,10 @@ void Shard::run() {
                     decision.rejection_status, std::move(decision.rejection_body));
             }
             return http1::Http1Session::UpgradeResult::accept(
-                std::move(handler), std::move(decision.principal));
+                std::move(handler), std::move(decision.principal), subprotocol.value_or(""));
         }
-        return http1::Http1Session::UpgradeResult::accept(std::move(handler));
+        return http1::Http1Session::UpgradeResult::accept(
+            std::move(handler), {}, subprotocol.value_or(""));
     };
 
     auto http2_websocket_handler = [this](http3::Request& request)
@@ -187,6 +214,11 @@ void Shard::run() {
         if (!match.handler) return {};
         request.path_params() = std::move(match.params);
         auto handler = *match.handler;
+        const auto subprotocol = websocket::select_subprotocol(request, handler.subprotocols);
+        if (handler.require_subprotocol && !subprotocol) {
+            return http2::Http2Session::WebSocketConnectResult::reject(
+                400, "Required WebSocket subprotocol was not offered");
+        }
         if (handler.authorize) {
             auto decision = handler.authorize(request);
             if (!decision.accepted) {
@@ -194,9 +226,10 @@ void Shard::run() {
                     decision.rejection_status, std::move(decision.rejection_body));
             }
             return http2::Http2Session::WebSocketConnectResult::accept(
-                std::move(handler), std::move(decision.principal));
+                std::move(handler), std::move(decision.principal), subprotocol.value_or(""));
         }
-        return http2::Http2Session::WebSocketConnectResult::accept(std::move(handler));
+        return http2::Http2Session::WebSocketConnectResult::accept(
+            std::move(handler), {}, subprotocol.value_or(""));
     };
     tcp_conn_mgr_ = std::make_unique<net::TcpConnectionManager>(
         std::move(tcp_req_handler), std::move(websocket_upgrade_handler),
@@ -226,9 +259,11 @@ void Shard::run() {
 
     spdlog::debug("Shard {} ready (udp_fd={}, connections=0)",
                   config_.shard_id, socket_->fd());
+    ready_ = true;
 
     // Run the event loop (blocks until stop() is called)
     event_loop_->run();
+    ready_ = false;
 
     spdlog::debug("Shard {} stopped", config_.shard_id);
 }
@@ -251,69 +286,9 @@ void Shard::pin_to_core() {
 
 
 
-namespace fs = std::filesystem;
-
-static std::string get_mime_type(const std::string& path) {
-    auto ext = path.substr(path.find_last_of('.') + 1);
-    if (ext == "html" || ext == "htm") return "text/html";
-    if (ext == "css") return "text/css";
-    if (ext == "js" || ext == "mjs") return "application/javascript";
-    if (ext == "json") return "application/json";
-    if (ext == "png") return "image/png";
-    if (ext == "jpg" || ext == "jpeg") return "image/jpeg";
-    if (ext == "gif") return "image/gif";
-    if (ext == "svg") return "image/svg+xml";
-    if (ext == "ico") return "image/x-icon";
-    if (ext == "txt") return "text/plain";
-    if (ext == "pdf") return "application/pdf";
-    if (ext == "xml") return "application/xml";
-    return "application/octet-stream";
-}
-
-bool Shard::serve_static_file(std::string_view path, http3::Response& res, bool head_only) {
-    if (config_.static_resources_dir.empty()) {
-        return false;
-    }
-
-    try {
-        fs::path base = fs::canonical(config_.static_resources_dir);
-        
-        std::string sub_path(path);
-        if (sub_path == "/" || sub_path.empty()) {
-            sub_path = "/index.html";
-        }
-        
-        fs::path target = fs::weakly_canonical(base / sub_path.substr(1));
-        
-        // Prevent directory traversal attacks
-        auto base_str = base.string();
-        auto target_str = target.string();
-        if (target_str.find(base_str) != 0) {
-            return false;
-        }
-
-        if (fs::exists(target) && fs::is_regular_file(target)) {
-            auto file_size = fs::file_size(target);
-            res.status(200)
-               .header("content-type", get_mime_type(target_str))
-               .header("content-length", std::to_string(file_size));
-            
-            if (!head_only) {
-                std::ifstream file(target, std::ios::binary);
-                if (file.is_open()) {
-                    std::string body((std::istreambuf_iterator<char>(file)),
-                                     std::istreambuf_iterator<char>());
-                    res.body(body);
-                } else {
-                    return false;
-                }
-            }
-            return true;
-        }
-    } catch (...) {
-        // Fallback
-    }
-    return false;
+bool Shard::serve_static_file(const http3::Request& request, http3::Response& res,
+                              bool head_only) {
+    return http::serve_static_resource(config_.static_resources_dir, request, res, head_only);
 }
 
 void Shard::on_request(http3::Http3Stream& stream) {
@@ -330,7 +305,7 @@ void Shard::on_request(http3::Http3Stream& stream) {
             if (!result.handler) {
                 // Fallback to serving static files for GET and HEAD requests
                 if (rq.method() == "GET" || rq.method() == "HEAD") {
-                    if (serve_static_file(rq.path(), rs,
+                    if (serve_static_file(rq, rs,
                                          rq.method() == "HEAD")) {
                         return;
                     }
@@ -344,6 +319,16 @@ void Shard::on_request(http3::Http3Stream& stream) {
             rq.path_params() = std::move(result.params);
             try {
                 (*result.handler)(rq, rs, ctx);
+            } catch (const novaboot::json::BindingException& binding_error) {
+                rs.status(400).header("content-type", "application/json");
+                std::string err_json = R"({"error":"Bad Request","message":"Invalid JSON request body","errors":[)";
+                bool first = true;
+                for (const auto& err : binding_error.errors()) {
+                    if (!first) err_json += ',';
+                    first = false;
+                    err_json += "\"" + json_escape(err) + "\"";
+                }
+                rs.body(err_json + "]}");
             } catch (const novaboot::validation::ValidationException& val_ex) {
                 rs.status(400)
                   .header("content-type", "application/json");
@@ -352,17 +337,19 @@ void Shard::on_request(http3::Http3Stream& stream) {
                 for (const auto& err : val_ex.errors()) {
                     if (!first) err_json += ",";
                     first = false;
-                    err_json += "\"" + err + "\"";
+                        err_json += "\"" + json_escape(err) + "\"";
                 }
                 err_json += "]}";
                 rs.body(err_json);
-            } catch (const std::exception& ex) {
-                if (!router_.handle_exception(ex, rs, ctx)) {
-                    rs.status(500)
-                      .header("content-type", "application/json")
-                      .body(R"({"error":"Internal Server Error","message":")" + std::string(ex.what()) + R"("})");
+                } catch (const std::exception& ex) {
+                    if (!router_.handle_exception(ex, rs, ctx)) {
+                        spdlog::error("Unhandled route exception: {}", ex.what());
+                        write_unhandled_error(rs, ex, config_.expose_error_details);
+                    }
+                } catch (...) {
+                    spdlog::error("Unhandled non-standard route exception");
+                    write_unknown_error(rs);
                 }
-            }
         };
 
     context::RequestContext ctx;

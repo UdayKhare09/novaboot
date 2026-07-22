@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "novaboot/http3/request.h"
+#include "novaboot/observability/observation.h"
 
 namespace novaboot::websocket {
 
@@ -113,6 +114,7 @@ public:
     [[nodiscard]] std::size_t size() const;
     std::size_t broadcast_text(std::string_view text);
     std::size_t broadcast_binary(std::span<const std::uint8_t> bytes);
+    std::size_t close_all(std::uint16_t code = 1001, std::string_view reason = "Server shutting down");
 
 private:
     mutable std::mutex mutex_;
@@ -186,12 +188,29 @@ struct HandshakeDecision {
     }
 };
 
+/// Produces a strict browser Origin policy for WebSocket handshakes.
+/// Missing Origin is denied by default; enable it only for non-browser clients.
+[[nodiscard]] std::function<HandshakeDecision(const http3::Request&)>
+origin_authorizer(std::vector<std::string> allowed_origins,
+                  bool allow_missing_origin = false);
+
+[[nodiscard]] std::optional<std::string>
+select_subprotocol(const http3::Request& request,
+                   const std::vector<std::string>& supported);
+
 /// Application lifecycle callbacks for a raw WebSocket endpoint.
 struct Handler {
     std::function<void(Session&)> on_open{};
     std::function<void(Session&, const Message&)> on_message{};
     std::function<void(Session&, const CloseInfo&)> on_close{};
     std::function<HandshakeDecision(const http3::Request&)> authorize{};
+    /// Server-preferred protocols that may be selected from the client's
+    /// Sec-WebSocket-Protocol offer. An empty list declines negotiation.
+    std::vector<std::string> subprotocols{};
+    /// Reject the handshake when no entry in `subprotocols` was offered.
+    bool require_subprotocol = false;
+    std::shared_ptr<observability::MeterRegistry> meters{};
+    std::shared_ptr<SessionRegistry> registry{};
     Limits limits{};
 };
 
@@ -241,6 +260,7 @@ private:
     bool fragmented_ = false;
     bool closed_ = false;
     bool close_notified_ = false;
+    bool metrics_active_ = false;
 };
 
 } // namespace novaboot::websocket

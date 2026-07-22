@@ -108,8 +108,8 @@ TlsContext TlsContext::create(const Config& config) {
     // ALPN selection callback
     SSL_CTX_set_alpn_select_cb(tls.ctx_, alpn_select_callback, tls.alpn_.get());
 
-    spdlog::info("TLS context initialized (OpenSSL {}, cert={})",
-                 OpenSSL_version(OPENSSL_VERSION), config.cert_file);
+    spdlog::debug("TLS context initialized (OpenSSL {}, cert={})",
+                  OpenSSL_version(OPENSSL_VERSION), config.cert_file);
 
     return tls;
 }

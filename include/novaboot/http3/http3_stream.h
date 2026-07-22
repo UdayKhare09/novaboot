@@ -5,6 +5,7 @@
 
 #include "novaboot/http3/request.h"
 #include "novaboot/http3/response.h"
+#include "novaboot/http/sse.h"
 
 namespace novaboot::http3 {
 
@@ -60,6 +61,14 @@ private:
     bool headers_received_   = false;
     bool request_complete_   = false;
     bool response_submitted_ = false;
+    std::shared_ptr<http::sse::Channel> sse_channel_;
+    std::string sse_inflight_;
+    std::size_t sse_inflight_ack_remaining_ = 0;
+
+public:
+    [[nodiscard]] std::shared_ptr<http::sse::Channel>& sse_channel() noexcept { return sse_channel_; }
+    [[nodiscard]] std::string& sse_inflight() noexcept { return sse_inflight_; }
+    [[nodiscard]] std::size_t& sse_inflight_ack_remaining() noexcept { return sse_inflight_ack_remaining_; }
 };
 
 } // namespace novaboot::http3

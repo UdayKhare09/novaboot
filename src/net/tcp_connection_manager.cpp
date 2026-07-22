@@ -1,12 +1,33 @@
 #include "novaboot/net/tcp_connection_manager.h"
 #include <sys/socket.h>
 #include <unistd.h>
+#include <arpa/inet.h>
 #include <fcntl.h>
 #include <cerrno>
 #include <cstring>
 #include <spdlog/spdlog.h>
 
 namespace novaboot::net {
+
+namespace {
+
+std::string peer_address_for(int fd) {
+    sockaddr_storage peer{};
+    socklen_t length = sizeof(peer);
+    if (::getpeername(fd, reinterpret_cast<sockaddr*>(&peer), &length) != 0) return {};
+    char address[INET6_ADDRSTRLEN] = {};
+    if (peer.ss_family == AF_INET) {
+        const auto* v4 = reinterpret_cast<const sockaddr_in*>(&peer);
+        return ::inet_ntop(AF_INET, &v4->sin_addr, address, sizeof(address)) ? address : "";
+    }
+    if (peer.ss_family == AF_INET6) {
+        const auto* v6 = reinterpret_cast<const sockaddr_in6*>(&peer);
+        return ::inet_ntop(AF_INET6, &v6->sin6_addr, address, sizeof(address)) ? address : "";
+    }
+    return {};
+}
+
+} // namespace
 
 // ─── TcpConnection ───────────────────────────────────────────────────────────
 
@@ -20,7 +41,8 @@ TcpConnection::TcpConnection(
       handler_(std::move(handler)),
       upgrade_handler_(std::move(upgrade_handler)),
       http2_websocket_handler_(std::move(http2_websocket_handler)),
-      websocket_wakeup_(std::move(websocket_wakeup)) {}
+      websocket_wakeup_(std::move(websocket_wakeup)),
+      peer_address_(peer_address_for(fd)) {}
 
 bool TcpConnection::keep_alive() const noexcept {
     return std::visit([](const auto& active_session) -> bool {
@@ -66,9 +88,11 @@ std::expected<std::vector<uint8_t>, int> TcpConnection::on_recv(std::span<const 
         if (alpn == "h2") {
             session_.emplace<http2::Http2Session>(
                 handler_, http2_websocket_handler_, websocket_wakeup_);
+            std::get<http2::Http2Session>(session_).set_peer_address(peer_address_);
         } else {
             // Default/fallback to HTTP/1.1
-            session_.emplace<http1::Http1Session>(handler_, upgrade_handler_);
+            session_.emplace<http1::Http1Session>(handler_, upgrade_handler_, websocket_wakeup_);
+            std::get<http1::Http1Session>(session_).set_peer_address(peer_address_);
         }
     }
 
@@ -142,8 +166,11 @@ std::expected<std::vector<uint8_t>, int> TcpConnection::drain_websocket_outbound
         auto raw = websocket->drain_external_outbound();
         return raw.empty() ? raw : tls_stream_.encrypt_app_data(raw);
     }
+    if (auto* http1 = std::get_if<http1::Http1Session>(&session_)) {
+        return http1->drain_sse_outbound(std::move(encrypt));
+    }
     if (auto* http2 = std::get_if<http2::Http2Session>(&session_)) {
-        return http2->drain_websocket_outbound(std::move(encrypt));
+        return http2->drain_outbound(std::move(encrypt));
     }
     return std::vector<uint8_t>{};
 }

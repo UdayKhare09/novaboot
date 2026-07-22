@@ -66,6 +66,40 @@ std::string_view Frame::header(std::string_view name) const {
 
 namespace {
 
+bool destination_allowed(std::string_view destination,
+                         const std::vector<std::string>& allowed_prefixes) {
+    if (allowed_prefixes.empty()) return true;
+    for (const auto& prefix : allowed_prefixes) {
+        if (destination == prefix ||
+            (destination.starts_with(prefix) && destination.size() > prefix.size() &&
+             destination[prefix.size()] == '/')) {
+            return true;
+        }
+    }
+    return false;
+}
+
+} // namespace
+
+std::function<bool(const websocket::Session&, const Frame&)>
+frame_authorizer(AuthorizationPolicy policy) {
+    return [policy = std::move(policy)](const websocket::Session& session, const Frame& frame) {
+        if (policy.require_authenticated_principal && session.principal().empty()) return false;
+        const auto destination = frame.header("destination");
+        if (frame.command == "SEND") {
+            return !destination.empty() &&
+                   destination_allowed(destination, policy.allowed_send_destinations);
+        }
+        if (frame.command == "SUBSCRIBE") {
+            return !destination.empty() &&
+                   destination_allowed(destination, policy.allowed_subscribe_destinations);
+        }
+        return true;
+    };
+}
+
+namespace {
+
 std::expected<std::pair<std::uint64_t, std::uint64_t>, ParseError>
 parse_heartbeat(std::string_view value) {
     if (value.empty()) return std::pair<std::uint64_t, std::uint64_t>{0, 0};
@@ -393,6 +427,10 @@ Endpoint::Endpoint(SimpleBroker& broker, Config config)
 
 Endpoint::~Endpoint() = default;
 
+void Endpoint::set_meter(std::shared_ptr<observability::MeterRegistry> meter) {
+    meters_ = std::move(meter);
+}
+
 websocket::Handler Endpoint::websocket_handler() {
     return websocket::Handler{
         .on_open = [this](websocket::Session& session) { on_open(session); },
@@ -402,11 +440,19 @@ websocket::Handler Endpoint::websocket_handler() {
         .on_close = [this](websocket::Session& session, const websocket::CloseInfo& close) {
             on_close(session, close);
         },
-        .authorize = {},
+        .authorize = [this](const http3::Request&) {
+            return accepting_.load(std::memory_order_relaxed)
+                ? websocket::HandshakeDecision::allow()
+                : websocket::HandshakeDecision::reject(503, "STOMP endpoint is shutting down");
+        },
     };
 }
 
 void Endpoint::on_open(websocket::Session& session) {
+    if (!accepting_.load(std::memory_order_relaxed)) {
+        (void)session.close(1001, "Server shutting down");
+        return;
+    }
     const auto handle = session.handle();
     const auto now = now_ms();
     std::lock_guard lock(mutex_);
@@ -416,6 +462,42 @@ void Endpoint::on_open(websocket::Session& session) {
     state->last_received_ms.store(now, std::memory_order_relaxed);
     state->last_sent_ms.store(now, std::memory_order_relaxed);
     connections_[handle.id()] = std::move(state);
+    if (meters_) {
+        meters_->up_down_counter_add("stomp.server.active_connections", 1.0);
+        meters_->counter_add("stomp.server.connections.opened", 1.0);
+    }
+}
+
+void Endpoint::begin_shutdown() {
+    accepting_.store(false, std::memory_order_relaxed);
+    std::vector<websocket::SessionHandle> sessions;
+    {
+        std::lock_guard lock(mutex_);
+        sessions.reserve(connections_.size());
+        for (const auto& [_, state] : connections_) sessions.push_back(state->handle);
+    }
+    for (const auto& session : sessions) (void)session.close(1001, "Server shutting down");
+}
+
+bool Endpoint::drained() const {
+    std::lock_guard lock(mutex_);
+    return connections_.empty();
+}
+
+void Endpoint::force_shutdown() {
+    accepting_.store(false, std::memory_order_relaxed);
+    std::vector<std::shared_ptr<ConnectionState>> states;
+    {
+        std::lock_guard lock(mutex_);
+        for (auto& [_, state] : connections_) states.push_back(std::move(state));
+        connections_.clear();
+    }
+    for (const auto& state : states) {
+        for (const auto& subscription_id : state->subscription_ids) {
+            broker_.unsubscribe(state->handle.id(), subscription_id);
+        }
+        (void)state->handle.close(1001, "Server shutdown deadline exceeded");
+    }
 }
 
 void Endpoint::on_message(websocket::Session& session, const websocket::Message& message) {
@@ -442,6 +524,13 @@ void Endpoint::on_message(websocket::Session& session, const websocket::Message&
             protocol_error(session, "STOMP frame rejected by interceptor");
             break;
         }
+        if (meters_) {
+            meters_->counter_add("stomp.server.frames.received", 1.0,
+                {{"stomp.command", frame.command}});
+            meters_->histogram_record("stomp.server.frame.body.size",
+                static_cast<double>(frame.body.size()), "By",
+                {{"stomp.command", frame.command}});
+        }
         process_frame(session, *state, frame);
     }
 }
@@ -458,6 +547,7 @@ void Endpoint::on_close(websocket::Session& session, const websocket::CloseInfo&
     for (const auto& subscription_id : state->subscription_ids) {
         broker_.unsubscribe(state->handle.id(), subscription_id);
     }
+    if (meters_) meters_->up_down_counter_add("stomp.server.active_connections", -1.0);
 }
 
 void Endpoint::process_frame(websocket::Session& session, ConnectionState& state,
@@ -598,6 +688,13 @@ void Endpoint::heartbeat_loop(std::stop_token stop) {
 }
 
 void Endpoint::send(websocket::Session& session, Frame frame) {
+    if (meters_) {
+        meters_->counter_add("stomp.server.frames.sent", 1.0,
+            {{"stomp.command", frame.command}});
+        meters_->histogram_record("stomp.server.frame.body.size",
+            static_cast<double>(frame.body.size()), "By",
+            {{"stomp.command", frame.command}, {"messaging.operation.type", "send"}});
+    }
     (void)session.send_text(serialize(frame));
 }
 

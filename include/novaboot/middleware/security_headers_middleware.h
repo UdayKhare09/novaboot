@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <string_view>
 #include <unordered_map>
 
 #include "novaboot/middleware/middleware.h"
@@ -12,6 +13,10 @@ class SecurityHeadersMiddleware : public Middleware {
 public:
     struct Config {
         bool hsts = true;
+        /// Emit HSTS only for a request whose transport scheme is HTTPS. Keep
+        /// this true unless a separately configured trusted proxy supplies the
+        /// original scheme.
+        bool hsts_https_only = true;
         std::string hsts_value = "max-age=31536000; includeSubDomains";
 
         bool content_type_options = true;
@@ -19,6 +24,11 @@ public:
 
         bool frame_options = true;
         std::string frame_options_value = "DENY";
+
+        /// Explicitly disable obsolete browser XSS filters, whose historical
+        /// behavior can itself enable cross-site scripting in legacy clients.
+        bool x_xss_protection = true;
+        std::string x_xss_protection_value = "0";
 
         bool referrer_policy = true;
         std::string referrer_policy_value = "no-referrer";
@@ -46,6 +56,8 @@ public:
                 Next next) override;
 
 private:
+    static void validate_header(std::string_view name, std::string_view value);
+
     Config cfg_;
 };
 

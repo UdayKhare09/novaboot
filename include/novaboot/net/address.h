@@ -56,6 +56,8 @@ public:
 
     /// Human-readable representation
     [[nodiscard]] std::string to_string() const;
+    /// Numeric host address without a port, suitable for request peer identity.
+    [[nodiscard]] std::string ip_string() const;
 
     // Comparison operators
     bool operator==(const Address& other) const noexcept;

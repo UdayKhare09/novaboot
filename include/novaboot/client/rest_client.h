@@ -56,7 +56,10 @@ public:
         bool         verify_ssl   = true;        ///< Verify server certificate
         std::string  ca_file;                    ///< Custom CA PEM (empty = system bundle)
         int          connect_timeout_ms = 5000;  ///< Handshake timeout
-        int          request_timeout_ms = 30000; ///< Per-request timeout
+        /// Per-request synchronous deadline. A timeout aborts outstanding
+        /// streams, closes the current transport connection, and reconnects
+        /// before a subsequent request rather than leaving a suspended task.
+        int          request_timeout_ms = 30000;
         int          max_reconnect_attempts = 5; ///< Max reconnect tries
         Protocol     protocol = Protocol::HTTP3; ///< HTTP protocol option
     };
@@ -181,6 +184,7 @@ private:
     void on_packet_received(net::IncomingPacket&& pkt);
     void send_packet(const net::OutgoingPacket& pkt);
     void on_disconnect();
+    void complete_pending_with_error(std::string_view message);
 
     Config            cfg_;
     core::EventLoop*  event_loop_ = nullptr;

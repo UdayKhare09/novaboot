@@ -1,4 +1,5 @@
 #include "novaboot/db/drivers/postgres/postgres_driver.h"
+#include <spdlog/spdlog.h>
 #include "novaboot/db/exceptions.h"
 #include <stdexcept>
 #include <format>
@@ -6,6 +7,8 @@
 #include <cstdlib>
 #include <sstream>
 #include <iomanip>
+#include <cerrno>
+#include <poll.h>
 
 namespace {
 std::string time_to_string(std::chrono::system_clock::time_point tp) {
@@ -260,6 +263,168 @@ std::int64_t PostgresConnection::execute(std::string_view sql, const std::vector
     return affected;
 }
 
+std::vector<std::int64_t> PostgresConnection::execute_batch(
+    std::string_view sql,
+    const std::vector<std::vector<Parameter>>& parameter_sets) {
+    std::vector<std::int64_t> affected_rows;
+    affected_rows.reserve(parameter_sets.size());
+    if (parameter_sets.empty()) return affected_rows;
+
+    // Prepare once, then send all binds before waiting for results. libpq's
+    // pipeline mode removes the per-row network round trip while retaining one
+    // result and error boundary for each supplied parameter set.
+    const std::string converted_sql = convert_placeholders(sql);
+    // The unnamed statement is connection-scoped and replaced automatically by
+    // the next unnamed prepare. That avoids leaking generated statement names
+    // when an explicit transaction is left aborted for the caller to roll back.
+    constexpr const char* statement_name = "";
+    PGresult* prepared = PQprepare(conn_, statement_name,
+                                   converted_sql.c_str(), 0, nullptr);
+    if (prepared == nullptr) {
+        throw std::runtime_error(std::format(
+            "Postgres batch prepare failed: {}", PQerrorMessage(conn_)));
+    }
+    if (PQresultStatus(prepared) != PGRES_COMMAND_OK) {
+        std::string sqlstate;
+        std::string message;
+        capture_postgres_error(prepared, conn_, sqlstate, message);
+        PQclear(prepared);
+        throw_postgres_error(sqlstate, message, "Postgres batch prepare failed");
+    }
+    PQclear(prepared);
+
+    if (PQenterPipelineMode(conn_) == 0) {
+        throw std::runtime_error(std::format(
+            "Postgres batch pipeline setup failed: {}", PQerrorMessage(conn_)));
+    }
+
+    const bool restore_blocking_mode = PQisnonblocking(conn_) == 0;
+    if (restore_blocking_mode && PQsetnonblocking(conn_, 1) != 0) {
+        (void)PQexitPipelineMode(conn_);
+        throw std::runtime_error(std::format(
+            "Postgres batch could not enable non-blocking pipeline I/O: {}",
+            PQerrorMessage(conn_)));
+    }
+
+    auto wait_for_socket = [&](short events) -> bool {
+        pollfd descriptor{.fd = PQsocket(conn_), .events = events, .revents = 0};
+        if (descriptor.fd < 0) return false;
+        int result = 0;
+        do {
+            result = ::poll(&descriptor, 1, -1);
+        } while (result < 0 && errno == EINTR);
+        return result > 0 && (descriptor.revents & (POLLERR | POLLHUP | POLLNVAL)) == 0;
+    };
+
+    bool send_failed = false;
+    std::string send_error;
+    for (const auto& parameters : parameter_sets) {
+        log_query(sql, parameters);
+        const auto serialized = serialize_params(parameters);
+        std::vector<const char*> values;
+        values.reserve(parameters.size());
+        for (std::size_t index = 0; index < parameters.size(); ++index) {
+            values.push_back(std::holds_alternative<std::nullptr_t>(parameters[index])
+                ? nullptr
+                : serialized[index].c_str());
+        }
+
+        if (PQsendQueryPrepared(conn_, statement_name,
+                                static_cast<int>(parameters.size()),
+                                values.empty() ? nullptr : values.data(),
+                                nullptr, nullptr, 0) == 0) {
+            send_failed = true;
+            send_error = PQerrorMessage(conn_);
+            break;
+        }
+    }
+
+    if (PQpipelineSync(conn_) == 0 && !send_failed) {
+        send_failed = true;
+        send_error = PQerrorMessage(conn_);
+    }
+
+    std::string sqlstate;
+    std::string error_message;
+    bool failed = send_failed;
+    if (failed && error_message.empty()) error_message = std::move(send_error);
+
+    bool saw_pipeline_sync = false;
+    auto consume_result = [&](PGresult* result) {
+        const auto status = PQresultStatus(result);
+        if (status == PGRES_COMMAND_OK || status == PGRES_TUPLES_OK) {
+            char* tuples = PQcmdTuples(result);
+            std::int64_t affected = 0;
+            if (tuples != nullptr && *tuples != '\0') {
+                try {
+                    affected = std::stoll(tuples);
+                } catch (...) {
+                    affected = 0;
+                }
+            }
+            affected_rows.push_back(affected);
+        } else if (status == PGRES_PIPELINE_SYNC) {
+            // Deliberate synchronization marker, not an application command.
+            saw_pipeline_sync = true;
+        } else if (!failed) {
+            failed = true;
+            capture_postgres_error(result, conn_, sqlstate, error_message);
+            if (status == PGRES_PIPELINE_ABORTED && error_message.empty()) {
+                error_message = "Postgres batch command was aborted by an earlier pipeline error";
+            }
+        }
+        PQclear(result);
+    };
+
+    // In pipeline mode libpq is non-blocking. Flush outgoing commands, then
+    // consume every response through the sync point before returning this
+    // pooled connection to normal blocking operation.
+    while (!failed) {
+        const int flushed = PQflush(conn_);
+        if (flushed == 0) break;
+        if (flushed < 0 || !wait_for_socket(POLLOUT)) {
+            failed = true;
+            error_message = PQerrorMessage(conn_);
+            break;
+        }
+    }
+
+    bool fully_drained = false;
+    while (!saw_pipeline_sync) {
+        if (PGresult* result = PQgetResult(conn_)) {
+            consume_result(result);
+            continue;
+        }
+
+        // A null result separates result groups in pipeline mode. If libpq is
+        // not busy, calling PQgetResult again starts the next group; only wait
+        // when it reports that more socket input is required.
+        if (PQisBusy(conn_) == 0) continue;
+        if (!wait_for_socket(POLLIN) || PQconsumeInput(conn_) == 0) {
+            failed = true;
+            if (error_message.empty()) error_message = PQerrorMessage(conn_);
+            break;
+        }
+    }
+    fully_drained = saw_pipeline_sync;
+
+    const bool exited_pipeline = fully_drained && PQexitPipelineMode(conn_) != 0;
+    if (restore_blocking_mode) (void)PQsetnonblocking(conn_, 0);
+
+    if (!exited_pipeline && !failed) {
+        failed = true;
+        error_message = PQerrorMessage(conn_);
+    }
+    if (failed) {
+        if (error_message.empty()) error_message = "Postgres batch pipeline failed";
+        throw_postgres_error(sqlstate, error_message, "Postgres batch execution failed");
+    }
+    if (affected_rows.size() != parameter_sets.size()) {
+        throw std::runtime_error("Postgres batch execution ended without a result for every parameter set");
+    }
+    return affected_rows;
+}
+
 std::unique_ptr<ResultSet> PostgresConnection::query(std::string_view sql, const std::vector<Parameter>& params) {
     log_query(sql, params);
     std::string converted_sql = convert_placeholders(sql);
@@ -324,10 +489,19 @@ void PostgresConnection::rollback() {
 
 // ─── PostgresDataSource ──────────────────────────────────────────────────────
 
-PostgresDataSource::PostgresDataSource(std::string conn_info, int pool_size)
-    : conn_info_(std::move(conn_info)), pool_size_(pool_size) {
+PostgresDataSource::PostgresDataSource(std::string conn_info, int pool_size,
+                                       std::chrono::milliseconds acquisition_timeout,
+                                       std::chrono::milliseconds leak_warning_threshold,
+                                       std::string startup_sql)
+    : conn_info_(std::move(conn_info)), pool_size_(pool_size),
+      acquisition_timeout_(acquisition_timeout),
+      leak_warning_threshold_(leak_warning_threshold), startup_sql_(std::move(startup_sql)) {
+    if (pool_size_ <= 0 || acquisition_timeout_ <= std::chrono::milliseconds::zero() ||
+        leak_warning_threshold_ <= std::chrono::milliseconds::zero()) {
+        throw std::invalid_argument("PostgreSQL pool size and timeouts must be positive");
+    }
     for (int i = 0; i < pool_size_; ++i) {
-        connections_.push(create_connection());
+        pool_->connections.push(create_connection());
     }
 }
 
@@ -342,19 +516,34 @@ PGconn* PostgresDataSource::create_connection() {
         PQfinish(conn);
         throw std::runtime_error(std::format("PostgreSQL connection failed: {}", err));
     }
+    if (!startup_sql_.empty()) {
+        PGresult* result = PQexec(conn, startup_sql_.c_str());
+        const bool successful = result != nullptr && PQresultStatus(result) == PGRES_COMMAND_OK;
+        const std::string error = successful ? "" : PQerrorMessage(conn);
+        if (result != nullptr) PQclear(result);
+        if (!successful) {
+            PQfinish(conn);
+            throw std::runtime_error(std::format(
+                "PostgreSQL connection startup SQL failed: {}", error));
+        }
+    }
     return conn;
 }
 
 std::shared_ptr<Connection> PostgresDataSource::get_connection() {
-    std::unique_lock<std::mutex> lock(mutex_);
-    cv_.wait(lock, [this] { return !connections_.empty() || closed_; });
+    const auto pool = pool_;
+    std::unique_lock<std::mutex> lock(pool->mutex);
+    if (!pool->cv.wait_for(lock, acquisition_timeout_,
+                           [&] { return !pool->connections.empty() || pool->closed; })) {
+        throw std::runtime_error("PostgreSQL connection pool acquisition timed out");
+    }
 
-    if (closed_) {
+    if (pool->closed) {
         throw std::runtime_error("DataSource is closed");
     }
 
-    PGconn* conn = connections_.front();
-    connections_.pop();
+    PGconn* conn = pool->connections.front();
+    pool->connections.pop();
 
     // Verify connection status
     if (PQstatus(conn) != CONNECTION_OK) {
@@ -363,17 +552,25 @@ std::shared_ptr<Connection> PostgresDataSource::get_connection() {
             conn = create_connection();
         } catch (...) {
             // Put remaining connections back and propagate
-            cv_.notify_all();
+            pool->cv.notify_all();
             throw;
         }
     }
 
-    auto cleanup = [this, conn](Connection* ptr) {
+    const auto leased_at = std::chrono::steady_clock::now();
+    const auto leak_warning_threshold = leak_warning_threshold_;
+    auto cleanup = [pool, conn, leased_at, leak_warning_threshold](Connection* ptr) {
         delete ptr;
-        std::lock_guard<std::mutex> pool_lock(mutex_);
-        if (!closed_) {
-            connections_.push(conn);
-            cv_.notify_one();
+        const auto leased_for = std::chrono::steady_clock::now() - leased_at;
+        if (leased_for >= leak_warning_threshold) {
+            spdlog::warn("PostgreSQL connection lease returned after {}ms (threshold {}ms)",
+                         std::chrono::duration_cast<std::chrono::milliseconds>(leased_for).count(),
+                         leak_warning_threshold.count());
+        }
+        std::lock_guard<std::mutex> pool_lock(pool->mutex);
+        if (!pool->closed) {
+            pool->connections.push(conn);
+            pool->cv.notify_one();
         } else {
             PQfinish(conn);
         }
@@ -387,16 +584,17 @@ std::shared_ptr<SqlDialect> PostgresDataSource::dialect() {
 }
 
 void PostgresDataSource::close() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (closed_) return;
-    closed_ = true;
+    const auto pool = pool_;
+    std::lock_guard<std::mutex> lock(pool->mutex);
+    if (pool->closed) return;
+    pool->closed = true;
 
-    while (!connections_.empty()) {
-        PGconn* conn = connections_.front();
-        connections_.pop();
+    while (!pool->connections.empty()) {
+        PGconn* conn = pool->connections.front();
+        pool->connections.pop();
         PQfinish(conn);
     }
-    cv_.notify_all();
+    pool->cv.notify_all();
 }
 
 } // namespace novaboot::db::postgres

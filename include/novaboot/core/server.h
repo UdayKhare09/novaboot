@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <chrono>
 #include <atomic>
 #include <csignal>
 #include <memory>
@@ -12,8 +13,11 @@
 #include <charconv>
 
 #include "novaboot/core/shard.h"
+#include "novaboot/core/shutdown.h"
+#include "novaboot/core/http_drain.h"
 #include "novaboot/middleware/middleware.h"
 #include "novaboot/middleware/pipeline.h"
+#include "novaboot/middleware/declarative_authorization.h"
 #include "novaboot/quic/tls_context.h"
 #include "novaboot/router/router.h"
 #include "novaboot/router/response_entity.h"
@@ -22,11 +26,13 @@
 #include "novaboot/messaging/stomp.h"
 #include "novaboot/validation/validation.h"
 #include "novaboot/db/transaction.h"
+#include "novaboot/actuator/actuator.h"
 #ifdef __cpp_impl_reflection
 #  include <meta>
 #endif
 
 namespace novaboot::di { class RootContainer; }
+namespace novaboot::actuator { class Actuator; }
 
 namespace novaboot {
 
@@ -200,10 +206,12 @@ struct Invoker {
                     auto parser = std::make_shared<simdjson::dom::parser>();
                     auto doc = parser->parse(req.body());
                     if (doc.error() != simdjson::SUCCESS) {
-                        throw std::invalid_argument("Malformed JSON request body");
+                        throw novaboot::json::BindingException({"$: malformed JSON"});
                     }
                     try {
                         novaboot::json::deserialize_elem(doc.value(), body_obj);
+                    } catch (const novaboot::json::BindingException&) {
+                        throw;
                     } catch (const std::exception& error) {
                         throw std::invalid_argument(
                             std::string("Invalid JSON request body: ") + error.what());
@@ -344,6 +352,19 @@ public:
         /// Set the static resources directory (like in Spring Boot)
         Builder& static_resources(std::string_view path);
 
+        /// Include unhandled exception messages in 500 response bodies.
+        /// Disabled by default; enable only for local development.
+        Builder& expose_error_details(bool enabled = true);
+
+        /// Configure the bounded shutdown drain deadline (default: five seconds).
+        Builder& shutdown_timeout(std::chrono::milliseconds timeout);
+        /// Register a subsystem that participates in orderly server shutdown.
+        Builder& shutdown_participant(core::ShutdownParticipant participant);
+
+        /// Add an optional Actuator-style management surface and observation
+        /// middleware. The server retains ownership for its full lifetime.
+        Builder& actuator(std::shared_ptr<actuator::Actuator> actuator);
+
         /// Build and return the server
         std::unique_ptr<Server> build();
 
@@ -357,6 +378,10 @@ public:
         di::RootContainer* di_root_     = nullptr;
         std::vector<std::shared_ptr<middleware::Middleware>> middlewares_;
         std::string   static_resources_dir_;
+        bool          expose_error_details_ = false;
+        std::vector<std::shared_ptr<actuator::Actuator>> actuators_;
+        std::chrono::milliseconds shutdown_timeout_{5000};
+        std::vector<core::ShutdownParticipant> shutdown_participants_;
     };
 
     /// Create a server builder
@@ -375,12 +400,23 @@ public:
     /// the initial implementation; the same handler contract will be used by
     /// the HTTP/2 extended-CONNECT adapter.
     Server& websocket(std::string_view path, websocket::Handler handler) {
+        if (!handler.meters && !actuators_.empty()) {
+            handler.meters = actuators_.front()->meters();
+        }
+        if (!handler.registry) handler.registry = websocket_sessions_;
         router_.add_websocket(path, std::move(handler));
         return *this;
     }
 
     /// Register a STOMP 1.2 endpoint on the raw WebSocket transport.
     Server& stomp(std::string_view path, messaging::stomp::Endpoint& endpoint) {
+        if (!actuators_.empty()) endpoint.set_meter(actuators_.front()->meters());
+        shutdown_coordinator_.add(core::ShutdownParticipant{
+            .name = "stomp:" + std::string(path),
+            .stop_accepting = [&endpoint] { endpoint.begin_shutdown(); },
+            .drained = [&endpoint] { return endpoint.drained(); },
+            .force_close = [&endpoint] { endpoint.force_shutdown(); },
+        });
         return websocket(path, endpoint.websocket_handler());
     }
 
@@ -404,6 +440,9 @@ public:
         return worker_count_;
     }
 
+    /// True only after every configured shard has bound its listeners.
+    [[nodiscard]] bool is_ready() const noexcept { return ready_.load(); }
+
     /// Get the router (for testing)
     [[nodiscard]] router::Router& router() noexcept { return router_; }
 
@@ -421,6 +460,11 @@ private:
 
     router::Router                 router_;
     middleware::Pipeline           pipeline_;
+    std::vector<std::shared_ptr<actuator::Actuator>> actuators_;
+    std::shared_ptr<websocket::SessionRegistry> websocket_sessions_ = std::make_shared<websocket::SessionRegistry>();
+    core::ShutdownCoordinator shutdown_coordinator_;
+    std::shared_ptr<core::HttpDrainGate> http_drain_ = std::make_shared<core::HttpDrainGate>();
+    std::chrono::milliseconds shutdown_timeout_{5000};
     std::unique_ptr<quic::TlsContext> tls_ctx_;
     std::vector<std::unique_ptr<core::Shard>> shards_;
 
@@ -428,8 +472,10 @@ private:
     int          worker_count_ = 0;
     std::atomic_bool running_  = false;
     std::atomic_bool stopping_ = false;
+    std::atomic_bool ready_    = false;
     core::EventLoopBackend backend_ = core::EventLoopBackend::IoUring;
     std::string  static_resources_dir_;
+    bool         expose_error_details_ = false;
 
     sigset_t     shutdown_signal_set_{};
     std::thread  signal_thread_;
@@ -497,6 +543,46 @@ novaboot::db::TransactionOptions transaction_options_from_annotation() {
     options.timeout_seconds = transactional.timeout_seconds;
     return options;
 }
+
+template<typename Class, std::meta::info m>
+consteval auto declarative_authorization_from_annotations() {
+    struct Options {
+        bool required = false;
+        char roles[128] = {};
+        char scopes[128] = {};
+        novaboot::annotations::AuthorizationMatch role_match =
+            novaboot::annotations::AuthorizationMatch::All;
+        novaboot::annotations::AuthorizationMatch scope_match =
+            novaboot::annotations::AuthorizationMatch::All;
+    } options;
+
+    if constexpr (novaboot::detail::has_annotation<novaboot::annotations::PermitAll>(m)) {
+        return options;
+    }
+
+    if constexpr (novaboot::detail::has_annotation<novaboot::annotations::Authorize>(m)) {
+        constexpr auto annotation =
+            novaboot::detail::get_annotation<novaboot::annotations::Authorize>(m);
+        options.required = true;
+        for (int index = 0; index < 128; ++index) {
+            options.roles[index] = annotation.roles[index];
+            options.scopes[index] = annotation.scopes[index];
+        }
+        options.role_match = annotation.role_match;
+        options.scope_match = annotation.scope_match;
+    } else if constexpr (novaboot::detail::has_annotation<novaboot::annotations::Authorize>(^^Class)) {
+        constexpr auto annotation =
+            novaboot::detail::get_annotation<novaboot::annotations::Authorize>(^^Class);
+        options.required = true;
+        for (int index = 0; index < 128; ++index) {
+            options.roles[index] = annotation.roles[index];
+            options.scopes[index] = annotation.scopes[index];
+        }
+        options.role_match = annotation.role_match;
+        options.scope_match = annotation.scope_match;
+    }
+    return options;
+}
 #endif
 } // namespace detail
 
@@ -508,6 +594,19 @@ auto handler() {
         using Class = typename Traits::class_type;
         constexpr auto m_meta = detail::find_method_meta<Class, MethodPtr>();
         using InvokerType = typename Traits::template invoker_type<m_meta>;
+
+        constexpr auto authorization =
+            detail::declarative_authorization_from_annotations<Class, m_meta>();
+        if constexpr (authorization.required) {
+            if (!middleware::authorize_declarative(req, res, ctx, {
+                    .roles = authorization.roles,
+                    .scopes = authorization.scopes,
+                    .role_match = authorization.role_match,
+                    .scope_match = authorization.scope_match,
+                })) {
+                return;
+            }
+        }
 
         auto& controller = ctx.inject<Class>();
         if constexpr (novaboot::detail::has_annotation<novaboot::annotations::Transactional>(m_meta)) {

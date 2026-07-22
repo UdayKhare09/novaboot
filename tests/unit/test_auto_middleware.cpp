@@ -68,8 +68,9 @@ TEST(AutoMiddlewareTest, OrderAndAutoResolution) {
         .build();
 
     // Verify the pipeline was constructed with middlewares in correct order (B then A)
-    // Pipeline size should be 3: DIMiddleware, MockMiddlewareB, MockMiddlewareA
-    EXPECT_EQ(server->pipeline().size(), 3);
+    // Pipeline includes the built-in HTTP drain gate before DI and the ordered
+    // application middlewares.
+    EXPECT_EQ(server->pipeline().size(), 4);
 
     http3::Request req;
     http3::Response res;

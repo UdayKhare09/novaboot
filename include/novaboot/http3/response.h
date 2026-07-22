@@ -1,13 +1,17 @@
 #pragma once
 
 #include <cstdint>
+#include <algorithm>
 #include <string>
 #include <string_view>
+#include <memory>
 #include <vector>
 
 #include "novaboot/http3/header_map.h"
 
 namespace novaboot::http {
+
+namespace sse { class Channel; }
 
 using HeaderMap = http3::HeaderMap;
 
@@ -66,6 +70,44 @@ public:
         return *this;
     }
 
+    /// Set a UTF-8 plain-text representation.
+    Response& text(std::string_view text) {
+        headers_.set("content-type", "text/plain; charset=utf-8");
+        body_ = std::string(text);
+        return *this;
+    }
+
+    /// Mark the current body as a download. Unsafe client-supplied filename
+    /// characters are replaced, preventing header injection and path use.
+    Response& download(std::string_view filename,
+                       std::string_view content_type = "application/octet-stream") {
+        std::string safe_name;
+        safe_name.reserve(filename.size());
+        for (const unsigned char character : filename) {
+            if (character >= 0x20 && character != '"' && character != '\\' &&
+                character != '/' && character != ':') {
+                safe_name.push_back(static_cast<char>(character));
+            } else {
+                safe_name.push_back('_');
+            }
+        }
+        if (safe_name.empty()) safe_name = "download";
+        headers_.set("content-type", content_type);
+        headers_.set("content-disposition", "attachment; filename=\"" + safe_name + "\"");
+        return *this;
+    }
+
+    /// Attach a persistent Server-Sent Events producer. The selected transport
+    /// owns the stream lifetime and drains the bounded channel.
+    Response& event_stream(std::shared_ptr<sse::Channel> channel) {
+        sse_channel_ = std::move(channel);
+        return *this;
+    }
+
+    [[nodiscard]] const std::shared_ptr<sse::Channel>& event_stream() const noexcept {
+        return sse_channel_;
+    }
+
     // ─── Accessors ───────────────────────────────────────────────────
     [[nodiscard]] int status_code() const noexcept { return status_code_; }
 
@@ -110,6 +152,7 @@ private:
     int         status_code_ = 200;
     HeaderMap   headers_;
     std::string body_;
+    std::shared_ptr<sse::Channel> sse_channel_;
     bool        submitted_  = false;
     std::size_t bytes_sent_ = 0;
     std::size_t bytes_provided_ = 0;

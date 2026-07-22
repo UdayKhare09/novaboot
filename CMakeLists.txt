@@ -2,9 +2,11 @@ cmake_minimum_required(VERSION 3.25)
 
 project(novaboot
     VERSION 0.1.0
-    DESCRIPTION "Production-grade HTTP/3-only C++ framework"
+    DESCRIPTION "Production-grade HTTP1.1/2/3 C++ framework"
     LANGUAGES CXX
 )
+
+include(CheckCXXCompilerFlag)
 
 # ─── C++26 + Reflection ────────────────────────────────────────────────────────
 # Phase 2: DI/IoC requires C++26 static reflection (P2996/P3385).
@@ -15,6 +17,13 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Enable C++26 static reflection (P2996 — GCC 16+ flag)
+check_cxx_compiler_flag("-freflection" NOVABOOT_COMPILER_SUPPORTS_REFLECTION)
+if(NOT NOVABOOT_COMPILER_SUPPORTS_REFLECTION)
+    message(FATAL_ERROR
+        "NovaBoot requires a C++ compiler with C++26 static reflection and "
+        "the -freflection option (currently GCC 16.1 or newer). See "
+        "docs/compatibility.md for supported toolchains.")
+endif()
 add_compile_options(-freflection)
 
 # ─── Build type defaults ──────────────────────────────────────────────────────
@@ -67,9 +76,16 @@ add_library(novaboot STATIC
     src/websocket/websocket.cpp
     src/messaging/stomp.cpp
 
+    # Operations / observability
+    src/actuator/actuator.cpp
+    src/observability/observation.cpp
+    src/observability/trace_context.cpp
+    src/observability/http_observation_middleware.cpp
+
     # Core
     src/core/io_uring_event_loop.cpp
     src/core/shard.cpp
+    src/core/shutdown.cpp
     src/core/server.cpp
 
     # QUIC
@@ -86,6 +102,10 @@ add_library(novaboot STATIC
     src/http3/http3_stream.cpp
     src/http3/http3_client_session.cpp
 
+    # HTTP helpers
+    src/http/static_resource.cpp
+    src/http/multipart.cpp
+
     # QUIC (client)
     src/quic/quic_client_connection.cpp
 
@@ -99,11 +119,19 @@ add_library(novaboot STATIC
     src/middleware/pipeline.cpp
     src/middleware/cors_middleware.cpp
     src/middleware/request_logging_middleware.cpp
+    src/middleware/request_id_middleware.cpp
+    src/middleware/csrf_middleware.cpp
+    src/middleware/session_middleware.cpp
+    src/middleware/rate_limit_middleware.cpp
+    src/middleware/concurrency_limit_middleware.cpp
+    src/middleware/trusted_forwarded_headers_middleware.cpp
     src/middleware/jwt_middleware.cpp
     src/middleware/security_headers_middleware.cpp
     src/middleware/body_size_limit_middleware.cpp
     src/middleware/compression_middleware.cpp
+    src/middleware/content_negotiation_middleware.cpp
     src/middleware/authorization_middleware.cpp
+    src/middleware/declarative_authorization.cpp
 
     # Context
     src/context/request_context.cpp
@@ -140,6 +168,11 @@ target_link_libraries(novaboot
 )
 
 target_compile_features(novaboot PUBLIC cxx_std_26)
+# Public headers use C++ static reflection, so every consumer translation unit
+# that includes NovaBoot must compile with the same language extension. The
+# directory-wide option above builds this repository; this usage requirement
+# makes source-subdirectory and future installed-SDK consumers correct too.
+target_compile_options(novaboot INTERFACE -freflection)
 
 # ─── SQLite Driver Target ──────────────────────────────────────────────────────
 find_package(SQLite3 REQUIRED)
@@ -156,6 +189,7 @@ add_library(novaboot::sqlite ALIAS novaboot_sqlite)
 find_package(PostgreSQL REQUIRED)
 add_library(novaboot_postgres STATIC
     src/db/drivers/postgres/postgres_driver.cpp
+    src/db/drivers/postgres/postgres_session_store.cpp
 )
 target_link_libraries(novaboot_postgres PUBLIC novaboot ${PostgreSQL_LIBRARIES})
 target_include_directories(novaboot_postgres PUBLIC

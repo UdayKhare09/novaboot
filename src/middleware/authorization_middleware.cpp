@@ -7,6 +7,7 @@
 #include <utility>
 
 #include "novaboot/middleware/jwt_middleware.h"
+#include "novaboot/middleware/session_middleware.h"
 
 namespace novaboot::middleware {
 namespace {
@@ -140,34 +141,55 @@ void AuthorizationMiddleware::handle(http3::Request& req,
         }
     }
 
-    if (!matched_policy || !requires_principal) {
+    if (!matched_policy) {
         next();
         return;
     }
 
-    const auto* principal = ctx.get<JwtPrincipal>();
-    if (principal == nullptr) {
+    const auto* jwt_principal = ctx.get<JwtPrincipal>();
+    const auto* session_principal = ctx.get<SessionPrincipal>();
+    const bool authenticated = jwt_principal != nullptr || session_principal != nullptr;
+    if (requires_principal && !authenticated) {
         reject_unauthorized(res, cfg_);
         return;
     }
 
-    const auto roles = roles_from_claim(*principal, cfg_.roles_claim);
+    std::vector<std::string> jwt_roles;
+    const std::vector<std::string>* scopes = nullptr;
+    const std::vector<std::string>* roles = nullptr;
+    if (jwt_principal != nullptr) {
+        jwt_roles = roles_from_claim(*jwt_principal, cfg_.roles_claim);
+        scopes = &jwt_principal->scopes;
+        roles = &jwt_roles;
+    } else if (session_principal != nullptr) {
+        scopes = &session_principal->scopes;
+        roles = &session_principal->roles;
+    }
 
     for (const auto& policy : cfg_.policies) {
-        if (!policy_matches(policy, req) || !policy.require_authenticated) {
+        if (!policy_matches(policy, req)) {
             continue;
         }
 
-        if (!satisfies(principal->scopes,
-                       policy.required_scopes,
-                       policy.scope_match)) {
-            reject_forbidden(res, cfg_);
-            return;
+        if (policy.require_authenticated) {
+            if (!satisfies(*scopes,
+                           policy.required_scopes,
+                           policy.scope_match)) {
+                reject_forbidden(res, cfg_);
+                return;
+            }
+
+            if (!satisfies(*roles, policy.required_roles, policy.role_match)) {
+                reject_forbidden(res, cfg_);
+                return;
+            }
         }
 
-        if (!satisfies(roles, policy.required_roles, policy.role_match)) {
-            reject_forbidden(res, cfg_);
-            return;
+        for (const auto& custom_policy : policy.custom_policies) {
+            if (!custom_policy(req, ctx)) {
+                reject_forbidden(res, cfg_);
+                return;
+            }
         }
     }
 

@@ -10,6 +10,7 @@
 #include <optional>
 #include "novaboot/http3/request.h"
 #include "novaboot/http3/response.h"
+#include "novaboot/http/sse.h"
 #include "novaboot/websocket/websocket.h"
 
 namespace novaboot::http2 {
@@ -29,9 +30,11 @@ public:
         std::string rejection_body = "Forbidden";
         std::optional<websocket::Handler> handler;
         std::string principal;
+        std::string subprotocol;
 
         [[nodiscard]] static WebSocketConnectResult accept(
-            websocket::Handler handler, std::string principal = {}) {
+            websocket::Handler handler, std::string principal = {},
+            std::string subprotocol = {}) {
             return WebSocketConnectResult{
                 .matched = true,
                 .accepted = true,
@@ -39,6 +42,7 @@ public:
                 .rejection_body = {},
                 .handler = std::move(handler),
                 .principal = std::move(principal),
+                .subprotocol = std::move(subprotocol),
             };
         }
 
@@ -51,6 +55,7 @@ public:
                 .rejection_body = std::move(body),
                 .handler = std::nullopt,
                 .principal = {},
+                .subprotocol = {},
             };
         }
     };
@@ -74,6 +79,10 @@ public:
         std::deque<std::vector<std::uint8_t>> websocket_outbound;
         std::size_t websocket_outbound_offset = 0;
         bool websocket_data_submission_active = false;
+
+        std::shared_ptr<http::sse::Channel> sse_channel;
+        std::string sse_current;
+        std::size_t sse_current_offset = 0;
     };
 
     explicit Http2Session(RequestHandler handler,
@@ -96,7 +105,12 @@ public:
     std::vector<std::uint8_t> drain_websocket_outbound(
         std::function<std::vector<std::uint8_t>(const std::vector<std::uint8_t>&)> encrypt_callback);
 
+    /// Drain all owner-loop-woken WebSocket and SSE output.
+    std::vector<std::uint8_t> drain_outbound(
+        std::function<std::vector<std::uint8_t>(const std::vector<std::uint8_t>&)> encrypt_callback);
+
     [[nodiscard]] bool keep_alive() const noexcept { return keep_alive_; }
+    void set_peer_address(std::string_view peer_address) { peer_address_ = std::string(peer_address); }
 
 private:
     static int on_begin_headers_cb(nghttp2_session* session,
@@ -132,6 +146,7 @@ private:
     websocket::Wakeup websocket_wakeup_;
     std::unordered_map<int32_t, Http2Stream> streams_;
     bool keep_alive_ = true;
+    std::string peer_address_;
 };
 
 } // namespace novaboot::http2

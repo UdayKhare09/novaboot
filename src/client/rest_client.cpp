@@ -61,6 +61,9 @@ std::string resolve_host(const std::string& host, uint16_t port) {
 RestClient::RestClient() = default;
 
 RestClient::~RestClient() {
+    if (event_loop_ && reconnect_timer_) {
+        event_loop_->cancel_timer(reconnect_timer_);
+    }
     if (conn_) conn_->close();
     if (socket_ && event_loop_) {
         event_loop_->remove_fd(socket_->fd());
@@ -588,26 +591,7 @@ void RestClient::send_packet(const net::OutgoingPacket& pkt) {
 void RestClient::on_disconnect() {
     spdlog::warn("RestClient: connection to {}:{} lost", cfg_.host, cfg_.port);
 
-    // Fail all pending requests with an error
-    for (auto& [stream_id, entry] : pending_) {
-        entry.first = http3::ClientResponse{0, {}, "Connection lost"};
-        if (entry.second) entry.second.resume();
-    }
-    pending_.clear();
-
-    for (auto& [stream_id, entry] : h2_pending_) {
-        entry.complete = true;
-        entry.response = http3::ClientResponse{0, {}, "Connection lost"};
-        if (entry.coroutine) entry.coroutine.resume();
-    }
-    h2_pending_.clear();
-
-    if (pending_tcp_handle_) {
-        tcp_response_ = http3::ClientResponse{0, {}, "Connection lost"};
-        auto handle = pending_tcp_handle_;
-        pending_tcp_handle_ = nullptr;
-        handle.resume();
-    }
+    complete_pending_with_error("Connection lost");
 
     if (tcp_fd_ != -1) {
         event_loop_->remove_fd(tcp_fd_);
@@ -647,6 +631,40 @@ void RestClient::on_disconnect() {
     // Exponential backoff with 30s cap
     next_backoff_ = std::min(next_backoff_ * 2, kMaxBackoff);
     ++reconnect_attempts_;
+}
+
+void RestClient::complete_pending_with_error(std::string_view message) {
+    // Do not resume a coroutine while iterating the owning map: resumption
+    // erases its own entry. Mark every request first, then resume afterward.
+    std::vector<std::coroutine_handle<>> pending_handles;
+    pending_handles.reserve(pending_.size() + h2_pending_.size());
+    for (auto& [stream_id, entry] : pending_) {
+        static_cast<void>(stream_id);
+        entry.first = http3::ClientResponse{0, {}, std::string(message)};
+        if (entry.second) pending_handles.push_back(entry.second);
+    }
+
+    for (auto& [stream_id, entry] : h2_pending_) {
+        static_cast<void>(stream_id);
+        entry.complete = true;
+        entry.response = http3::ClientResponse{0, {}, std::string(message)};
+        if (entry.coroutine) pending_handles.push_back(entry.coroutine);
+    }
+
+    if (pending_tcp_handle_) {
+        tcp_response_ = http3::ClientResponse{0, {}, std::string(message)};
+        auto handle = pending_tcp_handle_;
+        pending_tcp_handle_ = nullptr;
+        pending_handles.push_back(handle);
+    }
+
+    for (const auto handle : pending_handles) {
+        if (handle) handle.resume();
+    }
+    // A resumed coroutine removes its own H2/H3 entry. Any entry without a
+    // waiter is no longer useful after a connection-level failure.
+    pending_.clear();
+    h2_pending_.clear();
 }
 
 void RestClient::do_reconnect() {
@@ -944,6 +962,9 @@ http3::ClientResponse RestClient::sync_execute(
     while (!task.is_ready()) {
         event_loop_->run_once();
         if (std::chrono::steady_clock::now() >= deadline) {
+            // Completing the suspended request before task destruction keeps
+            // protocol callbacks from later resuming a dangling coroutine.
+            on_disconnect();
             throw ClientError(
                 std::format("RestClient: request timed out after {}ms",
                             cfg_.request_timeout_ms));

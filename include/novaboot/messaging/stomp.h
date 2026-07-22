@@ -31,6 +31,18 @@ struct ParseError {
     std::string message;
 };
 
+/// A conservative local-broker authorization convention. Attach the produced
+/// interceptor to Endpoint::Config after authenticating the WebSocket
+/// handshake. Empty destination lists leave that operation unrestricted.
+struct AuthorizationPolicy {
+    bool require_authenticated_principal = false;
+    std::vector<std::string> allowed_send_destinations;
+    std::vector<std::string> allowed_subscribe_destinations;
+};
+
+[[nodiscard]] std::function<bool(const websocket::Session&, const Frame&)>
+frame_authorizer(AuthorizationPolicy policy);
+
 /// Incremental STOMP 1.2 frame decoder.  It accepts fragmented WebSocket text
 /// messages and emits zero or more complete STOMP frames; heartbeats are
 /// ignored.  Any protocol error leaves the decoder in the failed state.
@@ -160,6 +172,10 @@ public:
     Endpoint& operator=(const Endpoint&) = delete;
 
     [[nodiscard]] websocket::Handler websocket_handler();
+    void set_meter(std::shared_ptr<observability::MeterRegistry> meter);
+    void begin_shutdown();
+    [[nodiscard]] bool drained() const;
+    void force_shutdown();
 
 private:
     struct ConnectionState {
@@ -180,13 +196,15 @@ private:
     void process_frame(websocket::Session& session, ConnectionState& state, const Frame& frame);
     void heartbeat_loop(std::stop_token stop);
     static std::int64_t now_ms();
-    static void send(websocket::Session& session, Frame frame);
-    static void protocol_error(websocket::Session& session, std::string message);
+    void send(websocket::Session& session, Frame frame);
+    void protocol_error(websocket::Session& session, std::string message);
 
     SimpleBroker& broker_;
     Config config_;
-    std::mutex mutex_;
+    mutable std::mutex mutex_;
     std::unordered_map<websocket::SessionHandle::Id, std::shared_ptr<ConnectionState>> connections_;
+    std::shared_ptr<observability::MeterRegistry> meters_;
+    std::atomic_bool accepting_{true};
     std::jthread heartbeat_thread_;
 };
 

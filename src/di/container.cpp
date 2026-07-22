@@ -154,6 +154,7 @@ void* RootContainer::instantiate(BeanRegistration& reg) {
 
 void RootContainer::build() {
     if (built_) throw DIError("novaboot::di: RootContainer::build() called twice");
+    const auto started = std::chrono::steady_clock::now();
 
     spdlog::info("novaboot::di: Building container ({} registrations)",
                  registrations_.size());
@@ -192,6 +193,12 @@ void RootContainer::build() {
     lifecycle_.invoke_post_constructs();
 
     built_ = true;
+    if (meters_) {
+        meters_->histogram_record("novaboot.di.container.build.duration",
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count(), "s");
+        meters_->gauge_set("novaboot.di.registrations", static_cast<double>(registrations_.size()), "1");
+        meters_->gauge_set("novaboot.di.singletons", static_cast<double>(instances_.size()), "1");
+    }
     spdlog::info("novaboot::di: Container built ({} singletons)", instances_.size());
 }
 

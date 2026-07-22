@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <atomic>
 #include <memory>
 #include <thread>
 #include <vector>
@@ -28,6 +29,7 @@ struct ShardConfig {
     net::Address      bind_address;        ///< Address to bind UDP socket
     EventLoopBackend  backend = EventLoopBackend::IoUring; ///< Event loop backend
     std::string       static_resources_dir; ///< Configured static resources directory path
+    bool              expose_error_details = false; ///< Development-only error body details
 };
 
 /// Per-core shard — the fundamental execution unit.
@@ -63,6 +65,7 @@ public:
 
     /// Check if the shard is running
     [[nodiscard]] bool is_running() const noexcept;
+    [[nodiscard]] bool is_ready() const noexcept { return ready_.load(); }
 
     /// Get the shard ID
     [[nodiscard]] int id() const noexcept { return config_.shard_id; }
@@ -78,7 +81,7 @@ private:
     void on_request(http3::Http3Stream& stream);
 
     /// Attempt to serve a static file from static resources directory
-    bool serve_static_file(std::string_view path, http3::Response& res, bool head_only);
+    bool serve_static_file(const http3::Request& request, http3::Response& res, bool head_only);
 
     /// Send a packet via the UDP socket
     void send_packet(const net::OutgoingPacket& packet);
@@ -99,6 +102,7 @@ private:
     std::unique_ptr<net::TcpConnectionManager>  tcp_conn_mgr_;
 
     std::thread thread_;
+    std::atomic_bool ready_ = false;
 
     /// Periodic cleanup timer
     TimerHandle cleanup_timer_;

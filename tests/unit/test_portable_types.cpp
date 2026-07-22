@@ -4,6 +4,7 @@
 #include "novaboot/db/repository.h"
 #include "novaboot/db/drivers/sqlite/sqlite_driver.h"
 #include "novaboot/db/drivers/postgres/postgres_driver.h"
+#include "support/postgres_test_database.h"
 #include <thread>
 #include <chrono>
 #include <iostream>
@@ -91,14 +92,14 @@ TEST(SQLitePortableTest, CRUD) {
 }
 
 TEST(PostgresPortableTest, CRUD) {
-    std::string conn_info = "host=localhost dbname=postgres user=postgres password=postgres connect_timeout=2";
-    std::shared_ptr<novaboot::db::postgres::PostgresDataSource> ds;
+    std::unique_ptr<novaboot::testing::PostgresTestDatabase> database;
     try {
-        ds = std::make_shared<novaboot::db::postgres::PostgresDataSource>(conn_info, 1);
+        database = std::make_unique<novaboot::testing::PostgresTestDatabase>();
     } catch (...) {
         GTEST_SKIP() << "Postgres server not reachable. Skipping.";
         return;
     }
+    auto ds = database->datasource();
 
     try {
         auto conn = ds->get_connection();

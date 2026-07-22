@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -9,10 +10,17 @@ namespace novaboot::middleware {
 
 /// Policy-based route authorization middleware.
 ///
-/// Must run after JwtMiddleware for protected policies, because it authorizes
-/// the JwtPrincipal stored in RequestContext by the authentication layer.
+/// Must run after JwtMiddleware or SessionMiddleware for protected policies,
+/// because it authorizes the principal stored in RequestContext by the
+/// authentication layer.
 class AuthorizationMiddleware : public Middleware {
 public:
+    /// Domain-specific authorization predicate. Return false to produce the
+    /// configured forbidden response. The request context exposes a verified
+    /// JwtPrincipal or SessionPrincipal when authentication is required.
+    using CustomPolicy = std::function<bool(
+        const http3::Request&, const context::RequestContext&)>;
+
     enum class MatchMode {
         Any,
         All,
@@ -35,6 +43,11 @@ public:
 
         std::vector<std::string> required_roles = {};
         MatchMode role_match = MatchMode::All;
+
+        /// All custom policies must allow the matching request. Custom policies
+        /// also run for public (`require_authenticated = false`) policies,
+        /// enabling explicit request-level checks without a principal.
+        std::vector<CustomPolicy> custom_policies = {};
     };
 
     struct Config {
@@ -42,8 +55,9 @@ public:
         /// allowed.
         std::vector<Policy> policies = {};
 
-        /// Claim used to read roles from JwtPrincipal::claims.
-        /// Supports string arrays and space-separated strings.
+        /// Claim used to read JWT roles from JwtPrincipal::claims. Session
+        /// principals carry roles directly. Supports string arrays and
+        /// space-separated JWT strings.
         std::string roles_claim = "roles";
 
         int unauthorized_status = 401;

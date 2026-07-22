@@ -13,6 +13,27 @@ nghttp2_ssize h2_data_source_read_callback(
     nghttp2_data_source* source, void* /*user_data*/) {
     
     auto* stream = static_cast<Http2Session::Http2Stream*>(source->ptr);
+    if (stream->sse_channel) {
+        while (stream->sse_current_offset >= stream->sse_current.size()) {
+            stream->sse_current.clear();
+            stream->sse_current_offset = 0;
+            auto event = stream->sse_channel->take_next();
+            if (!event) {
+                if (stream->sse_channel->closed()) {
+                    *data_flags |= NGHTTP2_DATA_FLAG_EOF;
+                    return 0;
+                }
+                return NGHTTP2_ERR_DEFERRED;
+            }
+            stream->sse_current = std::move(*event);
+        }
+        const auto remaining = stream->sse_current.size() - stream->sse_current_offset;
+        const auto to_write = std::min(length, remaining);
+        std::memcpy(buf, stream->sse_current.data() + stream->sse_current_offset, to_write);
+        stream->sse_current_offset += to_write;
+        return static_cast<nghttp2_ssize>(to_write);
+    }
+
     const auto& body = stream->response.body_str();
     size_t offset = stream->response.bytes_provided();
     size_t available = body.size() - offset;
@@ -62,6 +83,12 @@ Http2Session::Http2Session(RequestHandler handler,
 }
 
 Http2Session::~Http2Session() {
+    for (auto& [_, stream] : streams_) {
+        if (stream.sse_channel) {
+            stream.sse_channel->set_wakeup({});
+            stream.sse_channel->close();
+        }
+    }
     if (session_) {
         nghttp2_session_del(session_);
     }
@@ -73,7 +100,8 @@ Http2Session::Http2Session(Http2Session&& other) noexcept
       websocket_handler_(std::move(other.websocket_handler_)),
       websocket_wakeup_(std::move(other.websocket_wakeup_)),
       streams_(std::move(other.streams_)),
-      keep_alive_(other.keep_alive_) {
+      keep_alive_(other.keep_alive_),
+      peer_address_(std::move(other.peer_address_)) {
     other.session_ = nullptr;
 }
 
@@ -86,6 +114,7 @@ Http2Session& Http2Session::operator=(Http2Session&& other) noexcept {
         websocket_wakeup_ = std::move(other.websocket_wakeup_);
         streams_ = std::move(other.streams_);
         keep_alive_ = other.keep_alive_;
+        peer_address_ = std::move(other.peer_address_);
         other.session_ = nullptr;
     }
     return *this;
@@ -115,6 +144,22 @@ std::vector<std::uint8_t> Http2Session::drain_websocket_outbound(
     for (auto& [_, stream] : streams_) {
         if (!stream.websocket_active || !stream.websocket) continue;
         queue_websocket_outbound(stream, stream.websocket->drain_external_outbound());
+    }
+    return send_pending_frames(std::move(encrypt_callback));
+}
+
+std::vector<std::uint8_t> Http2Session::drain_outbound(
+    std::function<std::vector<std::uint8_t>(const std::vector<std::uint8_t>&)> encrypt_callback) {
+    for (auto& [_, stream] : streams_) {
+        if (stream.websocket_active && stream.websocket) {
+            queue_websocket_outbound(stream, stream.websocket->drain_external_outbound());
+        }
+        if (stream.sse_channel) {
+            const auto rv = nghttp2_session_resume_data(session_, stream.stream_id);
+            if (rv != 0 && rv != NGHTTP2_ERR_INVALID_STATE) {
+                spdlog::debug("nghttp2_session_resume_data failed: {}", nghttp2_strerror(rv));
+            }
+        }
     }
     return send_pending_frames(std::move(encrypt_callback));
 }
@@ -150,6 +195,7 @@ int Http2Session::on_begin_headers_cb(nghttp2_session* /*session*/,
         int32_t stream_id = frame->hd.stream_id;
         Http2Stream stream{};
         stream.stream_id = stream_id;
+        stream.request.set_peer_address(self->peer_address_);
         self->streams_[stream_id] = std::move(stream);
     }
     return 0;
@@ -250,13 +296,24 @@ int Http2Session::on_frame_recv_cb(nghttp2_session* /*session*/,
 int Http2Session::on_stream_close_cb(nghttp2_session* /*session*/, int32_t stream_id,
                                     uint32_t /*error_code*/, void* user_data) {
     auto* self = static_cast<Http2Session*>(user_data);
-    self->streams_.erase(stream_id);
+    if (const auto it = self->streams_.find(stream_id); it != self->streams_.end()) {
+        if (it->second.sse_channel) {
+            it->second.sse_channel->set_wakeup({});
+            it->second.sse_channel->close();
+        }
+        self->streams_.erase(it);
+    }
     return 0;
 }
 
 void Http2Session::handle_stream_request(Http2Stream& stream) {
     // Execute handler
     handler_(stream.request, stream.response);
+
+    if (const auto& channel = stream.response.event_stream()) {
+        stream.sse_channel = channel;
+        stream.sse_channel->set_wakeup(websocket_wakeup_);
+    }
 
     std::vector<nghttp2_nv> nvs;
     auto add_nv = [&](std::string_view name, std::string_view value) {
@@ -276,13 +333,15 @@ void Http2Session::handle_stream_request(Http2Stream& stream) {
     for (const auto& entry : stream.response.headers().entries()) {
         std::string name_lower = entry.name;
         std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
-        if (name_lower != "content-length" && name_lower != "alt-svc") {
+        if (name_lower != "alt-svc") {
             add_nv(entry.name, entry.value);
         }
     }
 
-    std::string content_length_str = std::to_string(stream.response.body_size());
-    add_nv("content-length", content_length_str);
+    if (!stream.sse_channel && !stream.response.headers().has("content-length")) {
+        std::string content_length_str = std::to_string(stream.response.body_size());
+        add_nv("content-length", content_length_str);
+    }
 
     nghttp2_data_provider2 data_prd;
     data_prd.source.ptr = &stream;
@@ -322,16 +381,28 @@ void Http2Session::handle_websocket_connect(Http2Stream& stream) {
     stream.websocket_active = true;
 
     const std::string status = "200";
-    nghttp2_nv header{};
-    header.name = const_cast<std::uint8_t*>(
+    std::array<nghttp2_nv, 2> headers{};
+    auto& status_header = headers[0];
+    status_header.name = const_cast<std::uint8_t*>(
         reinterpret_cast<const std::uint8_t*>(":status"));
-    header.value = const_cast<std::uint8_t*>(
+    status_header.value = const_cast<std::uint8_t*>(
         reinterpret_cast<const std::uint8_t*>(status.data()));
-    header.namelen = 7;
-    header.valuelen = status.size();
-    header.flags = NGHTTP2_NV_FLAG_NONE;
+    status_header.namelen = 7;
+    status_header.valuelen = status.size();
+    status_header.flags = NGHTTP2_NV_FLAG_NONE;
+    std::size_t header_count = 1;
+    if (!result.subprotocol.empty()) {
+        auto& protocol_header = headers[header_count++];
+        protocol_header.name = const_cast<std::uint8_t*>(
+            reinterpret_cast<const std::uint8_t*>("sec-websocket-protocol"));
+        protocol_header.value = const_cast<std::uint8_t*>(
+            reinterpret_cast<const std::uint8_t*>(result.subprotocol.data()));
+        protocol_header.namelen = sizeof("sec-websocket-protocol") - 1;
+        protocol_header.valuelen = result.subprotocol.size();
+        protocol_header.flags = NGHTTP2_NV_FLAG_NONE;
+    }
     const int rv = nghttp2_submit_headers(
-        session_, NGHTTP2_FLAG_NONE, stream.stream_id, nullptr, &header, 1, nullptr);
+        session_, NGHTTP2_FLAG_NONE, stream.stream_id, nullptr, headers.data(), header_count, nullptr);
     if (rv != 0) {
         spdlog::error("nghttp2_submit_headers failed for WebSocket stream {}: {}",
                       stream.stream_id, nghttp2_strerror(rv));

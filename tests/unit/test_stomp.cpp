@@ -296,3 +296,26 @@ TEST(StompEndpointTest, AppliesFrameInterceptorBeforeBrokerDispatch) {
     ASSERT_EQ(error->size(), 1U);
     EXPECT_EQ((*error)[0].command, "ERROR");
 }
+
+TEST(StompEndpointTest, FrameAuthorizerRestrictsDestinationsAndRequiresPrincipal) {
+    const auto authorize = stomp::frame_authorizer({
+        .require_authenticated_principal = true,
+        .allowed_send_destinations = {"/app"},
+        .allowed_subscribe_destinations = {"/topic/public"},
+    });
+    const auto evaluate = [&](std::string principal, stomp::Frame frame) {
+        bool allowed = false;
+        novaboot::websocket::Connection connection({
+            .on_message = [&](novaboot::websocket::Session& session,
+                              const novaboot::websocket::Message&) {
+                allowed = authorize(session, frame);
+            },
+        }, std::move(principal));
+        EXPECT_TRUE(connection.feed(masked_text("evaluate")).has_value());
+        return allowed;
+    };
+
+    EXPECT_FALSE(evaluate({}, {.command = "SEND", .headers = {{"destination", "/app/chat"}}, .body = {}}));
+    EXPECT_TRUE(evaluate("alice", {.command = "SEND", .headers = {{"destination", "/app/chat"}}, .body = {}}));
+    EXPECT_FALSE(evaluate("alice", {.command = "SUBSCRIBE", .headers = {{"destination", "/topic/private"}}, .body = {}}));
+}

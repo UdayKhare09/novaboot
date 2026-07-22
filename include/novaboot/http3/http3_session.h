@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <string>
+#include <string_view>
 #include <unordered_map>
 
 #include <nghttp3/nghttp3.h>
@@ -15,6 +17,7 @@ namespace novaboot::http3 {
 /// Callback invoked when a complete HTTP request is ready for routing.
 using RequestHandler =
     std::function<void(Http3Stream& stream)>;
+using SseWakeup = std::function<void(int64_t)>;
 
 /// HTTP/3 session wrapping nghttp3_conn.
 ///
@@ -37,7 +40,11 @@ public:
     /// The handler will be called when a request is ready for routing.
     static std::unique_ptr<Http3Session> create(
         ngtcp2_conn* quic_conn,
-        RequestHandler handler);
+        RequestHandler handler,
+        SseWakeup sse_wakeup = {});
+
+    void resume_sse_stream(int64_t stream_id);
+    void set_peer_address(std::string_view peer_address) { peer_address_ = std::string(peer_address); }
 
     /// Feed stream data from ngtcp2 into nghttp3
     int on_stream_data(int64_t stream_id, uint64_t offset, const uint8_t* data,
@@ -119,6 +126,8 @@ private:
 
     /// Called when request is ready for routing
     RequestHandler handler_;
+    SseWakeup sse_wakeup_;
+    std::string peer_address_;
 };
 
 } // namespace novaboot::http3

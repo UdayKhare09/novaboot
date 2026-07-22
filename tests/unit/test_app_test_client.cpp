@@ -4,6 +4,7 @@
 #include "novaboot/annotations/scanner.h"
 #include "novaboot/router/response_entity.h"
 #include "novaboot/testing/app_test_client.h"
+#include "novaboot/middleware/request_id_middleware.h"
 #include "novaboot/validation/validation.h"
 
 #include <string>
@@ -69,5 +70,34 @@ TEST(AppTestClientTest, DispatchesRegisteredRoutesInProcess) {
     auto missing = client.get("/harness/missing");
     EXPECT_EQ(missing.status, 404);
 
+    root.shutdown();
+}
+
+TEST(AppTestClientTest, ExecutesConfiguredMiddlewareInProcess) {
+    novaboot::di::RootContainer root;
+    novaboot::annotations::register_beans<HarnessController>(root);
+    root.build();
+    novaboot::testing::AppTestClient client(root, {
+        std::make_shared<novaboot::middleware::RequestIdMiddleware>()
+    });
+    auto response = client.get("/harness/items/1", {{"x-request-id", "edge-123"}});
+    EXPECT_EQ(response.header("x-request-id"), "edge-123");
+    EXPECT_TRUE(response.body_contains(R"("id":1)"));
+    root.shutdown();
+}
+
+TEST(AppTestClientTest, ReportsNestedJsonBindingErrorsAsBadRequest) {
+    novaboot::di::RootContainer root;
+    novaboot::annotations::register_beans<HarnessController>(root);
+    root.build();
+    novaboot::testing::AppTestClient client(root);
+
+    const auto response = client.post(
+        "/harness/items",
+        R"({"title":"created","tags":["valid",7]})");
+
+    EXPECT_EQ(response.status, 400);
+    EXPECT_TRUE(response.body_contains("Invalid JSON request body"));
+    EXPECT_TRUE(response.body_contains("$.tags[1]: expected string"));
     root.shutdown();
 }

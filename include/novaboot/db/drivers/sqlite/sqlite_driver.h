@@ -4,6 +4,7 @@
 #include <mutex>
 #include <queue>
 #include <condition_variable>
+#include <chrono>
 #include <memory>
 #include <string>
 #include <vector>
@@ -44,6 +45,9 @@ public:
     ~SqliteConnection() override;
 
     std::int64_t execute(std::string_view sql, const std::vector<Parameter>& params = {}) override;
+    std::vector<std::int64_t> execute_batch(
+        std::string_view sql,
+        const std::vector<std::vector<Parameter>>& parameter_sets) override;
     std::unique_ptr<ResultSet> query(std::string_view sql, const std::vector<Parameter>& params = {}) override;
     
     std::int64_t last_insert_id() override;
@@ -55,18 +59,26 @@ public:
 
 class SqliteDataSource : public DataSource {
 private:
+    struct PoolState {
+        std::queue<sqlite3*> connections;
+        std::mutex mutex;
+        std::condition_variable cv;
+        bool closed = false;
+    };
+
     std::string db_path_;
     int pool_size_ = 1;
-    std::queue<sqlite3*> connections_;
-    std::mutex mutex_;
-    std::condition_variable cv_;
-    bool closed_ = false;
+    std::chrono::milliseconds acquisition_timeout_{30000};
+    std::chrono::milliseconds leak_warning_threshold_{60000};
+    std::shared_ptr<PoolState> pool_ = std::make_shared<PoolState>();
     std::shared_ptr<SqlDialect> dialect_ = std::make_shared<SqliteDialect>();
 
     sqlite3* create_connection();
 
 public:
-    explicit SqliteDataSource(std::string db_path, int pool_size = 4);
+    explicit SqliteDataSource(std::string db_path, int pool_size = 4,
+                              std::chrono::milliseconds acquisition_timeout = std::chrono::seconds{30},
+                              std::chrono::milliseconds leak_warning_threshold = std::chrono::seconds{60});
     ~SqliteDataSource() override;
 
     std::shared_ptr<Connection> get_connection() override;

@@ -123,7 +123,7 @@ public:
         : id_(next_id_.fetch_add(1, std::memory_order_relaxed)),
           limits_(limits),
           wakeup_(std::move(wakeup)) {}
-
+ 
     [[nodiscard]] SessionHandle::Id id() const noexcept { return id_; }
 
     [[nodiscard]] bool active() const noexcept {
@@ -309,6 +309,16 @@ std::size_t SessionRegistry::broadcast_binary(std::span<const std::uint8_t> byte
     return delivered;
 }
 
+std::size_t SessionRegistry::close_all(std::uint16_t code, std::string_view reason) {
+    std::lock_guard lock(mutex_);
+    std::size_t closed = 0;
+    for (auto it = sessions_.begin(); it != sessions_.end();) {
+        if (!it->second.active()) it = sessions_.erase(it);
+        else { closed += it->second.close(code, reason) ? 1U : 0U; ++it; }
+    }
+    return closed;
+}
+
 bool Session::send_frame(Opcode opcode, std::span<const std::uint8_t> payload,
                          bool force) {
     const auto size = payload.size();
@@ -387,6 +397,39 @@ bool is_upgrade_attempt(const http3::Request& request) {
     return upgrade && has_token(*upgrade, "websocket");
 }
 
+std::function<HandshakeDecision(const http3::Request&)>
+origin_authorizer(std::vector<std::string> allowed_origins, bool allow_missing_origin) {
+    return [origins = std::move(allowed_origins), allow_missing_origin](const http3::Request& request) {
+        const auto origin = request.header("origin");
+        if (!origin) {
+            return allow_missing_origin ? HandshakeDecision::allow()
+                                        : HandshakeDecision::reject(403, "Missing WebSocket Origin");
+        }
+        if (std::ranges::find(origins, *origin) != origins.end()) return HandshakeDecision::allow();
+        return HandshakeDecision::reject(403, "WebSocket Origin is not allowed");
+    };
+}
+
+std::optional<std::string>
+select_subprotocol(const http3::Request& request,
+                   const std::vector<std::string>& supported) {
+    const auto header = request.header("sec-websocket-protocol");
+    if (!header) return std::nullopt;
+    for (const auto& preferred : supported) {
+        auto remaining = *header;
+        while (!remaining.empty()) {
+            const auto comma = remaining.find(',');
+            auto token = remaining.substr(0, comma);
+            while (!token.empty() && (token.front() == ' ' || token.front() == '\t')) token.remove_prefix(1);
+            while (!token.empty() && (token.back() == ' ' || token.back() == '\t')) token.remove_suffix(1);
+            if (token == preferred) return preferred;
+            if (comma == std::string_view::npos) break;
+            remaining.remove_prefix(comma + 1);
+        }
+    }
+    return std::nullopt;
+}
+
 std::expected<std::string, ProtocolError>
 validate_upgrade_request(const http3::Request& request) {
     if (request.method() != "GET") {
@@ -436,10 +479,20 @@ Connection::Connection(Handler handler, std::string principal, Wakeup wakeup,
       shared_(std::make_shared<detail::SharedSession>(handler_.limits, std::move(wakeup))),
       session_(handler_.limits, std::move(principal), shared_, std::move(transport_backpressure)),
       limits_(handler_.limits) {
+    if (handler_.meters) {
+        handler_.meters->up_down_counter_add("websocket.server.active_connections", 1.0);
+        handler_.meters->counter_add("websocket.server.connections.opened", 1.0);
+        metrics_active_ = true;
+    }
+    if (handler_.registry) handler_.registry->add(session_.handle());
     if (handler_.on_open) handler_.on_open(session_);
 }
 
 Connection::~Connection() {
+    if (handler_.registry && shared_) handler_.registry->remove(session_.handle().id());
+    if (metrics_active_ && handler_.meters) {
+        handler_.meters->up_down_counter_add("websocket.server.active_connections", -1.0);
+    }
     if (shared_) shared_->deactivate();
 }
 
@@ -453,7 +506,8 @@ Connection::Connection(Connection&& other) noexcept
       fragmented_opcode_(other.fragmented_opcode_),
       fragmented_(other.fragmented_),
       closed_(other.closed_),
-      close_notified_(other.close_notified_) {}
+      close_notified_(other.close_notified_),
+      metrics_active_(std::exchange(other.metrics_active_, false)) {}
 
 Connection& Connection::operator=(Connection&& other) noexcept {
     if (this == &other) return *this;
@@ -468,6 +522,7 @@ Connection& Connection::operator=(Connection&& other) noexcept {
     fragmented_ = other.fragmented_;
     closed_ = other.closed_;
     close_notified_ = other.close_notified_;
+    metrics_active_ = std::exchange(other.metrics_active_, false);
     return *this;
 }
 
@@ -593,6 +648,10 @@ std::expected<void, ProtocolError> Connection::process_frame(
             protocol_close(1007, "Invalid UTF-8 text message");
             return std::unexpected(ProtocolError{1007, "Invalid UTF-8 text message"});
         }
+        if (handler_.meters) {
+            handler_.meters->counter_add("websocket.server.messages.received", 1.0);
+            handler_.meters->histogram_record("websocket.server.message.size", static_cast<double>(fragmented_payload_.size()), "By");
+        }
         if (handler_.on_message) handler_.on_message(session_, Message{fragmented_opcode_, std::move(fragmented_payload_)});
         fragmented_payload_.clear();
         fragmented_ = false;
@@ -613,6 +672,10 @@ std::expected<void, ProtocolError> Connection::process_frame(
     if (opcode == Opcode::Text && !valid_utf8(payload)) {
         protocol_close(1007, "Invalid UTF-8 text message");
         return std::unexpected(ProtocolError{1007, "Invalid UTF-8 text message"});
+    }
+    if (handler_.meters) {
+        handler_.meters->counter_add("websocket.server.messages.received", 1.0);
+        handler_.meters->histogram_record("websocket.server.message.size", static_cast<double>(payload.size()), "By");
     }
     if (handler_.on_message) handler_.on_message(session_, Message{opcode, {payload.begin(), payload.end()}});
     return {};

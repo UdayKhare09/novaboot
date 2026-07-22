@@ -108,15 +108,19 @@ bool Address::is_v6() const noexcept {
 }
 
 std::string Address::to_string() const {
-    char buf[INET6_ADDRSTRLEN] = {};
+    const auto ip = ip_string();
+    return is_v4() ? std::format("{}:{}", ip, port())
+                   : std::format("[{}]:{}", ip, port());
+}
 
+std::string Address::ip_string() const {
+    char buf[INET6_ADDRSTRLEN] = {};
     if (is_v4()) {
         ::inet_ntop(AF_INET, &storage_.v4_.sin_addr, buf, sizeof(buf));
-        return std::format("{}:{}", buf, port());
-    } else {
+    } else if (is_v6()) {
         ::inet_ntop(AF_INET6, &storage_.v6_.sin6_addr, buf, sizeof(buf));
-        return std::format("[{}]:{}", buf, port());
     }
+    return buf;
 }
 
 bool Address::operator==(const Address& other) const noexcept {

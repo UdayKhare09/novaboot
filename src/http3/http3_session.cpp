@@ -9,6 +9,12 @@
 namespace novaboot::http3 {
 
 Http3Session::~Http3Session() {
+    for (auto& [_, stream] : streams_) {
+        if (stream->sse_channel()) {
+            stream->sse_channel()->set_wakeup({});
+            stream->sse_channel()->close();
+        }
+    }
     if (conn_) {
         nghttp3_conn_del(conn_);
     }
@@ -16,11 +22,13 @@ Http3Session::~Http3Session() {
 
 std::unique_ptr<Http3Session> Http3Session::create(
     ngtcp2_conn* quic_conn,
-    RequestHandler handler) {
+    RequestHandler handler,
+    SseWakeup sse_wakeup) {
 
     auto session = std::unique_ptr<Http3Session>(new Http3Session());
     session->quic_conn_ = quic_conn;
     session->handler_   = std::move(handler);
+    session->sse_wakeup_ = std::move(sse_wakeup);
 
     // Setup nghttp3 callbacks
     nghttp3_callbacks callbacks{};
@@ -160,10 +168,25 @@ int Http3Session::on_stream_close(int64_t stream_id,
         return -1;
     }
 
-    // Clean up the stream
-    streams_.erase(stream_id);
+    // Clean up the stream and invalidate any producer retained by application code.
+    if (const auto it = streams_.find(stream_id); it != streams_.end()) {
+        if (it->second->sse_channel()) {
+            it->second->sse_channel()->set_wakeup({});
+            it->second->sse_channel()->close();
+        }
+        streams_.erase(it);
+    }
     stream_read_offsets_.erase(stream_id);
     return 0;
+}
+
+void Http3Session::resume_sse_stream(int64_t stream_id) {
+    const auto it = streams_.find(stream_id);
+    if (it == streams_.end() || !it->second->sse_channel()) return;
+    const auto rv = nghttp3_conn_resume_stream(conn_, stream_id);
+    if (rv != 0 && rv != NGHTTP3_ERR_STREAM_NOT_FOUND) {
+        spdlog::debug("nghttp3_conn_resume_stream error: {}", nghttp3_strerror(rv));
+    }
 }
 
 int Http3Session::on_acked_stream_data(int64_t stream_id,
@@ -211,9 +234,10 @@ int Http3Session::submit_response(Http3Stream& stream) {
     }
 
     auto& res = stream.response();
+    const auto& sse_channel = res.event_stream();
 
     // Ensure content-length is set
-    if (!res.headers().has("content-length") && res.body_size() > 0) {
+    if (!sse_channel && !res.headers().has("content-length") && res.body_size() > 0) {
         res.headers().set("content-length", std::to_string(res.body_size()));
     }
 
@@ -249,7 +273,7 @@ int Http3Session::submit_response(Http3Stream& stream) {
     int rv = nghttp3_conn_submit_response(
         conn_, stream.stream_id(),
         nva.data(), nva.size(),
-        res.body_size() > 0 ? &dr : nullptr);
+        (res.body_size() > 0 || sse_channel) ? &dr : nullptr);
 
     if (rv != 0) {
         spdlog::error("nghttp3_conn_submit_response error: {}",
@@ -258,6 +282,12 @@ int Http3Session::submit_response(Http3Stream& stream) {
     }
 
     stream.mark_response_submitted();
+    if (sse_channel) {
+        stream.sse_channel() = sse_channel;
+        stream.sse_channel()->set_wakeup([this, stream_id = stream.stream_id()] {
+            if (sse_wakeup_) sse_wakeup_(stream_id);
+        });
+    }
     spdlog::debug("Response submitted for stream {} (status={})",
                   stream.stream_id(), res.status_code());
 
@@ -279,6 +309,7 @@ Http3Stream& Http3Session::get_or_create_stream(int64_t stream_id) {
     }
 
     auto stream = std::make_unique<Http3Stream>(stream_id);
+    stream->request().set_peer_address(peer_address_);
     auto& ref = *stream;
     streams_[stream_id] = std::move(stream);
 
@@ -402,6 +433,14 @@ int Http3Session::on_acked_stream_data_cb(
     if (!stream) return 0;
 
     stream->response().add_bytes_sent(static_cast<std::size_t>(datalen));
+    if (stream->sse_channel() && stream->sse_inflight_ack_remaining() > 0) {
+        auto& remaining = stream->sse_inflight_ack_remaining();
+        remaining = datalen >= remaining ? 0 : remaining - static_cast<std::size_t>(datalen);
+        if (remaining == 0) {
+            stream->sse_inflight().clear();
+            session->resume_sse_stream(stream_id);
+        }
+    }
     return 0;
 }
 
@@ -435,6 +474,22 @@ nghttp3_ssize Http3Session::on_read_data(
     }
 
     auto& res = stream->response();
+    if (stream->sse_channel()) {
+        if (stream->sse_inflight_ack_remaining() > 0) return NGHTTP3_ERR_WOULDBLOCK;
+        auto event = stream->sse_channel()->take_next();
+        if (!event) {
+            if (stream->sse_channel()->closed()) {
+                *pflags = NGHTTP3_DATA_FLAG_EOF;
+                return 0;
+            }
+            return NGHTTP3_ERR_WOULDBLOCK;
+        }
+        stream->sse_inflight() = std::move(*event);
+        stream->sse_inflight_ack_remaining() = stream->sse_inflight().size();
+        vec[0].base = reinterpret_cast<uint8_t*>(stream->sse_inflight().data());
+        vec[0].len = stream->sse_inflight().size();
+        return 1;
+    }
     auto body = res.body_data();
     auto provided = res.bytes_provided();
     auto remaining = body.size() - provided;

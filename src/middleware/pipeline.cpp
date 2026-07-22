@@ -11,6 +11,8 @@ void Pipeline::execute(http3::Request& req,
                        context::RequestContext& ctx,
                        router::Handler& handler) const {
 
+    context::RequestContext::Scope request_scope(ctx);
+
     if (middlewares_.empty()) {
         // No middleware — call handler directly
         handler(req, res, ctx);

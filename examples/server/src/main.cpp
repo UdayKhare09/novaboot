@@ -73,7 +73,7 @@ int main() {
         });
 
     // (b) Request-ID — stamps every request with a trace ID before the handler.
-    auto request_id = std::make_shared<RequestIdMiddleware>();
+    auto request_id = std::make_shared<::RequestIdMiddleware>();
 
     // (c) Security headers — added even when downstream middleware short-circuits.
     auto security_headers =
@@ -168,4 +168,3 @@ int main() {
     
     return 0;
 }
-

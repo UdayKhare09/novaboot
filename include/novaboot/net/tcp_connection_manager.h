@@ -42,6 +42,7 @@ private:
     http1::Http1Session::UpgradeHandler upgrade_handler_;
     http2::Http2Session::WebSocketConnectHandler http2_websocket_handler_;
     websocket::Wakeup websocket_wakeup_;
+    std::string peer_address_;
     std::variant<std::monostate, http1::Http1Session, http2::Http2Session,
                  websocket::Connection> session_;
 };

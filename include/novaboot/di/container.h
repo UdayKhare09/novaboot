@@ -18,6 +18,7 @@
 #include "novaboot/di/lifecycle.h"
 #include "novaboot/di/scope.h"
 #include "novaboot/config/app_config.h"
+#include "novaboot/observability/observation.h"
 #ifdef __cpp_impl_reflection
 #include <meta>
 #endif
@@ -273,6 +274,12 @@ public:
     RootContainer() = default;
     ~RootContainer() override;
 
+    /// Attach an optional registry before build() to record DI startup metrics.
+    RootContainer& observe(std::shared_ptr<observability::MeterRegistry> meters) {
+        meters_ = std::move(meters);
+        return *this;
+    }
+
     void add_route_registrar(ContextualRouteRegistrar registrar) {
         route_registrars_.push_back(std::move(registrar));
     }
@@ -516,6 +523,7 @@ private:
     std::vector<std::pair<void*, std::function<void(void*)>>> owned_instances_;
 
     std::vector<ContextualRouteRegistrar> route_registrars_;
+    std::shared_ptr<observability::MeterRegistry> meters_;
 };
 
 template<typename... Args>

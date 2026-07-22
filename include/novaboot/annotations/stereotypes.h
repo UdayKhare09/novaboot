@@ -78,6 +78,53 @@ struct Autowired {
     consteval Autowired() = default;
 };
 
+/// Controls whether every declared role/scope is required or any one is
+/// sufficient. Values in authorization annotations are whitespace-separated.
+enum class AuthorizationMatch {
+    All,
+    Any,
+};
+
+/// Require an authenticated JWT or browser-session principal for a controller
+/// or mapped controller method. Method-level annotations override class-level
+/// declarations; [[= PermitAll() ]] explicitly opens one mapped method.
+struct Authorize {
+    char roles[128] = {};
+    char scopes[128] = {};
+    AuthorizationMatch role_match = AuthorizationMatch::All;
+    AuthorizationMatch scope_match = AuthorizationMatch::All;
+
+    consteval Authorize() = default;
+    consteval explicit Authorize(const char* required_roles,
+                                 AuthorizationMatch match = AuthorizationMatch::All)
+        : role_match(match) {
+        copy(roles, required_roles);
+    }
+    consteval Authorize(const char* required_roles, const char* required_scopes,
+                        AuthorizationMatch roles_mode = AuthorizationMatch::All,
+                        AuthorizationMatch scopes_mode = AuthorizationMatch::All)
+        : role_match(roles_mode), scope_match(scopes_mode) {
+        copy(roles, required_roles);
+        copy(scopes, required_scopes);
+    }
+
+private:
+    static consteval void copy(char (&destination)[128], const char* source) {
+        int index = 0;
+        while (source[index] && index < 127) {
+            destination[index] = source[index];
+            ++index;
+        }
+        destination[index] = '\0';
+    }
+};
+
+/// Explicitly makes one controller or mapped method public. It is intended for
+/// public login/bootstrap endpoints inside an otherwise protected controller.
+struct PermitAll {
+    consteval PermitAll() = default;
+};
+
 enum class TransactionPropagation {
     Required,
     RequiresNew,

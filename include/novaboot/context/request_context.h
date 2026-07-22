@@ -23,6 +23,23 @@ class RequestContext {
 public:
     RequestContext() = default;
 
+    /// Makes a request context available to scoped infrastructure such as
+    /// method-security proxies on the current request-owning thread.
+    class Scope {
+    public:
+        explicit Scope(RequestContext& context) noexcept
+            : previous_(current_) { current_ = &context; }
+        ~Scope() { current_ = previous_; }
+        Scope(const Scope&) = delete;
+        Scope& operator=(const Scope&) = delete;
+    private:
+        RequestContext* previous_ = nullptr;
+    };
+
+    /// Returns the context active on this thread, if a framework request is
+    /// currently being processed. Background work has no implicit identity.
+    [[nodiscard]] static RequestContext* current() noexcept { return current_; }
+
     // ── DI container binding ───────────────────────────────────────────────────
 
     /// Bind a DI RequestContainer to this context.
@@ -97,6 +114,7 @@ private:
     std::unordered_map<std::string, std::string>  string_values_;
 
     di::RequestContainer* di_container_ = nullptr;
+    inline static thread_local RequestContext* current_ = nullptr;
 };
 
 } // namespace novaboot::context

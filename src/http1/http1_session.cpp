@@ -1,5 +1,6 @@
 #include "novaboot/http1/http1_session.h"
 #include <sstream>
+#include <format>
 #include <algorithm>
 #include <utility>
 #include <spdlog/spdlog.h>
@@ -36,11 +37,15 @@ std::string get_status_text(int code) {
     }
 }
 
-std::vector<uint8_t> serialize_upgrade_response(std::string_view accept_key) {
+std::vector<uint8_t> serialize_upgrade_response(std::string_view accept_key,
+                                                std::string_view subprotocol) {
     const std::string response = "HTTP/1.1 101 Switching Protocols\r\n"
                                  "Upgrade: websocket\r\n"
                                  "Connection: Upgrade\r\n"
-                                 "Sec-WebSocket-Accept: " + std::string(accept_key) + "\r\n\r\n";
+                                 "Sec-WebSocket-Accept: " + std::string(accept_key) + "\r\n" +
+                                 (subprotocol.empty() ? "" :
+                                  "Sec-WebSocket-Protocol: " + std::string(subprotocol) + "\r\n") +
+                                 "\r\n";
     return {response.begin(), response.end()};
 }
 
@@ -53,6 +58,16 @@ std::vector<uint8_t> serialize_rejection_response(int status, std::string_view b
              << body;
     const auto serialized = response.str();
     return {serialized.begin(), serialized.end()};
+}
+
+void append_chunk(std::vector<uint8_t>& output, std::string_view body) {
+    const auto length = std::format("{:x}", body.size());
+    output.insert(output.end(), length.begin(), length.end());
+    output.push_back('\r');
+    output.push_back('\n');
+    output.insert(output.end(), body.begin(), body.end());
+    output.push_back('\r');
+    output.push_back('\n');
 }
 
 // Attempts to read a line up to \r\n.
@@ -73,11 +88,21 @@ std::optional<std::string_view> get_line(const std::vector<uint8_t>& buffer, std
 void Http1Session::reset() {
     state_ = ParseState::RequestLine;
     current_request_ = http3::Request();
+    current_request_.set_peer_address(peer_address_);
     content_length_ = 0;
 }
 
 std::optional<Http1Session::AcceptedUpgrade> Http1Session::take_upgrade_handler() {
     return std::exchange(upgraded_handler_, std::nullopt);
+}
+
+Http1Session::~Http1Session() {
+    if (sse_channel_) {
+        // A publisher may outlive the TCP client. Detach its owner-loop wakeup
+        // before closing the channel so it cannot post into a destroyed manager.
+        sse_channel_->set_wakeup({});
+        sse_channel_->close();
+    }
 }
 
 std::vector<uint8_t> Http1Session::take_remaining_data() {
@@ -98,6 +123,9 @@ std::expected<std::vector<uint8_t>, int> Http1Session::feed_data(
     const std::vector<uint8_t>& decrypted_data,
     std::function<std::vector<uint8_t>(const std::vector<uint8_t>&)> encrypt_callback) {
 
+    if (sse_active_) {
+        return drain_sse_outbound(std::move(encrypt_callback));
+    }
     buffer_.insert(buffer_.end(), decrypted_data.begin(), decrypted_data.end());
     std::vector<uint8_t> pending_responses;
 
@@ -167,12 +195,14 @@ std::expected<std::vector<uint8_t>, int> Http1Session::feed_data(
                                 reset();
                                 break;
                             }
-                            const auto raw = serialize_upgrade_response(*accept_key);
+                            const auto raw = serialize_upgrade_response(*accept_key,
+                                                                        upgrade_result.subprotocol);
                             const auto encrypted = encrypt_callback(raw);
                             pending_responses.insert(pending_responses.end(), encrypted.begin(), encrypted.end());
                             upgraded_handler_ = AcceptedUpgrade{
                                 .handler = std::move(*upgrade_result.handler),
                                 .principal = std::move(upgrade_result.principal),
+                                .subprotocol = std::move(upgrade_result.subprotocol),
                             };
                             upgraded_ = true;
                             keep_alive_ = true;
@@ -241,6 +271,9 @@ std::expected<std::vector<uint8_t>, int> Http1Session::feed_data(
             // Execute the handler
             handler_(current_request_, current_response);
 
+            const auto& sse_channel = current_response.event_stream();
+            const bool is_sse = static_cast<bool>(sse_channel);
+
             // Serialize response to HTTP/1.1 format
             std::ostringstream oss;
             oss << "HTTP/1.1 " << current_response.status_code() << " " << get_status_text(current_response.status_code()) << "\r\n";
@@ -256,18 +289,42 @@ std::expected<std::vector<uint8_t>, int> Http1Session::feed_data(
                 // Skip duplicating Connection or Alt-Svc
                 std::string entry_lower = entry.name;
                 std::transform(entry_lower.begin(), entry_lower.end(), entry_lower.begin(), ::tolower);
-                if (entry_lower != "connection" && entry_lower != "alt-svc" && entry_lower != "content-length") {
+                if (entry_lower != "connection" && entry_lower != "alt-svc" &&
+                    (!is_sse || (entry_lower != "content-length" &&
+                                 entry_lower != "transfer-encoding"))) {
                     oss << entry.name << ": " << entry.value << "\r\n";
                 }
             }
 
-            oss << "Content-Length: " << current_response.body_size() << "\r\n\r\n";
-            oss << current_response.body_str();
+            if (is_sse) {
+                oss << "Transfer-Encoding: chunked\r\n";
+            } else if (!current_response.headers().has("content-length")) {
+                oss << "Content-Length: " << current_response.body_size() << "\r\n";
+            }
+            oss << "\r\n";
+            if (!is_sse) {
+                oss << current_response.body_str();
+            }
 
             std::string serialized = oss.str();
             std::vector<uint8_t> raw_resp(serialized.begin(), serialized.end());
             std::vector<uint8_t> encrypted = encrypt_callback(raw_resp);
             pending_responses.insert(pending_responses.end(), encrypted.begin(), encrypted.end());
+
+            if (is_sse) {
+                sse_channel_ = sse_channel;
+                sse_active_ = true;
+                sse_terminal_sent_ = false;
+                sse_channel_->set_wakeup(sse_wakeup_);
+                auto pending_events = drain_sse_outbound(encrypt_callback);
+                if (!pending_events) return std::unexpected(pending_events.error());
+                pending_responses.insert(pending_responses.end(),
+                                         pending_events->begin(), pending_events->end());
+                buffer_.clear();
+                parse_offset_ = 0;
+                reset();
+                return pending_responses;
+            }
 
             // Prepare for next request in buffer (if keepalive pipelining)
             reset();
@@ -281,6 +338,27 @@ std::expected<std::vector<uint8_t>, int> Http1Session::feed_data(
     }
 
     return pending_responses;
+}
+
+std::expected<std::vector<uint8_t>, int> Http1Session::drain_sse_outbound(
+    std::function<std::vector<uint8_t>(const std::vector<uint8_t>&)> encrypt_callback) {
+    if (!sse_active_ || !sse_channel_) return std::vector<uint8_t>{};
+
+    std::vector<uint8_t> raw;
+    while (auto event = sse_channel_->take_next()) {
+        append_chunk(raw, *event);
+    }
+    if (sse_channel_->closed() && !sse_terminal_sent_) {
+        static constexpr std::string_view terminal = "0\r\n\r\n";
+        raw.insert(raw.end(), terminal.begin(), terminal.end());
+        sse_terminal_sent_ = true;
+        sse_active_ = false;
+        keep_alive_ = false;
+        sse_channel_->set_wakeup({});
+        sse_channel_.reset();
+    }
+    if (raw.empty()) return raw;
+    return encrypt_callback(raw);
 }
 
 } // namespace novaboot::http1

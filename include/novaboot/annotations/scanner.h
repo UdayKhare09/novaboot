@@ -4,6 +4,7 @@
 #include "novaboot/router/router.h"
 #include "novaboot/annotations/annotations.h"
 #include "novaboot/db/transaction.h"
+#include "novaboot/middleware/declarative_authorization.h"
 #include "novaboot/messaging/stomp.h"
 
 #include <meta>
@@ -227,6 +228,31 @@ void register_transactional_proxy_if_needed(di::RootContainer& container,
     }
 }
 
+template<typename T>
+void register_authorization_proxy_if_needed(di::RootContainer& container,
+                                            di::Scope scope) {
+    if constexpr (middleware::declarative_detail::has_authorized_method<T>()) {
+        using Proxy = middleware::AuthorizationProxy<T>;
+        if constexpr (has_transactional_method<T>()) {
+            container.template register_bean<Proxy>(
+                [](di::ContainerBase& c) -> Proxy* {
+                    return new Proxy(c.template resolve<T>(),
+                                     c.template resolve<novaboot::db::TransactionManager>());
+                },
+                scope, "", false, true);
+            container.add_dependency(std::type_index(typeid(Proxy)),
+                                     std::type_index(typeid(novaboot::db::TransactionManager)));
+        } else {
+            container.template register_bean<Proxy>(
+                [](di::ContainerBase& c) -> Proxy* {
+                    return new Proxy(c.template resolve<T>());
+                },
+                scope, "", false, true);
+        }
+        container.add_dependency(std::type_index(typeid(Proxy)), std::type_index(typeid(T)));
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Scanner APIs
 // ─────────────────────────────────────────────────────────────────────────────
@@ -275,6 +301,7 @@ void register_beans(di::RootContainer& container) {
             auto builder = container.template autowire<Type>(scope);
             wire_lifecycle<Type>(builder);
             register_transactional_proxy_if_needed<Type>(container, scope);
+            register_authorization_proxy_if_needed<Type>(container, scope);
         } else if constexpr (has_annotation<Repository>(^^Type)) {
             constexpr auto scope = get_annotation<Repository>(^^Type).scope;
             auto builder = container.template autowire<Type>(scope);

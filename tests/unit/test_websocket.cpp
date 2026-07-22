@@ -43,6 +43,7 @@ novaboot::http3::Request valid_upgrade_request() {
 struct H2TestPeer {
     nghttp2_session* session = nullptr;
     std::string status;
+    std::string subprotocol;
     std::vector<std::uint8_t> received_data;
     bool server_advertised_extended_connect = false;
 
@@ -121,6 +122,10 @@ struct H2TestPeer {
                 reinterpret_cast<const char*>(name), namelen) == ":status") {
             peer->status.assign(reinterpret_cast<const char*>(value), valuelen);
         }
+        if (frame->hd.stream_id == 1 && std::string_view(
+                reinterpret_cast<const char*>(name), namelen) == "sec-websocket-protocol") {
+            peer->subprotocol.assign(reinterpret_cast<const char*>(value), valuelen);
+        }
         return 0;
     }
 
@@ -181,6 +186,26 @@ TEST(WebSocketHandshakeTest, RejectsMissingConnectionUpgradeToken) {
 
     EXPECT_FALSE(result.has_value());
     EXPECT_EQ(result.error().close_code, 1002);
+}
+
+TEST(WebSocketHandshakeTest, OriginAuthorizerUsesExactAllowedOrigins) {
+    auto authorize = novaboot::websocket::origin_authorizer({"https://app.example.test"});
+    novaboot::http3::Request request;
+    request.headers().set("origin", "https://app.example.test");
+    EXPECT_TRUE(authorize(request).accepted);
+    request.headers().set("origin", "https://evil.example.test");
+    EXPECT_FALSE(authorize(request).accepted);
+    request.headers().remove("origin");
+    EXPECT_FALSE(authorize(request).accepted);
+}
+
+TEST(WebSocketHandshakeTest, SelectsFirstServerPreferredOfferedSubprotocol) {
+    auto request = valid_upgrade_request();
+    request.headers().set("sec-websocket-protocol", "chat.v1, chat.v2");
+
+    EXPECT_EQ(novaboot::websocket::select_subprotocol(request, {"chat.v2", "chat.v1"}),
+              std::optional<std::string>{"chat.v2"});
+    EXPECT_FALSE(novaboot::websocket::select_subprotocol(request, {"other"}).has_value());
 }
 
 TEST(WebSocketConnectionTest, DeliversMaskedTextFramesAndLetsHandlerReply) {
@@ -352,7 +377,7 @@ TEST(Http1WebSocketUpgradeTest, SwitchesConnectionModeAndPreservesTheHandler) {
                     .on_close = {},
                     .authorize = {},
                 },
-                "user-42");
+                "user-42", "chat.v2");
         });
 
     const std::string request =
@@ -371,9 +396,11 @@ TEST(Http1WebSocketUpgradeTest, SwitchesConnectionModeAndPreservesTheHandler) {
     const std::string response(result->begin(), result->end());
     EXPECT_NE(response.find("101 Switching Protocols"), std::string::npos);
     EXPECT_NE(response.find("Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo="), std::string::npos);
+    EXPECT_NE(response.find("Sec-WebSocket-Protocol: chat.v2"), std::string::npos);
 
     auto handler = session.take_upgrade_handler();
     ASSERT_TRUE(handler.has_value());
+    EXPECT_EQ(handler->subprotocol, "chat.v2");
     novaboot::websocket::Connection connection(
         std::move(handler->handler), std::move(handler->principal));
     EXPECT_TRUE(opened);
@@ -402,7 +429,7 @@ TEST(Http2WebSocketConnectTest, RunsTheSameHandlerOverRfc8441ExtendedConnect) {
                     .on_close = {},
                     .authorize = {},
                 },
-                "h2-user");
+                "h2-user", "chat.v2");
         });
     const auto passthrough = [](const std::vector<std::uint8_t>& bytes) { return bytes; };
     H2TestPeer peer;
@@ -420,6 +447,7 @@ TEST(Http2WebSocketConnectTest, RunsTheSameHandlerOverRfc8441ExtendedConnect) {
     ASSERT_TRUE(server_reply.has_value());
     peer.receive(*server_reply);
     EXPECT_EQ(peer.status, "200");
+    EXPECT_EQ(peer.subprotocol, "chat.v2");
     EXPECT_TRUE(opened);
     ASSERT_EQ(peer.received_data.size(), 7U);
     EXPECT_EQ(peer.received_data[0], 0x81U);

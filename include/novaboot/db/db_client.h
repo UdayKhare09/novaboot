@@ -127,6 +127,23 @@ public:
     /// Execute write queries (INSERT, UPDATE, DELETE, CREATE TABLE) returning affected rows count
     virtual std::int64_t execute(std::string_view sql, const std::vector<Parameter>& params = {}) = 0;
 
+    /// Execute the same statement for several parameter sets.
+    ///
+    /// The default preserves the semantics of calling execute() for each row.
+    /// Drivers may override it to reuse a prepared statement or use their native
+    /// batch protocol.  It does not create a transaction: callers that require
+    /// all-or-nothing behaviour must supply their own transaction boundary.
+    virtual std::vector<std::int64_t> execute_batch(
+        std::string_view sql,
+        const std::vector<std::vector<Parameter>>& parameter_sets) {
+        std::vector<std::int64_t> affected_rows;
+        affected_rows.reserve(parameter_sets.size());
+        for (const auto& parameters : parameter_sets) {
+            affected_rows.push_back(execute(sql, parameters));
+        }
+        return affected_rows;
+    }
+
     /// Execute read queries (SELECT) returning a ResultSet
     virtual std::unique_ptr<ResultSet> query(std::string_view sql, const std::vector<Parameter>& params = {}) = 0;
 
@@ -137,6 +154,13 @@ public:
     virtual void begin_transaction() = 0;
     virtual void commit() = 0;
     virtual void rollback() = 0;
+
+    /// Make driver-buffered work visible to the database.
+    ///
+    /// NovaBoot repositories execute writes eagerly and do not maintain a
+    /// Hibernate-style persistence context, so the base implementation is a
+    /// no-op. A future asynchronous/buffered driver may override this method.
+    virtual void flush() {}
 };
 
 /// Abstract connection pool (DataSource)

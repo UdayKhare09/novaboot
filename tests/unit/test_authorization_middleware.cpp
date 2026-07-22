@@ -9,6 +9,7 @@
 #include "novaboot/middleware/jwt_middleware.h"
 #include "novaboot/middleware/middleware.h"
 #include "novaboot/middleware/pipeline.h"
+#include "novaboot/middleware/session_middleware.h"
 #include "novaboot/router/route.h"
 
 using namespace novaboot;
@@ -176,6 +177,33 @@ TEST(AuthorizationMiddlewareTest, RequiredRoleFromArrayClaimAllowsRequest) {
     EXPECT_EQ(res.status_code(), 200);
 }
 
+TEST(AuthorizationMiddlewareTest, SessionRolesAndScopesUseTheSamePolicies) {
+    AuthorizationMiddleware mw({
+        .policies = {{
+            .path = "/admin/*",
+            .required_scopes = {"reports:read"},
+            .required_roles = {"admin"},
+        }},
+    });
+
+    http3::Request req;
+    http3::Response res;
+    context::RequestContext ctx;
+    req.set_method("GET");
+    req.set_path("/admin/reports");
+    ctx.set<SessionPrincipal>({
+        .subject = "admin-1",
+        .roles = {"admin"},
+        .scopes = {"reports:read"},
+    });
+
+    bool called = false;
+    run_one(mw, req, res, ctx, ok_handler(called));
+
+    EXPECT_TRUE(called);
+    EXPECT_EQ(res.status_code(), 200);
+}
+
 TEST(AuthorizationMiddlewareTest, RoleFromSpaceSeparatedStringAllowsRequest) {
     AuthorizationMiddleware mw({
         .policies = {{
@@ -303,4 +331,68 @@ TEST(AuthorizationMiddlewareTest, ExplicitAllowPolicyBypassesAuthentication) {
 
     EXPECT_TRUE(called);
     EXPECT_EQ(res.status_code(), 200);
+}
+
+TEST(AuthorizationMiddlewareTest, CustomPolicyCanInspectAuthenticatedContext) {
+    AuthorizationMiddleware mw({
+        .policies = {{
+            .path = "/tenants/*",
+            .custom_policies = {
+                [](const http3::Request& request, const context::RequestContext& context) {
+                    const auto* jwt = context.get<JwtPrincipal>();
+                    return jwt != nullptr && request.header("x-tenant").value_or("") == jwt->subject;
+                },
+            },
+        }},
+    });
+
+    http3::Request req;
+    http3::Response res;
+    context::RequestContext ctx;
+    req.set_method("GET");
+    req.set_path("/tenants/user-123/articles");
+    req.headers().set("x-tenant", "other-tenant");
+    ctx.set<JwtPrincipal>(principal());
+
+    bool called = false;
+    run_one(mw, req, res, ctx, ok_handler(called));
+
+    EXPECT_FALSE(called);
+    EXPECT_EQ(res.status_code(), 403);
+
+    req.headers().set("x-tenant", "user-123");
+    res = {};
+    run_one(mw, req, res, ctx, ok_handler(called));
+    EXPECT_TRUE(called);
+    EXPECT_EQ(res.status_code(), 200);
+}
+
+TEST(AuthorizationMiddlewareTest, PublicCustomPolicyStillRuns) {
+    AuthorizationMiddleware mw({
+        .policies = {{
+            .path = "/signup",
+            .require_authenticated = false,
+            .custom_policies = {
+                [](const http3::Request& request, const context::RequestContext&) {
+                    return request.header("x-invite").value_or("") == "accepted";
+                },
+            },
+        }},
+    });
+
+    http3::Request req;
+    http3::Response res;
+    context::RequestContext ctx;
+    req.set_method("POST");
+    req.set_path("/signup");
+    bool called = false;
+
+    run_one(mw, req, res, ctx, ok_handler(called));
+    EXPECT_FALSE(called);
+    EXPECT_EQ(res.status_code(), 403);
+
+    req.headers().set("x-invite", "accepted");
+    res = {};
+    run_one(mw, req, res, ctx, ok_handler(called));
+    EXPECT_TRUE(called);
 }

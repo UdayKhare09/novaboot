@@ -39,6 +39,19 @@ public:
     }
     void set_authority(std::string_view a) { authority_ = std::string(a); }
 
+    /// Direct socket peer IP address, supplied by the server transport. It is
+    /// never populated from client-supplied forwarding headers.
+    [[nodiscard]] std::string_view peer_address() const noexcept { return peer_address_; }
+    void set_peer_address(std::string_view address) {
+        peer_address_ = std::string(address);
+        client_address_ = peer_address_;
+    }
+
+    /// Effective client IP address. It initially equals peer_address(); a
+    /// trusted-proxy middleware may replace it only after CIDR verification.
+    [[nodiscard]] std::string_view client_address() const noexcept { return client_address_; }
+    void set_client_address(std::string_view address) { client_address_ = std::string(address); }
+
     // ─── Headers ─────────────────────────────────────────────────────
     [[nodiscard]] const HeaderMap& headers() const noexcept {
         return headers_;
@@ -94,6 +107,8 @@ private:
     std::string path_;
     std::string scheme_;
     std::string authority_;
+    std::string peer_address_;
+    std::string client_address_;
 
     HeaderMap headers_;
     std::string body_;

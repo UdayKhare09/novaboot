@@ -1,4 +1,5 @@
 #include "novaboot/db/drivers/sqlite/sqlite_driver.h"
+#include <spdlog/spdlog.h>
 #include "novaboot/db/exceptions.h"
 #include <stdexcept>
 #include <format>
@@ -168,6 +169,48 @@ std::int64_t SqliteConnection::execute(std::string_view sql, const std::vector<P
     return sqlite3_changes(db_);
 }
 
+std::vector<std::int64_t> SqliteConnection::execute_batch(
+    std::string_view sql,
+    const std::vector<std::vector<Parameter>>& parameter_sets) {
+    std::vector<std::int64_t> affected_rows;
+    affected_rows.reserve(parameter_sets.size());
+    if (parameter_sets.empty()) return affected_rows;
+
+    sqlite3_stmt* statement = nullptr;
+    int rc = sqlite3_prepare_v2(db_, sql.data(), -1, &statement, nullptr);
+    if (rc != SQLITE_OK) {
+        throw_sqlite_error(sqlite3_extended_errcode(db_),
+                           std::format("{} (Query: {})", sqlite3_errmsg(db_), sql),
+                           "SQL batch prepare failed");
+    }
+
+    for (const auto& parameters : parameter_sets) {
+        log_query(sql, parameters);
+        sqlite3_clear_bindings(statement);
+        bind_params(statement, parameters);
+
+        rc = sqlite3_step(statement);
+        const int extended_code = sqlite3_extended_errcode(db_);
+        const std::string error_message = sqlite3_errmsg(db_);
+        if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
+            sqlite3_finalize(statement);
+            throw_sqlite_error(extended_code, error_message, "SQL batch execute failed");
+        }
+        affected_rows.push_back(sqlite3_changes(db_));
+
+        rc = sqlite3_reset(statement);
+        if (rc != SQLITE_OK) {
+            const int reset_extended_code = sqlite3_extended_errcode(db_);
+            const std::string reset_error_message = sqlite3_errmsg(db_);
+            sqlite3_finalize(statement);
+            throw_sqlite_error(reset_extended_code, reset_error_message, "SQL batch reset failed");
+        }
+    }
+
+    sqlite3_finalize(statement);
+    return affected_rows;
+}
+
 std::unique_ptr<ResultSet> SqliteConnection::query(std::string_view sql, const std::vector<Parameter>& params) {
     log_query(sql, params);
     sqlite3_stmt* stmt = nullptr;
@@ -201,10 +244,18 @@ void SqliteConnection::rollback() {
 
 // ─── SqliteDataSource ────────────────────────────────────────────────────────
 
-SqliteDataSource::SqliteDataSource(std::string db_path, int pool_size)
-    : db_path_(std::move(db_path)), pool_size_(pool_size) {
+SqliteDataSource::SqliteDataSource(std::string db_path, int pool_size,
+                                   std::chrono::milliseconds acquisition_timeout,
+                                   std::chrono::milliseconds leak_warning_threshold)
+    : db_path_(std::move(db_path)), pool_size_(pool_size),
+      acquisition_timeout_(acquisition_timeout),
+      leak_warning_threshold_(leak_warning_threshold) {
+    if (pool_size_ <= 0 || acquisition_timeout_ <= std::chrono::milliseconds::zero() ||
+        leak_warning_threshold_ <= std::chrono::milliseconds::zero()) {
+        throw std::invalid_argument("SQLite pool size and timeouts must be positive");
+    }
     for (int i = 0; i < pool_size_; ++i) {
-        connections_.push(create_connection());
+        pool_->connections.push(create_connection());
     }
 }
 
@@ -229,23 +280,35 @@ sqlite3* SqliteDataSource::create_connection() {
 }
 
 std::shared_ptr<Connection> SqliteDataSource::get_connection() {
-    std::unique_lock<std::mutex> lock(mutex_);
-    cv_.wait(lock, [this]() { return !connections_.empty() || closed_; });
+    const auto pool = pool_;
+    std::unique_lock<std::mutex> lock(pool->mutex);
+    if (!pool->cv.wait_for(lock, acquisition_timeout_,
+                           [&] { return !pool->connections.empty() || pool->closed; })) {
+        throw std::runtime_error("SQLite connection pool acquisition timed out");
+    }
 
-    if (closed_) {
+    if (pool->closed) {
         throw std::runtime_error("DataSource is closed.");
     }
 
-    sqlite3* db = connections_.front();
-    connections_.pop();
+    sqlite3* db = pool->connections.front();
+    pool->connections.pop();
+    const auto leased_at = std::chrono::steady_clock::now();
+    const auto leak_warning_threshold = leak_warning_threshold_;
 
     // Return a connection wrapper that returns the sqlite3 handle to the pool upon destruction
-    auto deleter = [this, db](Connection* conn) {
+    auto deleter = [pool, db, leased_at, leak_warning_threshold](Connection* conn) {
         delete conn;
-        std::lock_guard<std::mutex> return_lock(mutex_);
-        if (!closed_) {
-            connections_.push(db);
-            cv_.notify_one();
+        const auto leased_for = std::chrono::steady_clock::now() - leased_at;
+        if (leased_for >= leak_warning_threshold) {
+            spdlog::warn("SQLite connection lease returned after {}ms (threshold {}ms)",
+                         std::chrono::duration_cast<std::chrono::milliseconds>(leased_for).count(),
+                         leak_warning_threshold.count());
+        }
+        std::lock_guard<std::mutex> return_lock(pool->mutex);
+        if (!pool->closed) {
+            pool->connections.push(db);
+            pool->cv.notify_one();
         } else {
             sqlite3_close(db);
         }
@@ -259,16 +322,17 @@ std::shared_ptr<SqlDialect> SqliteDataSource::dialect() {
 }
 
 void SqliteDataSource::close() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (closed_) return;
-    closed_ = true;
+    const auto pool = pool_;
+    std::lock_guard<std::mutex> lock(pool->mutex);
+    if (pool->closed) return;
+    pool->closed = true;
 
-    while (!connections_.empty()) {
-        sqlite3* db = connections_.front();
-        connections_.pop();
+    while (!pool->connections.empty()) {
+        sqlite3* db = pool->connections.front();
+        pool->connections.pop();
         sqlite3_close(db);
     }
-    cv_.notify_all();
+    pool->cv.notify_all();
 }
 
 } // namespace novaboot::db::sqlite

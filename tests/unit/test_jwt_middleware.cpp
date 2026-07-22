@@ -240,6 +240,54 @@ TEST(JwtMiddlewareTest, ValidHs256TokenStoresPrincipal) {
     EXPECT_EQ(principal.claims.string("role").value_or(""), "admin");
 }
 
+TEST(JwtMiddlewareTest, HttpMiddlewareCanUseAnOptInJwtCookie) {
+    auto cfg = hs_config();
+    cfg.jwt_cookie_name = "nova_access";
+    JwtMiddleware middleware(cfg);
+
+    http3::Request request;
+    request.set_method("GET");
+    request.set_path("/api/users");
+    request.headers().add("cookie", "theme=dark");
+    request.headers().add("cookie", "nova_access=" + token("HS256", valid_payload()));
+    http3::Response response;
+    context::RequestContext context;
+    bool called = false;
+
+    run_one(middleware, request, response, context,
+        [&](http3::Request&, http3::Response& r, context::RequestContext&) {
+            called = true;
+            r.status(200);
+        });
+
+    EXPECT_TRUE(called);
+    ASSERT_NE(context.get<JwtPrincipal>(), nullptr);
+    EXPECT_EQ(context.get<JwtPrincipal>()->subject, "user-123");
+}
+
+TEST(JwtMiddlewareTest, BearerTokenTakesPrecedenceOverJwtCookie) {
+    auto cfg = hs_config();
+    cfg.jwt_cookie_name = "nova_access";
+    JwtMiddleware middleware(cfg);
+
+    http3::Request request;
+    request.set_method("GET");
+    request.set_path("/api/users");
+    request.headers().set("authorization", "Bearer invalid.token.value");
+    request.headers().set("cookie", "nova_access=" + token("HS256", valid_payload()));
+    http3::Response response;
+    context::RequestContext context;
+    bool called = false;
+
+    run_one(middleware, request, response,
+            context, [&](http3::Request&, http3::Response&, context::RequestContext&) {
+                called = true;
+            });
+
+    EXPECT_FALSE(called);
+    EXPECT_EQ(response.status_code(), 401);
+}
+
 TEST(JwtMiddlewareTest, CreatesSelfContainedWebSocketJwtAuthorizer) {
     auto cfg = hs_config();
     JwtMiddleware middleware(cfg);
@@ -268,6 +316,20 @@ TEST(JwtMiddlewareTest, WebSocketAuthorizerCanUseAnOptInCookieToken) {
     http3::Request request;
     request.headers().set("cookie", "theme=dark; nova_access=" +
                                       token("HS256", valid_payload()));
+    const auto allowed = authorize(request);
+
+    EXPECT_TRUE(allowed.accepted);
+    EXPECT_EQ(allowed.principal, "user-123");
+}
+
+TEST(JwtMiddlewareTest, WebSocketAuthorizerUsesHttpJwtCookieWhenNoOverrideExists) {
+    auto cfg = hs_config();
+    cfg.jwt_cookie_name = "nova_access";
+    JwtMiddleware middleware(cfg);
+    const auto authorize = middleware.websocket_authorizer();
+
+    http3::Request request;
+    request.headers().set("cookie", "nova_access=" + token("HS256", valid_payload()));
     const auto allowed = authorize(request);
 
     EXPECT_TRUE(allowed.accepted);
